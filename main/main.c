@@ -1,133 +1,167 @@
-// LilyGO T-Circle-S3: loop Cue's logo animation on the 160x160 GC9D01 round screen.
-// Frames are pre-rendered from Cue's CueLogoAnimation by tools/gen_cue_logo_frames.py.
-// Pins and panel setup match voice-box-agent's board_ui_t_circle.c.
+#include "board_audio.h"
+#include "board_touch.h"
+#include "display.h"
 
-#include "cue_logo_frames.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "esp_lcd_gc9d01.h"
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
+#include <stdint.h>
+
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#define LCD_HOST   SPI2_HOST
-#define LCD_W      160
-#define LCD_H      160
-#define LCD_MOSI   GPIO_NUM_17
-#define LCD_SCLK   GPIO_NUM_15
-#define LCD_DC     GPIO_NUM_16
-#define LCD_CS     GPIO_NUM_13
-#define LCD_BL     GPIO_NUM_18  // active low
+static const char *TAG = "main";
 
-_Static_assert(CUE_LOGO_SIZE == LCD_W && CUE_LOGO_SIZE == LCD_H, "frame size must match panel");
+#define RECORD_SECONDS 3
+#define RECORD_SAMPLES (AUDIO_SAMPLE_RATE_HZ * RECORD_SECONDS)
 
-extern const uint8_t frames_start[] asm("_binary_cue_logo_frames_bin_start");
-extern const uint8_t frames_end[] asm("_binary_cue_logo_frames_bin_end");
-
-static const char *TAG = "cue_logo";
-
-// Two framebuffers: fill one while the other is on the SPI bus.
-static DMA_ATTR uint16_t s_fb[2][LCD_W * LCD_H];
-static SemaphoreHandle_t s_fb_free[2];
-// Buffers on the SPI queue, oldest first; completions arrive in submit order.
-static volatile uint8_t s_inflight[4];
-static volatile uint32_t s_inflight_head, s_inflight_tail;
-static uint16_t s_lut[16];
-
-static bool on_color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *edata, void *ctx)
+static int isqrt_u64(uint64_t x)
 {
-    BaseType_t woken = pdFALSE;
-    if (s_inflight_tail != s_inflight_head) {
-        xSemaphoreGiveFromISR(s_fb_free[s_inflight[s_inflight_tail++ & 3]], &woken);
+    uint64_t op = x;
+    uint64_t res = 0;
+    uint64_t one = 1ULL << 62;
+    while (one > op) {
+        one >>= 2;
     }
-    return woken == pdTRUE;
+    while (one != 0) {
+        if (op >= res + one) {
+            op -= res + one;
+            res = (res >> 1) + one;
+        } else {
+            res >>= 1;
+        }
+        one >>= 2;
+    }
+    return (int)res;
 }
 
-// 4-bit coverage -> RGB565 grey ramp, byte-swapped for the SPI wire.
-static void build_lut(void)
+static void log_pcm(const char *what, const int16_t *pcm, int samples)
 {
-    for (int i = 0; i < 16; ++i) {
-        uint8_t v = (uint8_t)(i * 17);
-        uint16_t c = ((uint16_t)(v & 0xf8) << 8) | ((uint16_t)(v & 0xfc) << 3) | (v >> 3);
-        s_lut[i] = (uint16_t)((c << 8) | (c >> 8));
+    int32_t peak = 0;
+    uint64_t sumsq = 0;
+    for (int i = 0; i < samples; ++i) {
+        int32_t sample = pcm[i];
+        int32_t magnitude = sample < 0 ? -sample : sample;
+        if (magnitude > peak) {
+            peak = magnitude;
+        }
+        sumsq += (uint64_t)(sample * sample);
     }
+    int rms = samples > 0 ? isqrt_u64(sumsq / (uint64_t)samples) : 0;
+    ESP_LOGI(TAG, "%s: %d samples, %d ms, peak %ld, rms %d", what, samples,
+             samples * 1000 / AUDIO_SAMPLE_RATE_HZ, (long)peak, rms);
 }
 
-static void expand(const uint8_t *src, uint16_t *dst)
+static void logo_task(void *arg)
 {
-    for (int i = 0; i < CUE_LOGO_FRAME_BYTES; ++i) {
-        uint8_t b = src[i];
-        dst[2 * i] = s_lut[b >> 4];
-        dst[2 * i + 1] = s_lut[b & 0x0f];
+    (void)arg;
+    display_run_logo();
+}
+
+static void loopback_task(void *arg)
+{
+    int16_t *buf = arg;
+    static int16_t silence[AUDIO_FRAME_SAMPLES];
+    int filled = 0;
+    enum { IDLE, RECORD, HOLD_FULL, PLAY } state = IDLE;
+
+    board_audio_set_speaker_enabled(false);
+    if (board_audio_set_recording(true) == ESP_OK) {
+        int probe = 0;
+        for (int i = 0; i < 10 && probe + AUDIO_FRAME_SAMPLES <= RECORD_SAMPLES; ++i) {
+            int n = board_audio_read_mono(buf + probe, AUDIO_FRAME_SAMPLES);
+            if (n <= 0) {
+                break;
+            }
+            probe += n;
+        }
+        board_audio_set_recording(false);
+        log_pcm("mic floor", buf, probe);
+    } else {
+        ESP_LOGE(TAG, "microphone probe failed");
+    }
+
+    ESP_LOGI(TAG, "hold BOOT to record %d s, release to play", RECORD_SECONDS);
+
+    for (;;) {
+        board_touch_poll();
+        const bool held = board_touch_boot_held();
+
+        if (state == IDLE) {
+            if (!held) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            board_audio_set_speaker_enabled(false);
+            if (board_audio_set_recording(true) != ESP_OK) {
+                ESP_LOGE(TAG, "microphone start failed");
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+            filled = 0;
+            state = RECORD;
+            ESP_LOGI(TAG, "recording");
+            continue;
+        }
+
+        if (state == RECORD) {
+            if (held && filled + AUDIO_FRAME_SAMPLES <= RECORD_SAMPLES) {
+                int n = board_audio_read_mono(buf + filled, AUDIO_FRAME_SAMPLES);
+                if (n <= 0) {
+                    ESP_LOGE(TAG, "microphone read failed");
+                    board_audio_set_recording(false);
+                    filled = 0;
+                    state = IDLE;
+                    continue;
+                }
+                filled += n;
+                continue;
+            }
+            board_audio_set_recording(false);
+            log_pcm("recorded", buf, filled);
+            state = held ? HOLD_FULL : PLAY;
+            continue;
+        }
+
+        if (state == HOLD_FULL) {
+            if (held) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            state = PLAY;
+        }
+
+        if (filled > 0) {
+            ESP_LOGI(TAG, "playing");
+            if (board_audio_play_pcm16_mono(buf, filled) != ESP_OK) {
+                ESP_LOGE(TAG, "playback failed");
+            }
+            board_audio_play_pcm16_mono(silence, AUDIO_FRAME_SAMPLES);
+        }
+        board_audio_set_speaker_enabled(false);
+        state = IDLE;
     }
 }
 
 void app_main(void)
 {
-    ESP_ERROR_CHECK(frames_end - frames_start == CUE_LOGO_FRAMES * CUE_LOGO_FRAME_BYTES ? ESP_OK : ESP_ERR_INVALID_SIZE);
-    build_lut();
-    for (int i = 0; i < 2; ++i) {
-        s_fb_free[i] = xSemaphoreCreateBinary();
-        xSemaphoreGive(s_fb_free[i]);
+    const size_t psram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "PSRAM %u bytes", (unsigned)psram);
+
+    const esp_err_t audio = board_audio_init();
+    if (audio != ESP_OK) {
+        ESP_LOGE(TAG, "audio init failed: %s", esp_err_to_name(audio));
     }
+    board_touch_init();
+    ESP_ERROR_CHECK(display_init());
 
-    gpio_config_t bl = {
-        .pin_bit_mask = 1ULL << LCD_BL,
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    ESP_ERROR_CHECK(gpio_config(&bl));
-    gpio_set_level(LCD_BL, 1);  // off while initialising
-
-    const spi_bus_config_t bus = GC9D01_PANEL_BUS_SPI_CONFIG(LCD_SCLK, LCD_MOSI, sizeof(s_fb[0]));
-    ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO));
-
-    esp_lcd_panel_io_handle_t io = NULL;
-    const esp_lcd_panel_io_spi_config_t io_cfg = GC9D01_PANEL_IO_SPI_CONFIG(LCD_CS, LCD_DC, on_color_done, NULL);
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &io));
-
-    esp_lcd_panel_handle_t panel = NULL;
-    const esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = -1,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
-        .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
-        .bits_per_pixel = 16,
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(io, &panel_cfg, &panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, false));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
-
-    ESP_LOGI(TAG, "%d frames @ %d fps, hold %d", CUE_LOGO_FRAMES, CUE_LOGO_FPS, CUE_LOGO_HOLD_FRAMES);
-
-    const TickType_t period = pdMS_TO_TICKS(1000 / CUE_LOGO_FPS);
-    const int steps = CUE_LOGO_FRAMES - 1 + CUE_LOGO_HOLD_FRAMES;  // last frame == first frame
-    TickType_t wake = xTaskGetTickCount();
-    int buf = 0;
-    bool backlight_on = false;
-
-    for (int cycle = 0;; ++cycle) {
-        int64_t cycle_start = esp_timer_get_time();
-        for (int step = 0; step < steps; ++step) {
-            int frame = step < CUE_LOGO_FRAMES ? step : CUE_LOGO_FRAMES - 1;
-            // The hold only needs one draw; the panel keeps the last image.
-            if (step < CUE_LOGO_FRAMES) {
-                xSemaphoreTake(s_fb_free[buf], portMAX_DELAY);
-                expand(frames_start + (size_t)frame * CUE_LOGO_FRAME_BYTES, s_fb[buf]);
-                s_inflight[s_inflight_head++ & 3] = (uint8_t)buf;
-                ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_W, LCD_H, s_fb[buf]));
-                buf ^= 1;
-                if (!backlight_on) {
-                    gpio_set_level(LCD_BL, 0);
-                    backlight_on = true;
-                }
-            }
-            vTaskDelayUntil(&wake, period);
-        }
-        ESP_LOGI(TAG, "cycle %d: %lld ms", cycle, (esp_timer_get_time() - cycle_start) / 1000);
+    int16_t *record = heap_caps_malloc(RECORD_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!record) {
+        ESP_LOGE(TAG, "record buffer alloc failed");
+    } else if (xTaskCreate(loopback_task, "loopback", 8192, record, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "loopback task create failed");
+    }
+    if (xTaskCreate(logo_task, "logo", 8192, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "logo task create failed");
+        display_run_logo();
     }
 }
