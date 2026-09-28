@@ -1,0 +1,7 @@
+build/
+build-preview/
+build.log
+sdkconfig.old
+managed_components/
+main/secrets.h
+.DS_Store

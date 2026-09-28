@@ -1,0 +1,66 @@
+.cue-logo-animation {
+  --cue-logo-cycle: 3.6s;
+
+  block-size: auto;
+  color: var(--color-text-primary);
+  display: block;
+  max-inline-size: min(80vw, 35rem);
+  overflow: hidden;
+}
+
+.cue-logo-animation__outer,
+.cue-logo-animation__comma,
+.cue-logo-animation__nested-comma-path {
+  fill: currentColor;
+}
+
+.cue-logo-animation__nested-aperture {
+  fill: var(--color-bg-primary);
+}
+
+.cue-logo-animation__scene,
+.cue-logo-animation__nested-comma {
+  transform-box: view-box;
+}
+
+.cue-logo-animation__scene {
+  animation: var(--cue-logo-zoom-animation) var(--cue-logo-cycle) linear infinite;
+  transform: matrix(1, 0, 0, 1, 0, 0);
+  transform-origin: 0 0;
+}
+
+.cue-logo-animation__nested-comma {
+  animation: var(--cue-logo-nested-animation) var(--cue-logo-cycle) linear infinite;
+  transform: scale(0);
+  transform-origin: 606.44863px 595.56644px;
+}
+
+.cue-logo-animation__scene,
+.cue-logo-animation__nested-comma {
+  animation-delay: var(--cue-logo-delay, 0s);
+}
+
+.cue-logo-animation[data-paused="true"] .cue-logo-animation__scene,
+.cue-logo-animation[data-paused="true"] .cue-logo-animation__nested-comma {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cue-logo-animation__scene,
+  .cue-logo-animation__nested-comma {
+    animation: none;
+  }
+
+  .cue-logo-animation__nested-comma {
+    transform: scale(0);
+  }
+}
+
+:root[data-cue-reduced-motion="true"] .cue-logo-animation__scene,
+:root[data-cue-reduced-motion="true"] .cue-logo-animation__nested-comma {
+  animation: none;
+}
+
+:root[data-cue-reduced-motion="true"] .cue-logo-animation__nested-comma {
+  transform: scale(0);
+}
