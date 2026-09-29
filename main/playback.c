@@ -2,6 +2,7 @@
 
 #include "board_audio.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -35,6 +36,8 @@ static int s_played_count;
 static int64_t s_dropped;
 static SemaphoreHandle_t s_lock;
 static int64_t s_last_audio_us;
+static uint8_t s_carry;
+static bool s_has_carry;
 
 static void release_locked(void)
 {
@@ -118,13 +121,8 @@ void playback_init(void)
     }
 }
 
-void playback_push(const uint8_t *pcm, size_t len)
+static void write_locked(const uint8_t *pcm, size_t len)
 {
-    if (!s_buf || !pcm || len < 2) {
-        return;
-    }
-    len -= len % 2;
-    xSemaphoreTake(s_lock, portMAX_DELAY);
     size_t room = (size_t)(PLAYBACK_BYTES - s_filled);
     if (len > room) {
         s_dropped += (int64_t)(len - room);
@@ -143,6 +141,30 @@ void playback_push(const uint8_t *pcm, size_t len)
     }
     s_write_at += (int64_t)len;
     s_filled += (int)len;
+}
+
+// A binary frame may end mid-sample. The odd byte is kept and joined to the next frame.
+void playback_push(const uint8_t *pcm, size_t len)
+{
+    if (!s_buf || !pcm || len == 0) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_has_carry) {
+        uint8_t sample[2] = {s_carry, pcm[0]};
+        write_locked(sample, 2);
+        s_has_carry = false;
+        ++pcm;
+        --len;
+    }
+    if (len % 2) {
+        s_carry = pcm[len - 1];
+        s_has_carry = true;
+        --len;
+    }
+    if (len > 0) {
+        write_locked(pcm, len);
+    }
     xSemaphoreGive(s_lock);
 }
 
@@ -172,6 +194,7 @@ void playback_clear(void)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_read_at = s_write_at;
     s_filled = 0;
+    s_has_carry = false;
     for (int i = 0; i < s_mark_count; ++i) {
         s_marks[i].at = s_read_at;
     }

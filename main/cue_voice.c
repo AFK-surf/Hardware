@@ -1,11 +1,13 @@
 #include "cue_voice.h"
 
 #include "board_audio.h"
+#include "board_touch.h"
 #include "playback.h"
 #include "secrets.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -178,7 +180,12 @@ static void handle_text(char *json)
     } else if (strcmp(kind, "error") == 0) {
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
         const cJSON *message = cJSON_GetObjectItemCaseSensitive(root, "message");
-        int number = cJSON_IsNumber(code) ? code->valueint : 0;
+        int number = 0;
+        if (cJSON_IsNumber(code)) {
+            number = code->valueint;
+        } else if (cJSON_IsString(code) && code->valuestring) {
+            number = atoi(code->valuestring);
+        }
         note_close(number);
         ESP_LOGW(TAG, "error %d: %s", number, cJSON_IsString(message) ? message->valuestring : "");
     }
@@ -276,11 +283,30 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+static void send_played_marks(void)
+{
+    char played[8][80];
+    int n = playback_take_played(played, 8);
+    for (int i = 0; i < n; ++i) {
+        if (!name_is_safe(played[i])) {
+            ESP_LOGW(TAG, "skipped unsafe mark name");
+            continue;
+        }
+        char json[128];
+        snprintf(json, sizeof(json), "{\"type\":\"output.played\",\"name\":\"%s\"}", played[i]);
+        send_text(json);
+    }
+}
+
+// The microphone's I2S clock paces the uplink: one 20 ms frame goes out per 480 samples read.
+// Mic samples are sent only while the screen or BOOT is held; otherwise the frame is zeros.
 static void uplink_task(void *arg)
 {
     (void)arg;
-    static uint8_t silence[FRAME_BYTES];
-    int64_t next = 0;
+    static int16_t frame[AUDIO_FRAME_SAMPLES];
+    int filled = 0;
+    bool recording = false;
+    bool was_talking = false;
     int64_t stats_at = 0;
     int64_t send_us = 0;
     int64_t send_max_us = 0;
@@ -300,9 +326,28 @@ static void uplink_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        if (next == 0) {
-            next = esp_timer_get_time();
+        if (!recording) {
+            esp_err_t err = board_audio_set_recording(true);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "microphone start failed: %s", esp_err_to_name(err));
+                s_stop = true;
+                break;
+            }
+            recording = true;
+            filled = 0;
         }
+        int got = board_audio_read_mono(frame + filled, AUDIO_FRAME_SAMPLES - filled);
+        if (got < 0) {
+            ESP_LOGE(TAG, "microphone read failed");
+            s_stop = true;
+            break;
+        }
+        filled += got;
+        if (filled < AUDIO_FRAME_SAMPLES) {
+            continue;
+        }
+        filled = 0;
+
         int64_t now = esp_timer_get_time();
         int64_t started = s_session_us;
         int64_t idle = s_idle_us;
@@ -311,54 +356,48 @@ static void uplink_task(void *arg)
             s_stop = true;
             break;
         }
+        bool talking = board_touch_talk_held();
+        if (talking != was_talking) {
+            ESP_LOGI(TAG, "talk: mic %s", talking ? "on" : "off");
+            was_talking = talking;
+        }
+        if (talking) {
+            // Holding to talk counts as activity, so a long pause mid-sentence does not hang up.
+            note_activity();
+            idle = now;
+        } else {
+            memset(frame, 0, sizeof(frame));
+        }
         if (idle != 0 && now - idle >= IDLE_HANGUP_US) {
-            ESP_LOGI(TAG, "idle hangup: 30 s without a final caller transcript or agent audio");
+            ESP_LOGI(TAG, "idle hangup: 30 s without talking, a final caller transcript, or agent audio");
             s_stop = true;
             break;
         }
-        if (now > next + 100000) {
-            next = now;
-        }
-        if (now < next) {
-            int64_t wait_ms = (next - now) / 1000;
-            if (wait_ms > 0) {
-                vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
-            }
-            continue;
-        }
-        char played[8][80];
-        int n = playback_take_played(played, 8);
-        for (int i = 0; i < n; ++i) {
-            if (!name_is_safe(played[i])) {
-                ESP_LOGW(TAG, "skipped unsafe mark name");
-                continue;
-            }
-            char json[128];
-            snprintf(json, sizeof(json), "{\"type\":\"output.played\",\"name\":\"%s\"}", played[i]);
-            send_text(json);
-        }
+        send_played_marks();
         if (s_client && esp_websocket_client_is_connected(s_client)) {
             int64_t send_start = esp_timer_get_time();
-            int sent = esp_websocket_client_send_bin(s_client, (const char *)silence, FRAME_BYTES, pdMS_TO_TICKS(1000));
+            int sent = esp_websocket_client_send_bin(s_client, (const char *)frame, FRAME_BYTES, pdMS_TO_TICKS(1000));
             send_us = esp_timer_get_time() - send_start;
             if (send_us > send_max_us) {
                 send_max_us = send_us;
             }
             if (sent < 0) {
-                ESP_LOGW(TAG, "silence send failed");
+                ESP_LOGW(TAG, "audio send failed");
             }
         }
         if (now - stats_at >= 1000000) {
             int queued_bytes = 0;
             int pending_marks = 0;
             playback_stats(&queued_bytes, &pending_marks);
-            ESP_LOGI(TAG, "stats queue_ms=%d marks=%d send_ms=%lld send_max_ms=%lld",
+            ESP_LOGI(TAG, "stats queue_ms=%d marks=%d send_ms=%lld send_max_ms=%lld talk=%d",
                      queued_bytes / (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 1000), pending_marks,
-                     (long long)(send_us / 1000), (long long)(send_max_us / 1000));
+                     (long long)(send_us / 1000), (long long)(send_max_us / 1000), talking ? 1 : 0);
             stats_at = now;
             send_max_us = 0;
         }
-        next += 20000;
+    }
+    if (recording) {
+        board_audio_set_recording(false);
     }
     if (s_client && esp_websocket_client_is_connected(s_client)) {
         // session.end before session.start is a 4400, so just close.
