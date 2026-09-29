@@ -281,6 +281,9 @@ static void uplink_task(void *arg)
     (void)arg;
     static uint8_t silence[FRAME_BYTES];
     int64_t next = 0;
+    int64_t stats_at = 0;
+    int64_t send_us = 0;
+    int64_t send_max_us = 0;
     while (!s_stop) {
         if (!s_start_sent && s_ws_up) {
             const char *start =
@@ -335,10 +338,25 @@ static void uplink_task(void *arg)
             send_text(json);
         }
         if (s_client && esp_websocket_client_is_connected(s_client)) {
+            int64_t send_start = esp_timer_get_time();
             int sent = esp_websocket_client_send_bin(s_client, (const char *)silence, FRAME_BYTES, pdMS_TO_TICKS(1000));
+            send_us = esp_timer_get_time() - send_start;
+            if (send_us > send_max_us) {
+                send_max_us = send_us;
+            }
             if (sent < 0) {
                 ESP_LOGW(TAG, "silence send failed");
             }
+        }
+        if (now - stats_at >= 1000000) {
+            int queued_bytes = 0;
+            int pending_marks = 0;
+            playback_stats(&queued_bytes, &pending_marks);
+            ESP_LOGI(TAG, "stats queue_ms=%d marks=%d send_ms=%lld send_max_ms=%lld",
+                     queued_bytes / (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 1000), pending_marks,
+                     (long long)(send_us / 1000), (long long)(send_max_us / 1000));
+            stats_at = now;
+            send_max_us = 0;
         }
         next += 20000;
     }

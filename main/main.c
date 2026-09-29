@@ -33,6 +33,7 @@ static void ui_task(void *arg)
                 ESP_LOGE(TAG, "voice session did not start");
             }
         } else if (gesture == BOARD_TOUCH_DOUBLE) {
+            ESP_LOGI(TAG, "double tap");
             cue_voice_end();
         }
         vTaskDelay(pdMS_TO_TICKS(10));

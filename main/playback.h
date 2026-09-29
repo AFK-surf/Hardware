@@ -16,3 +16,6 @@ void playback_clear(void);
 
 // Copy played mark names out. Returns how many were copied.
 int playback_take_played(char names[][80], int max_names);
+
+// Queued audio in bytes and marks not yet played, for diagnostics.
+void playback_stats(int *queued_bytes, int *pending_marks);

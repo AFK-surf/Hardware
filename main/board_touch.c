@@ -22,7 +22,7 @@
 #define CST816D_IRQ_PERIODIC 0x40
 
 #define TAP_MAX_US (280 * 1000)
-#define DOUBLE_GAP_US (300 * 1000)
+#define DOUBLE_GAP_US (450 * 1000)
 #define BOOT_DEBOUNCE_US (20 * 1000)
 
 static const char *TAG = "touch";

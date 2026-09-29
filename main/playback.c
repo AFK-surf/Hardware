@@ -199,3 +199,16 @@ int playback_take_played(char names[][80], int max_names)
     xSemaphoreGive(s_lock);
     return n;
 }
+
+void playback_stats(int *queued_bytes, int *pending_marks)
+{
+    if (!s_lock) {
+        *queued_bytes = 0;
+        *pending_marks = 0;
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *queued_bytes = s_filled;
+    *pending_marks = s_mark_count;
+    xSemaphoreGive(s_lock);
+}
