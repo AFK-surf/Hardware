@@ -22,11 +22,11 @@ static bool s_up;
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
-    (void)data;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *event = data;
         s_up = false;
         xEventGroupClearBits(s_events, WIFI_UP_BIT);
-        ESP_LOGW(TAG, "disconnected, reconnecting");
+        ESP_LOGW(TAG, "disconnected, reason %d, reconnecting", event ? event->reason : -1);
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
