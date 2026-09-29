@@ -1,2 +1,4 @@
 dependencies:
-  idf: ">=5.4"
+  idf: ">=6.0.2"
+  espressif/cjson: "^1.7.18"
+  espressif/esp_websocket_client: "^1.2.3"

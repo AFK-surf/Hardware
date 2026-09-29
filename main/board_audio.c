@@ -86,6 +86,7 @@ static esp_err_t init_speaker(void)
 
     i2s_chan_config_t channel_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     channel_cfg.dma_desc_num = 6;
+    channel_cfg.auto_clear_after_cb = true;
     channel_cfg.dma_frame_num = T_CIRCLE_AUDIO_CHUNK_FRAMES;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&channel_cfg, &s_speaker_tx, NULL), TAG, "new speaker channel");
 
