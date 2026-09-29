@@ -32,3 +32,5 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # Cloudflare sends GTS Root R4 cross-signed by the retired GlobalSign Root CA.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
+# Cloudflare's 101 upgrade response is over 1 KB of headers.
+CONFIG_WS_BUFFER_SIZE=4096
