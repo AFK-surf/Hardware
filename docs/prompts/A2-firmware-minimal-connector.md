@@ -12,7 +12,7 @@ The T-Circle (`~/Desktop/AFK/Hardware/t-circle-s3`, ESP-IDF 6.0.2) holds a Conne
 ## Context
 
 - The voice client is `main/cue_voice.c`: `esp_websocket_client`, TLS with the cert bundle, a separate TX lock (`CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y`), and one sender task. Read the header comments and the two latest commits (`git log -2`) to see why each piece is there. They record hard-won fixes for 4410/4400 drops on lossy Wi-Fi.
-- Secrets live in `main/secrets.h` (gitignored; template `main/secrets.h.example`). Add `CUE_CONNECTOR_SERVER` and `CUE_CONNECTOR_TOKEN` to the template. The user mints the staging token, or you mint it with their OK. B1 will move this into BLE-provisioned NVS later. Keep the access behind one small function so that swap is easy.
+- Secrets live in `main/secrets.h` (gitignored; template `main/secrets.h.example`). Add `CUE_CONNECTOR_URL` (the `connect_url` returned with the token: the Salix address, not the API base) and `CUE_CONNECTOR_TOKEN` to the template. The user mints the staging token, or you mint it with their OK. B1 will move this into BLE-provisioned NVS later. Keep the access behind one small function so that swap is easy.
 - The board has 8 MB PSRAM. Two TLS sessions fit. Allocate large buffers in PSRAM, as the voice code does.
 
 ## Do
@@ -23,6 +23,11 @@ The T-Circle (`~/Desktop/AFK/Hardware/t-circle-s3`, ESP-IDF 6.0.2) holds a Conne
    - send `metadata` (capabilities: none yet, or only what A1 says is mandatory);
    - answer every `request` with `error` (unsupported) for now;
    - reconnect with exponential backoff (1 s → 60 s, with jitter);
+   - follow A1's must-dos (`A1-report.md`):
+     - send `scope` on every connect, or the device loses its environment;
+     - only the device's own `heartbeat` frames count as alive (45 s);
+     - re-send `metadata` after every `device_access`;
+     - answer every unknown method with `error` right away, or the caller waits 30–120 s;
    - never block or disturb the voice call (separate task and client; nothing shared but Wi-Fi).
 2. Log one line per state change and a stats line every 30 s (connected / last heartbeat age / reconnects).
 3. Build, then ask the user before flashing. Only one board exists, and the user may be testing calls on it.
