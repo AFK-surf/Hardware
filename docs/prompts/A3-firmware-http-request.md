@@ -8,12 +8,19 @@ The cloud agent can reach a LAN HTTP service through the T-Circle. For example, 
 
 ## Before you start
 
-- Start after B1's branch (`codex/ble-provisioning`) is rebased onto main and merged, because it rewrites `connector_credentials()` and the startup wiring. Work on top of that.
-- **Free internal RAM first.** A2 measured internal free heap at 26 KB during a call with the Connector up (lowest 23 KB; `docs/reports/A2-report.md`). An HTTP client and a worker task won't fit safely. Before adding anything:
+- B1 is merged (main `eef83d1`): credentials come from BLE provisioning (NVS); `secrets.h` applies only with `COMMA_DEV_SECRETS 1`. The board is provisioned with staging credentials and its Connector is online.
+- **Free internal RAM first. This is now critical.** Internal free heap after B1 (`docs/reports/B1-report.md`, section B1b; it lists candidate fixes):
+  - idle, BLE off, Connector up: 51.5 KB;
+  - **lowest during a call: 14.4 KB**;
+  - **BLE on while the Connector connects: lowest 3.1 KB**; pairing mode with the Connector up: 2.8 KB.
+
+  Logo stack and Connector buffers already moved to PSRAM (`08dfe19`). An HTTP client and a worker task won't fit. Before adding anything:
   - move task stacks that don't need internal RAM to PSRAM (`xTaskCreateWithCaps(..., MALLOC_CAP_SPIRAM)`): logo, ui, connector, and the new worker;
   - check where the Wi-Fi/lwIP and mbedTLS buffers live (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, dynamic buffers).
   
-  Target: lowest internal free ≥ 40 KB during a call with the Connector up and one LAN request in flight. Measure before and after, and don't regress the voice fixes (`git log` for 81297a7).
+  - consider NimBLE memory settings (host/controller buffers in PSRAM, fewer connections, freeing the BLE controller memory once provisioned if it's never needed again before a reset).
+
+  Targets: lowest internal free ≥ 40 KB during a call with the Connector up and one LAN request in flight, and ≥ 20 KB while BLE is on. Measure before and after, and don't regress the voice fixes (`git log` for 81297a7).
 
 ## Do
 
