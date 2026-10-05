@@ -1,6 +1,6 @@
 # A3 · Firmware: `http_request` + access gate (pairs with backend C2)
 
-Read first: `~/Desktop/AFK/Hardware/docs/connector-plan.md`, `docs/connector-protocol.md`, and the A1 and A2 reports.
+Read first: `~/Desktop/AFK/Hardware/docs/connector-plan.md`, `docs/connector-protocol.md`, and the A1, A2 and B1 reports (B1 includes the B1b section).
 
 ## Goal
 
@@ -16,8 +16,7 @@ The cloud agent can reach a LAN HTTP service through the T-Circle. For example, 
 
   Logo stack and Connector buffers already moved to PSRAM (`08dfe19`). An HTTP client and a worker task won't fit. Before adding anything:
   - move task stacks that don't need internal RAM to PSRAM (`xTaskCreateWithCaps(..., MALLOC_CAP_SPIRAM)`): logo, ui, connector, and the new worker;
-  - check where the Wi-Fi/lwIP and mbedTLS buffers live (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, dynamic buffers).
-  
+  - check where the Wi-Fi/lwIP and mbedTLS buffers live (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, dynamic buffers);
   - consider NimBLE memory settings (host/controller buffers in PSRAM, fewer connections, freeing the BLE controller memory once provisioned if it's never needed again before a reset).
 
   Targets: lowest internal free ≥ 40 KB during a call with the Connector up and one LAN request in flight, and ≥ 20 KB while BLE is on. Measure before and after, and don't regress the voice fixes (`git log` for 81297a7).
