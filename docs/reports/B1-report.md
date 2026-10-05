@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `wifi_scan` 通知 | 不是裸 JSON 数组，而是分页 `{"page","pages","aps":[...]}` | 20 个网络约 900 B，超过一条通知（MTU−3）；分页对任何 MTU 都成立。实测 MTU 517 下 20 个网络分 3 条 |
 | `status.state` | `idle / wifi_connecting / wifi_failed(+error) / wifi_up / saved`，`connector_*` 预留给 A2 | A2 还没合，B1 能报告的终点是"凭证已存 + Wi-Fi 通"；app 以后端设备列表判定上线 |
-| `credentials` | 多一个可选 `connector_server` | 后端 connector-token 响应里的 `server` 可能和语音 server 不同 |
+| `credentials` | 多一个必填 `connect_url`（rebase 到 A2 后由可选 `connector_server` 改来） | A1 协议要求原样用铸造响应里的 `connect_url`（Salix 主机，不是 Comma API 主机） |
 | `info` | 多 `name`、`provisioned` | app 区分全新设备 / 配对模式 |
 | 配对模式 | 长按 BOOT 3–10 s 松手进入；点屏或 5 分钟无连接退出 | prompt 提到"pairing mode"但没定义入口；换 Wi-Fi（公司 ↔ 家）和轮换凭证都要用 |
 | 绑定 | 开 bonding，但只存 RAM；每次配对会话用新的随机静态地址 | 同一会话掉线可免码重连；恢复出厂后手机上的旧 bond 永远对不上新地址，不会出现"加密失败要去系统里忽略设备" |
@@ -74,4 +74,11 @@ NimBLE 走 PSRAM（`MEM_ALLOC_MODE_EXTERNAL`）；BLE 关掉后控制器内存�
 - **板子现状：恢复出厂、未配网**（在广播）。另一个会话 A2 若要打电话，要先用 `tools/ble_provision.py provision` 配一次（需要在 macOS 弹窗输码），或者在 `secrets.h` 加 `#define COMMA_DEV_SECRETS 1`。
 - 把 main 上的 secrets.h 留作开发覆盖：现有 `secrets.h` 没有 `COMMA_DEV_SECRETS`，合并后默认走 BLE 配网。
 - 串口插曲：16:37 我用 RTS 复位后 USB-JTAG 控制台整个哑了（应用照常跑、能 ping，esptool 也连不上），用户拔插后恢复。原因没查清，像是我的日志脚本复位/重开端口的时序问题，不是固件逻辑。
-- B3：去掉 `secrets.h` 本身、解绑吊销。A2 的 Connector 接 `device_config_get()` 读 `connector_server`/`connector_token`，状态可调 `provisioning_set_connector_state()`。
+- B3：去掉 `secrets.h` 本身、解绑吊销。
+
+## 接上 A2（rebase 到 5c4a59d 之后）
+
+- `connector_credentials()` 改读 `device_config_get()` 的 `connect_url` / `connector_token`，每次拨号前重读；`device_config_generation()` 变了（配对模式里存了新凭证）就断开、立刻用新 token 重拨；401/403 不再"停到重启"，而是等新凭证。
+- Connector 在凭证一存好就启动（BLE 还在），状态经 `provisioning_set_connector_state()` 报给 app：`connector_connecting` / `connector_up`（带后端 `device_id`）/ `connector_failed`。
+- 未配网时 Wi-Fi 没有目标网络，`wifi_wait` 立刻返回错误；Connector 的等待循环对此加了 1 s 间隔，不会空转。
+- **这部分只编译过，没上板**（A2 合入后板子还没刷，也还没有真实 connector token）。

@@ -190,7 +190,12 @@ static int on_wifi_credentials(const char *json)
 
 static bool server_ok(const char *s)
 {
-    return !s[0] || strncmp(s, "https://", 8) == 0 || strncmp(s, "http://", 7) == 0;
+    return strncmp(s, "https://", 8) == 0 || strncmp(s, "http://", 7) == 0;
+}
+
+static bool connect_url_ok(const char *s)
+{
+    return strncmp(s, "wss://", 6) == 0 || strncmp(s, "ws://", 5) == 0;
 }
 
 static int on_credentials(const char *json)
@@ -205,10 +210,9 @@ static int on_credentials(const char *json)
         cJSON_Delete(obj);
         return BLE_ATT_ERR_INSUFFICIENT_RES;
     }
-    bool server, conn_server, ws, group, token, voice, name;
+    bool server, connect_url, ws, group, token, voice, name;
     const bool ok = take_string(obj, "server", cfg->server, sizeof(cfg->server), &server) &&
-                    take_string(obj, "connector_server", cfg->connector_server, sizeof(cfg->connector_server),
-                                &conn_server) &&
+                    take_string(obj, "connect_url", cfg->connect_url, sizeof(cfg->connect_url), &connect_url) &&
                     take_string(obj, "workspace_id", cfg->workspace_id, sizeof(cfg->workspace_id), &ws) &&
                     take_string(obj, "group_id", cfg->group_id, sizeof(cfg->group_id), &group) &&
                     take_string(obj, "connector_token", cfg->connector_token, sizeof(cfg->connector_token),
@@ -219,10 +223,10 @@ static int on_credentials(const char *json)
     int rc = 0;
     if (!ok) {
         rc = ERR_BAD_VALUE;
-    } else if (!server || !ws || !group || !token || !voice || !name) {
+    } else if (!server || !connect_url || !ws || !group || !token || !voice || !name) {
         rc = ERR_MISSING_FIELD;
-    } else if (!server_ok(cfg->server) || !server_ok(cfg->connector_server) ||
-               strncmp(cfg->voice_key, "salix_vk_", 9) != 0) {
+    } else if (!server_ok(cfg->server) || !connect_url_ok(cfg->connect_url) ||
+               strncmp(cfg->voice_key, "salix_vk_", 9) != 0 || strncmp(cfg->connector_token, "salix_conn_", 11) != 0) {
         rc = ERR_BAD_VALUE;
     }
     if (rc) {

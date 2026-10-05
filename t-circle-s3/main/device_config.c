@@ -1,5 +1,6 @@
 #include "device_config.h"
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -25,6 +26,7 @@ static const char *TAG = "config";
 static SemaphoreHandle_t s_lock;
 static device_config_t s_cfg;
 static bool s_provisioned;
+static atomic_uint s_generation;
 
 typedef struct {
     const char *key;
@@ -38,7 +40,7 @@ static const field_t FIELDS[] = {
     FIELD("wifi_ssid", wifi_ssid, true),
     FIELD("wifi_pass", wifi_password, false),
     FIELD("server", server, true),
-    FIELD("conn_server", connector_server, false),
+    FIELD("connect_url", connect_url, true),
     FIELD("workspace", workspace_id, true),
     FIELD("group", group_id, true),
     FIELD("conn_token", connector_token, true),
@@ -59,8 +61,8 @@ static void load_dev_override(void)
     copy(s_cfg.server, sizeof(s_cfg.server), CUE_VOICE_SERVER);
     copy(s_cfg.group_id, sizeof(s_cfg.group_id), CUE_VOICE_GROUP);
     copy(s_cfg.voice_key, sizeof(s_cfg.voice_key), CUE_VOICE_KEY);
-#ifdef CUE_CONNECTOR_SERVER
-    copy(s_cfg.connector_server, sizeof(s_cfg.connector_server), CUE_CONNECTOR_SERVER);
+#ifdef CUE_CONNECTOR_URL
+    copy(s_cfg.connect_url, sizeof(s_cfg.connect_url), CUE_CONNECTOR_URL);
 #endif
 #ifdef CUE_CONNECTOR_TOKEN
     copy(s_cfg.connector_token, sizeof(s_cfg.connector_token), CUE_CONNECTOR_TOKEN);
@@ -188,8 +190,14 @@ esp_err_t device_config_save(const device_config_t *cfg)
         s_provisioned = true;
         xSemaphoreGive(s_lock);
     }
+    ++s_generation;
     ESP_LOGI(TAG, "saved \"%s\" on Wi-Fi \"%s\"", cfg->device_name, cfg->wifi_ssid);
     return ESP_OK;
+}
+
+unsigned device_config_generation(void)
+{
+    return s_generation;
 }
 
 esp_err_t device_config_erase_all(void)

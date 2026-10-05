@@ -61,6 +61,12 @@ static void ui_task(void *arg)
         const bool in_call = state == CUE_VOICE_CONNECTING || state == CUE_VOICE_UP;
         display_set_animating(in_call);
 
+        // Start the Connector once there are credentials: at boot, or as soon as setup saves them,
+        // while BLE is still up so the app can see connector_up in `status`.
+        if (device_config_provisioned()) {
+            connector_start();
+        }
+
         const bool prov = provisioning_active();
         if (prov_was_active && !prov) {
             cue_voice_credentials_changed();

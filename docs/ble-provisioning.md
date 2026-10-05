@@ -83,7 +83,7 @@ is stored until `credentials` is also written and Wi-Fi is up.
 ```json
 {
   "server": "https://salix-staging.cue.surf",
-  "connector_server": "https://...",
+  "connect_url": "wss://salix-staging.comma.surf/v1/connect",
   "workspace_id": "...",
   "group_id": "grp1_...",
   "connector_token": "salix_conn_...",
@@ -92,11 +92,13 @@ is stored until `credentials` is also written and Wi-Fi is up.
 }
 ```
 
-All fields are required except `connector_server` (defaults to `server`; set it when the
-connector-token response's `server` differs). Limits (bytes): `server`/`connector_server` 127,
-`workspace_id`/`group_id` 95, `connector_token`/`voice_key` 159, `device_name` 63. `server` must
-start with `https://` (or `http://` for a local dev backend); `voice_key` must start with
-`salix_vk_`. The whole JSON must fit in 512 bytes.
+All fields are required. `server` is the voice host. `connect_url` is the Connector URL: copy
+`connect_url` from the connector-token response as given (it is the Salix host, which differs from
+the Comma API host; see `docs/connector-protocol.md`). Limits (bytes): `server` 127, `connect_url`
+159, `workspace_id`/`group_id` 95, `connector_token`/`voice_key` 159, `device_name` 63. `server` must
+start with `https://` (or `http://` for a local dev backend), `connect_url` with `wss://` (or
+`ws://`), `connector_token` with `salix_conn_`, `voice_key` with `salix_vk_`. The whole JSON must
+fit in 512 bytes.
 
 Order: write `wifi_credentials`, wait for `wifi_up`, mint the two credentials, write `credentials`.
 Minting after `wifi_up` means a wrong Wi-Fi password never leaves orphan tokens. The device also
@@ -105,7 +107,7 @@ accepts `credentials` first and holds them in RAM until Wi-Fi is up.
 When both are in and Wi-Fi is up, the device stores everything in NVS (atomically: an interrupted
 save leaves it unprovisioned), stops advertising and notifies `saved`. It then keeps BLE up until the
 app disconnects or 30 s pass, shuts BLE down, and becomes a normal device (calls allowed). The app
-should disconnect after `saved`.
+may disconnect after `saved`, or wait a few seconds for `connector_up` first.
 
 In pairing mode on an already provisioned device, writing only `credentials` (no
 `wifi_credentials`) keeps the stored Wi-Fi network; this is how credentials are rotated. Writing
@@ -127,7 +129,7 @@ Read it any time; subscribe for changes:
 | `wifi_failed` | gave up | `ssid`, `error`: `wrong_password`, `not_found` (also: 5 GHz-only or out of range), `timeout` (30 s), `failed` |
 | `wifi_up` | connected; waiting for `credentials` (or saving failed: `error: "save_failed"`) | `ssid`, `ip` |
 | `saved` | stored; BLE about to close | `ssid`, `ip` |
-| `connector_connecting`, `connector_up`, `connector_failed` | reserved for the Connector (A2); only seen if it connects while BLE is still up | `device_id` |
+| `connector_connecting`, `connector_up`, `connector_failed` | the Connector starts as soon as `saved`, so these arrive while BLE is still up (until the app disconnects or 30 s). `connector_up` carries the backend `device_id`; `connector_failed` means the token was rejected (401/403) | `device_id` |
 
 `provisioned` is true once the device has stored credentials (also during pairing mode on a
 provisioned device). Unknown fields and states may be added; ignore them. The app should confirm
@@ -143,7 +145,7 @@ Writes that fail validation are rejected with an ATT error and change nothing:
 | `0x0D` | value empty or longer than 512 bytes |
 | `0x80` | not a JSON object |
 | `0x81` | a required field is missing or empty |
-| `0x82` | a field has the wrong type, is too long, or is invalid (password 1–7 chars, `voice_key` prefix, `server` scheme) |
+| `0x82` | a field has the wrong type, is too long, or is invalid (password 1–7 chars, a token prefix, a URL scheme) |
 
 On Android these arrive as the `status` of `onCharacteristicWrite` (`GATT_ERROR`-style ints, e.g.
 `128` for `0x80`).

@@ -15,8 +15,8 @@
 typedef struct {
     char wifi_ssid[33];
     char wifi_password[65];
-    char server[128];            // https://salix-staging.cue.surf
-    char connector_server[128];  // empty: same as server
+    char server[128];            // https://salix-staging.cue.surf (voice)
+    char connect_url[160];       // wss://<salix host>/v1/connect (Connector), as minted
     char workspace_id[96];
     char group_id[96];
     char connector_token[160];   // salix_conn_...
@@ -35,6 +35,9 @@ bool device_config_dev_override(void);
 
 // Copy the current config. Returns false (and zeroes *out) when unprovisioned.
 bool device_config_get(device_config_t *out);
+
+// Bumped on every save. A client that cached credentials reconnects when it changes.
+unsigned device_config_generation(void);
 
 // Store a complete config and mark the device provisioned.
 esp_err_t device_config_save(const device_config_t *cfg);

@@ -164,14 +164,13 @@ async def cmd_provision(args):
         sys.exit("set COMMA_VOICE_KEY and COMMA_CONNECTOR_TOKEN")
     creds = {
         "server": args.server,
+        "connect_url": args.connect_url,
         "workspace_id": args.workspace,
         "group_id": args.group,
         "connector_token": connector_token,
         "voice_key": voice_key,
         "device_name": args.name_to_set,
     }
-    if args.connector_server:
-        creds["connector_server"] = args.connector_server
 
     dev = await find(args.name)
     t0 = time.monotonic()
@@ -193,12 +192,12 @@ async def cmd_provision(args):
             sys.exit(f"Wi-Fi did not come up: {status}")
 
         log("writing credentials")
-        statuses = asyncio.create_task(watch_status(client, {"saved"}, 20))
+        statuses = asyncio.create_task(watch_status(client, {"connector_up", "connector_failed"}, 30))
         await asyncio.sleep(0.3)
         await client.write_gatt_char(CREDENTIALS, json.dumps(creds).encode(), response=True)
         status = await statuses
         if not status:
-            sys.exit("no saved status")
+            sys.exit("no connector status within 30 s of saving")
         log(f"provisioned in {time.monotonic() - t0:.1f} s: {status}")
 
 
@@ -230,7 +229,8 @@ async def cmd_bad_writes(args):
                         "server": "https://x",
                         "workspace_id": "w",
                         "group_id": "g",
-                        "connector_token": "t",
+                        "connect_url": "wss://x/v1/connect",
+                        "connector_token": "salix_conn_x",
                         "voice_key": "not_a_voice_key",
                         "device_name": "n",
                     }
@@ -264,7 +264,7 @@ def main():
     pr.add_argument("--ssid", required=True)
     pr.add_argument("--password")
     pr.add_argument("--server", default="https://salix-staging.cue.surf")
-    pr.add_argument("--connector-server")
+    pr.add_argument("--connect-url", default="wss://salix-staging.comma.surf/v1/connect")
     pr.add_argument("--workspace", required=True)
     pr.add_argument("--group", required=True)
     pr.add_argument("--device-name", dest="name_to_set", default="T-Circle")

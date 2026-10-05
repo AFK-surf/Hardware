@@ -1,8 +1,7 @@
 #include "connector.h"
 
-#if __has_include("secrets.h")
-#include "secrets.h"
-#endif
+#include "device_config.h"
+#include "provisioning.h"
 #include "wifi.h"
 
 #include <stdatomic.h>
@@ -50,13 +49,6 @@
 #define NVS_KEY_ALLOW "allow_ops"
 #define FIRMWARE_VERSION "0.1.0"
 
-#ifndef CUE_CONNECTOR_URL
-#define CUE_CONNECTOR_URL ""
-#endif
-#ifndef CUE_CONNECTOR_TOKEN
-#define CUE_CONNECTOR_TOKEN ""
-#endif
-
 static const char *TAG = "connector";
 
 typedef enum {
@@ -72,8 +64,9 @@ typedef struct {
 } event_t;
 
 typedef struct {
-    const char *url;
-    const char *token;
+    char url[160];
+    char token[160];
+    unsigned generation;  // device_config_generation() these were read at
 } credentials_t;
 
 static QueueHandle_t s_events;
@@ -96,12 +89,27 @@ static int s_reconnects;
 static int64_t s_heartbeat_us;
 static int64_t s_stats_us;
 
-// The one place credentials come from. B1 replaces this with values provisioned over BLE into NVS.
+// The one place credentials come from: provisioned over BLE into NVS (device_config), or secrets.h
+// with COMMA_DEV_SECRETS on a dev board.
 static bool connector_credentials(credentials_t *out)
 {
-    out->url = CUE_CONNECTOR_URL;
-    out->token = CUE_CONNECTOR_TOKEN;
-    return strncmp(out->url, "ws", 2) == 0 && strncmp(out->token, "salix_conn_", 11) == 0;
+    device_config_t *cfg = calloc(1, sizeof(*cfg));
+    if (!cfg) {
+        return false;
+    }
+    out->generation = device_config_generation();
+    const bool provisioned = device_config_get(cfg);
+    strlcpy(out->url, cfg->connect_url, sizeof(out->url));
+    strlcpy(out->token, cfg->connector_token, sizeof(out->token));
+    memset(cfg, 0, sizeof(*cfg));
+    free(cfg);
+    return provisioned && strncmp(out->url, "ws", 2) == 0 && strncmp(out->token, "salix_conn_", 11) == 0;
+}
+
+// New credentials were saved (pairing mode) since these were read.
+static bool credentials_stale(const credentials_t *creds)
+{
+    return device_config_generation() != creds->generation;
 }
 
 static const char *current_scope(void)
@@ -403,6 +411,7 @@ static void handle_text(const char *json)
         const cJSON *run = cJSON_GetObjectItemCaseSensitive(root, "connector_run_id");
         const cJSON *device = cJSON_GetObjectItemCaseSensitive(root, "device_id");
         const cJSON *generation = cJSON_GetObjectItemCaseSensitive(root, "connection_generation");
+        provisioning_set_connector_state("connector_up", cJSON_IsString(device) ? device->valuestring : NULL);
         ESP_LOGI(TAG, "connected run=%s device=%s generation=%d", cJSON_IsString(run) ? run->valuestring : "",
                  cJSON_IsString(device) ? device->valuestring : "",
                  cJSON_IsNumber(generation) ? generation->valueint : -1);
@@ -497,6 +506,7 @@ static int64_t run_session(const credentials_t *creds)
     }
     esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, on_ws, NULL);
     ESP_LOGI(TAG, "dialing %s", s_uri);
+    provisioning_set_connector_state("connector_connecting", NULL);
     int64_t opened_us = 0;
     int64_t last_rx_us = esp_timer_get_time();
     if (esp_websocket_client_start(s_client) != ESP_OK) {
@@ -505,6 +515,10 @@ static int64_t run_session(const credentials_t *creds)
         for (;;) {
             log_stats();
             event_t ev;
+            if (credentials_stale(creds)) {
+                ESP_LOGI(TAG, "credentials changed, reconnecting");
+                break;
+            }
             if (xQueueReceive(s_events, &ev, pdMS_TO_TICKS(1000)) != pdTRUE) {
                 if (opened_us != 0 && esp_timer_get_time() - last_rx_us > READ_TIMEOUT_US) {
                     ESP_LOGW(TAG, "no frame for 45 s, reconnecting");
@@ -542,24 +556,39 @@ static int64_t run_session(const credentials_t *creds)
     return opened_us ? esp_timer_get_time() - opened_us : 0;
 }
 
+// Wait (logging stats) until new credentials are saved.
+static void wait_for_new_credentials(const credentials_t *creds)
+{
+    while (!credentials_stale(creds)) {
+        wait_ms(1000);
+    }
+}
+
 static void connector_task(void *arg)
 {
     (void)arg;
     credentials_t creds;
-    if (!connector_credentials(&creds)) {
-        ESP_LOGW(TAG, "CUE_CONNECTOR_URL / CUE_CONNECTOR_TOKEN not set, Connector off");
-        vTaskDelete(NULL);
-        return;
-    }
     load_access();
     make_instance_id();
     ESP_LOGI(TAG, "access: %s, instance %s", s_allow_operations ? "operations allowed" : "read-only", s_instance_id);
     uint32_t backoff_ms = BACKOFF_MIN_MS;
     bool first = true;
     for (;;) {
+        if (!connector_credentials(&creds)) {
+            ESP_LOGW(TAG, "no connect_url / connector token provisioned, Connector waits for setup");
+            wait_for_new_credentials(&creds);
+            continue;
+        }
         if (!wifi_is_up()) {
             ESP_LOGI(TAG, "waiting for Wi-Fi");
-            while (wifi_wait(1000) != ESP_OK) {
+            for (;;) {
+                const esp_err_t err = wifi_wait(1000);
+                if (err == ESP_OK) {
+                    break;
+                }
+                if (err != ESP_ERR_TIMEOUT) {
+                    vTaskDelay(pdMS_TO_TICKS(1000));  // no network configured right now (pairing mode)
+                }
                 log_stats();
             }
         }
@@ -573,13 +602,19 @@ static void connector_task(void *arg)
         }
         int64_t lasted_us = run_session(&creds);
         const int http = s_handshake_status;
-        if (http == 401 || http == 403) {
-            // The token was revoked. Retrying would not help; wait for re-provisioning (B1/B3).
-            ESP_LOGE(TAG, "handshake HTTP %d: token rejected, Connector stopped until reboot", http);
-            for (;;) {
-                wait_ms(60000);
-            }
+        if (credentials_stale(&creds)) {
+            backoff_ms = BACKOFF_MIN_MS;
+            continue;  // dial again right away with the new token
         }
+        if (http == 401 || http == 403) {
+            // The token was revoked. Retrying would not help; wait for re-provisioning (pairing mode).
+            ESP_LOGE(TAG, "handshake HTTP %d: token rejected, Connector stopped until new credentials", http);
+            provisioning_set_connector_state("connector_failed", NULL);
+            wait_for_new_credentials(&creds);
+            backoff_ms = BACKOFF_MIN_MS;
+            continue;
+        }
+        provisioning_set_connector_state("connector_connecting", NULL);
         if (lasted_us >= STABLE_US) {
             backoff_ms = BACKOFF_MIN_MS;
         }
