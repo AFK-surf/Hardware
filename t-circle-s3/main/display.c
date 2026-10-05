@@ -9,6 +9,7 @@
 #include "cue_logo_frames.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_gc9d01.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -35,7 +36,12 @@ extern const uint8_t frames_end[] asm("_binary_cue_logo_frames_bin_end");
 
 static const char *TAG = "cue_logo";
 
-static DMA_ATTR uint16_t s_fb[2][LCD_W * LCD_H];
+#define FB_BYTES (LCD_W * LCD_H * sizeof(uint16_t))
+// Two 50 KB framebuffers. They used to be DMA_ATTR statics, which put 100 KB of the chip's internal
+// RAM into .data. They live in PSRAM now and the SPI DMA reads them directly (psram_dma_direct).
+// 64-byte alignment covers the PSRAM DMA and cache-line rules, so the driver never copies a frame
+// into an internal bounce buffer.
+static uint16_t *s_fb[2];
 static SemaphoreHandle_t s_fb_free[2];
 static volatile uint8_t s_inflight[4];
 static volatile uint32_t s_inflight_head, s_inflight_tail;
@@ -83,6 +89,10 @@ esp_err_t display_init(void)
     }
     build_lut();
     for (int i = 0; i < 2; ++i) {
+        s_fb[i] = heap_caps_aligned_calloc(64, 1, FB_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_fb[i]) {
+            return ESP_ERR_NO_MEM;
+        }
         s_fb_free[i] = xSemaphoreCreateBinary();
         if (!s_fb_free[i]) {
             return ESP_ERR_NO_MEM;
@@ -97,11 +107,12 @@ esp_err_t display_init(void)
     ESP_ERROR_CHECK(gpio_config(&bl));
     gpio_set_level(LCD_BL, 1);
 
-    const spi_bus_config_t bus = GC9D01_PANEL_BUS_SPI_CONFIG(LCD_SCLK, LCD_MOSI, sizeof(s_fb[0]));
+    const spi_bus_config_t bus = GC9D01_PANEL_BUS_SPI_CONFIG(LCD_SCLK, LCD_MOSI, FB_BYTES);
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO));
 
     esp_lcd_panel_io_handle_t io = NULL;
-    const esp_lcd_panel_io_spi_config_t io_cfg = GC9D01_PANEL_IO_SPI_CONFIG(LCD_CS, LCD_DC, on_color_done, NULL);
+    esp_lcd_panel_io_spi_config_t io_cfg = GC9D01_PANEL_IO_SPI_CONFIG(LCD_CS, LCD_DC, on_color_done, NULL);
+    io_cfg.flags.psram_dma_direct = 1;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &io));
 
     const esp_lcd_panel_dev_config_t panel_cfg = {

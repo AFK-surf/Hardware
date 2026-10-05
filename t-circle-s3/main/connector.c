@@ -1,6 +1,7 @@
 #include "connector.h"
 
 #include "device_config.h"
+#include "lan_http.h"
 #include "provisioning.h"
 #include "wifi.h"
 
@@ -27,9 +28,10 @@
 #define WS_OP_PING 0x9
 #define WS_OP_PONG 0xA
 
-// Requests carry no big payloads until A3. A larger text frame is dropped; if its id can be read
-// from the first chunk, it still gets an error so the caller does not wait out its timeout.
-#define RX_MAX (16 * 1024)
+// Largest request frame: room for an http_request body as big as the response cap, plus the
+// envelope. A larger text frame is dropped; if its id can be read from the first chunk, it still
+// gets an error so the caller does not wait out its timeout. PSRAM.
+#define RX_MAX (LAN_HTTP_MAX_BYTES + 8 * 1024)
 #define ID_MAX 64
 // The server heartbeats every 15 s. Like salix-connect, 45 s without any frame means the link is dead.
 #define READ_TIMEOUT_US (45LL * 1000000)
@@ -39,9 +41,16 @@
 // A connection that lasted this long resets the backoff.
 #define STABLE_US (60LL * 1000000)
 #define SEND_TIMEOUT_MS 5000
+// A reply with a 64 KB body can be several hundred KB of JSON.
+#define SEND_LARGE_TIMEOUT_MS 20000
 // Below the voice tasks (websocket 5, sender 6, uplink 5): the Connector only ever waits.
 #define CONNECTOR_TASK_PRIO 2
 #define CONNECTOR_WS_PRIO 3
+// LAN requests run one at a time on their own task so the Connector task keeps answering
+// heartbeats. A few more wait in line; past that the device answers "busy".
+#define LAN_WORKER_PRIO 2
+#define LAN_WORKER_STACK 8192
+#define LAN_QUEUE_LEN 4
 
 #define SCOPE_READ_ONLY "local_file_read"
 #define SCOPE_OPERATIONS ""
@@ -56,12 +65,20 @@ typedef enum {
     EV_TEXT,     // data: NUL-terminated frame, PSRAM, freed by the receiver
     EV_TOO_BIG,  // data: request id, or NULL when it could not be read
     EV_CLOSED,
+    EV_REPLY,    // data: a whole reply frame from the LAN worker, PSRAM, for socket `session`
 } event_kind_t;
 
 typedef struct {
     event_kind_t kind;
     char *data;
+    unsigned session;
 } event_t;
+
+typedef struct {
+    char id[ID_MAX + 1];
+    cJSON *params;     // detached from the request frame, freed by the worker
+    unsigned session;  // the socket the request came in on
+} lan_job_t;
 
 typedef struct {
     char url[160];
@@ -74,7 +91,12 @@ static esp_websocket_client_handle_t s_client;
 static atomic_bool s_up;
 static atomic_int s_close_code;
 static atomic_int s_handshake_status;
-static bool s_allow_operations;
+static atomic_bool s_allow_operations;
+static QueueHandle_t s_lan_jobs;
+static bool s_lan_ready;
+// Counts sockets. A reply only goes out on the socket its request came in on; the server has
+// already failed requests from a closed one.
+static atomic_uint s_session;
 static char s_instance_id[37];
 static char s_uri[384];
 static char s_headers[512];
@@ -155,13 +177,20 @@ static void make_instance_id(void)
              b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
 }
 
-static void post(event_kind_t kind, char *data)
+static void post_session(event_kind_t kind, char *data, unsigned session)
 {
-    event_t ev = {.kind = kind, .data = data};
-    if (xQueueSend(s_events, &ev, pdMS_TO_TICKS(100)) != pdTRUE) {
+    event_t ev = {.kind = kind, .data = data, .session = session};
+    // The LAN worker can afford to wait; a dropped reply leaves the caller waiting out its timeout.
+    const TickType_t wait = pdMS_TO_TICKS(kind == EV_REPLY ? 5000 : 100);
+    if (xQueueSend(s_events, &ev, wait) != pdTRUE) {
         ESP_LOGW(TAG, "event queue full, dropped event %d", kind);
         free(data);
     }
+}
+
+static void post(event_kind_t kind, char *data)
+{
+    post_session(kind, data, 0);
 }
 
 static char *psram_strndup(const char *src, size_t len)
@@ -273,7 +302,9 @@ static bool send_json(const char *json)
     if (!s_client || !esp_websocket_client_is_connected(s_client)) {
         return false;
     }
-    int sent = esp_websocket_client_send_text(s_client, json, (int)strlen(json), pdMS_TO_TICKS(SEND_TIMEOUT_MS));
+    const size_t len = strlen(json);
+    const int timeout_ms = len > 16 * 1024 ? SEND_LARGE_TIMEOUT_MS : SEND_TIMEOUT_MS;
+    int sent = esp_websocket_client_send_text(s_client, json, (int)len, pdMS_TO_TICKS(timeout_ms));
     if (sent < 0) {
         ESP_LOGW(TAG, "send failed");
         return false;
@@ -302,17 +333,19 @@ static void send_metadata(void)
     if (now > 1700000000) {
         snprintf(collected_at, sizeof(collected_at), ",\"collected_at\":%lld", (long long)now);
     }
-    char json[640];
+    char json[768];
     int n = snprintf(json, sizeof(json),
                      "{\"type\":\"metadata\","
                      "\"capabilities\":{\"scope\":\"%s\",\"device_access\":true,\"execution_boundary\":\"lan-gateway\","
                      "\"persistent_processes\":false,\"computer_use_tool\":false,\"host_access_required\":false,"
                      "\"runtime_probe\":false,\"meeting_runtime\":false,"
+                     // Not part of salix-connect's set: tells the backend (C2) what this gateway does.
+                     "\"lan_gateway\":{\"methods\":[\"http_request\"],\"max_bytes\":%d,\"max_timeout_seconds\":%d},"
                      "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
                      "\"system_info\":{\"client_source\":\"t-circle\",\"hostname\":\"T-Circle\",\"os_type\":\"esp-idf\","
                      "\"arch\":\"xtensa\"%s}}",
-                     current_scope(), collected_at);
+                     current_scope(), LAN_HTTP_MAX_BYTES, LAN_HTTP_TIMEOUT_MAX_S, collected_at);
     if (n <= 0 || (size_t)n >= sizeof(json)) {
         ESP_LOGE(TAG, "metadata does not fit");
         return;
@@ -366,15 +399,71 @@ static void handle_device_access(const char *id, const cJSON *params)
     send_object(obj);
 }
 
-static void handle_request(const char *id, const char *method, const cJSON *params)
+// The read-only wording matches salix-connect, so the agent sees the same refusal.
+#define READ_ONLY_REFUSAL "method \"http_request\" is not permitted for a local_file_read connector"
+
+// The access gate. The server does not check access on the device-placed MCP path, so this is the
+// only thing between the cloud and the LAN while the user has not allowed operations.
+static void handle_http_request(const char *id, cJSON *root)
+{
+    if (!s_allow_operations) {
+        ESP_LOGW(TAG, "%s refused: read-only", id);
+        send_error(id, READ_ONLY_REFUSAL);
+        return;
+    }
+    if (!s_lan_ready) {
+        send_error(id, "http_request is unavailable: the device could not start its LAN worker");
+        return;
+    }
+    if (strlen(id) > ID_MAX) {
+        send_error(id, "request id too long for this device");
+        return;
+    }
+    lan_job_t job = {.session = s_session};
+    strlcpy(job.id, id, sizeof(job.id));
+    job.params = cJSON_DetachItemFromObjectCaseSensitive(root, "params");
+    if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
+        cJSON_Delete(job.params);
+        send_error(id, "the T-Circle is busy with other LAN requests; try again shortly");
+    }
+}
+
+static void lan_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        lan_job_t job;
+        xQueueReceive(s_lan_jobs, &job, portMAX_DELAY);
+        char *frame;
+        if (job.session != s_session) {
+            ESP_LOGI(TAG, "%s skipped: its socket closed", job.id);
+            frame = NULL;
+        } else if (!s_allow_operations) {
+            // Access was turned off while this one waited in line.
+            cJSON *obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(obj, "id", job.id);
+            cJSON_AddStringToObject(obj, "type", "error");
+            cJSON_AddStringToObject(obj, "error", READ_ONLY_REFUSAL);
+            frame = cJSON_PrintUnformatted(obj);
+            cJSON_Delete(obj);
+        } else {
+            frame = lan_http_run(job.id, job.params);
+        }
+        cJSON_Delete(job.params);
+        if (frame) {
+            post_session(EV_REPLY, frame, job.session);
+        }
+    }
+}
+
+static void handle_request(const char *id, const char *method, cJSON *root)
 {
     ESP_LOGI(TAG, "request %s %s", id, method);
+    const cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
     if (strcmp(method, "device_access") == 0) {
         handle_device_access(id, params);
     } else if (strcmp(method, "http_request") == 0) {
-        // The read-only wording matches salix-connect, so the agent sees the same refusal.
-        send_error(id, s_allow_operations ? "http_request is not supported by this firmware yet"
-                                          : "method \"http_request\" is not permitted for a local_file_read connector");
+        handle_http_request(id, root);
     } else {
         char message[128];
         snprintf(message, sizeof(message), "unknown method: %.100s", method);
@@ -404,8 +493,7 @@ static void handle_text(const char *json)
         } else if (!cJSON_IsString(method)) {
             send_error(id->valuestring, "method must be a string");
         } else {
-            handle_request(id->valuestring, method->valuestring,
-                           cJSON_GetObjectItemCaseSensitive(root, "params"));
+            handle_request(id->valuestring, method->valuestring, root);
         }
     } else if (strcmp(kind, "connected") == 0) {
         const cJSON *run = cJSON_GetObjectItemCaseSensitive(root, "connector_run_id");
@@ -432,9 +520,10 @@ static void log_stats(void)
     if (s_heartbeat_us != 0) {
         snprintf(age, sizeof(age), "%llds", (long long)((now - s_heartbeat_us) / 1000000));
     }
-    ESP_LOGI(TAG, "stats connected=%s last_heartbeat=%s reconnects=%d heap_internal=%u (min %u) psram=%u",
+    ESP_LOGI(TAG, "stats connected=%s last_heartbeat=%s reconnects=%d heap_internal=%u (min %u, largest %u) psram=%u",
              s_up ? "yes" : "no", age, s_reconnects, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
@@ -477,6 +566,7 @@ static int64_t run_session(const credentials_t *creds)
         ESP_LOGE(TAG, "connect URL or token too long");
         return 0;
     }
+    s_session++;
     s_close_code = 0;
     s_handshake_status = 0;
     s_assembling = false;
@@ -544,6 +634,10 @@ static int64_t run_session(const credentials_t *creds)
                 send_metadata();
             } else if (ev.kind == EV_TEXT) {
                 handle_text(ev.data);
+            } else if (ev.kind == EV_REPLY) {
+                if (ev.session == s_session) {
+                    send_json(ev.data);
+                }
             } else if (ev.kind == EV_TOO_BIG) {
                 if (ev.data) {
                     send_error(ev.data, "request too large for this device");
@@ -642,10 +736,17 @@ void connector_start(void)
     }
     started = true;
     s_events = xQueueCreate(16, sizeof(event_t));
+    s_lan_jobs = xQueueCreate(LAN_QUEUE_LEN, sizeof(lan_job_t));
     s_rx = heap_caps_malloc(RX_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_events || !s_rx) {
+    if (!s_events || !s_lan_jobs || !s_rx) {
         ESP_LOGE(TAG, "out of memory, Connector off");
         return;
+    }
+    // The worker never writes flash, so its stack can be in PSRAM.
+    s_lan_ready = xTaskCreateWithCaps(lan_worker, "lan", LAN_WORKER_STACK, NULL, LAN_WORKER_PRIO, NULL,
+                                      MALLOC_CAP_SPIRAM) == pdPASS;
+    if (!s_lan_ready) {
+        ESP_LOGE(TAG, "LAN worker create failed, http_request off");
     }
     if (xTaskCreate(connector_task, "connector", 6144, NULL, CONNECTOR_TASK_PRIO, NULL) != pdPASS) {
         ESP_LOGE(TAG, "task create failed, Connector off");

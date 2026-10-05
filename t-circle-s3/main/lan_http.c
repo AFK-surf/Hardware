@@ -1,0 +1,782 @@
+// http_request for the Connector. Built on esp_transport + http_parser rather than esp_http_client:
+// esp_http_client reads nothing from a response that has neither Content-Length nor chunked
+// encoding (its read loop compares against content_length = -1), and plenty of small LAN devices
+// answer HTTP/1.0-style, closing the connection to end the body.
+
+#include "lan_http.h"
+
+#include "wifi.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_transport.h"
+#include "esp_transport_ssl.h"
+#include "esp_transport_tcp.h"
+#include "http_parser.h"
+#include "lwip/inet.h"
+#include "lwip/netdb.h"
+
+#define HOST_MAX 253
+#define READ_CHUNK 2048
+#define HEADER_NAME_MAX 128
+#define HEADERS_MAX (16 * 1024)  // all response header bytes together
+#define ERR_MAX 400
+#define USER_AGENT "comma-t-circle/0.1"
+
+static const char *TAG = "lan_http";
+
+// ---- Growable string in PSRAM ------------------------------------------------------------------
+
+typedef struct {
+    char *p;
+    size_t len;
+    size_t cap;
+    bool oom;
+} sb_t;
+
+static void sb_add(sb_t *b, const char *s, size_t n)
+{
+    if (b->oom) {
+        return;
+    }
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < b->len + n + 1) {
+            cap *= 2;
+        }
+        char *p = heap_caps_realloc(b->p, cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!p) {
+            b->oom = true;
+            return;
+        }
+        b->p = p;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
+static void sb_str(sb_t *b, const char *s)
+{
+    sb_add(b, s, strlen(s));
+}
+
+static void sb_free(sb_t *b)
+{
+    free(b->p);
+    memset(b, 0, sizeof(*b));
+}
+
+// Length of the valid UTF-8 sequence at s (1-4), or 0 when it is invalid or cut off.
+static size_t utf8_len(const uint8_t *s, size_t n)
+{
+    const uint8_t c = s[0];
+    size_t len;
+    uint32_t cp;
+    if (c < 0x80) {
+        return 1;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+        len = 2;
+        cp = c & 0x1F;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        len = 3;
+        cp = c & 0x0F;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        len = 4;
+        cp = c & 0x07;
+    } else {
+        return 0;
+    }
+    if (n < len) {
+        return 0;
+    }
+    for (size_t i = 1; i < len; ++i) {
+        if ((s[i] & 0xC0) != 0x80) {
+            return 0;
+        }
+        cp = (cp << 6) | (s[i] & 0x3F);
+    }
+    // Overlong forms, UTF-16 surrogates and anything past U+10FFFF.
+    if ((len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000) || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+        return 0;
+    }
+    return len;
+}
+
+// A JSON string literal of these bytes. Invalid UTF-8 becomes U+FFFD, like Go's encoding/json.
+static void sb_json(sb_t *b, const char *s, size_t n)
+{
+    const uint8_t *u = (const uint8_t *)s;
+    sb_add(b, "\"", 1);
+    size_t run = 0;  // start of the pending stretch that needs no escaping
+    for (size_t i = 0; i < n;) {
+        const uint8_t c = u[i];
+        const char *esc = NULL;
+        char hex[8];
+        size_t step = 1;
+        if (c == '"') {
+            esc = "\\\"";
+        } else if (c == '\\') {
+            esc = "\\\\";
+        } else if (c == '\n') {
+            esc = "\\n";
+        } else if (c == '\r') {
+            esc = "\\r";
+        } else if (c == '\t') {
+            esc = "\\t";
+        } else if (c < 0x20) {
+            snprintf(hex, sizeof(hex), "\\u%04x", c);
+            esc = hex;
+        } else if (c >= 0x80) {
+            step = utf8_len(u + i, n - i);
+            if (step == 0) {
+                esc = "\xEF\xBF\xBD";
+                step = 1;
+            }
+        }
+        if (esc) {
+            sb_add(b, s + run, i - run);
+            sb_str(b, esc);
+            run = i + step;
+        }
+        i += step;
+    }
+    sb_add(b, s + run, n - run);
+    sb_add(b, "\"", 1);
+}
+
+static char *error_frame(const char *id, const char *message)
+{
+    sb_t b = {0};
+    sb_str(&b, "{\"id\":");
+    sb_json(&b, id, strlen(id));
+    sb_str(&b, ",\"type\":\"error\",\"error\":");
+    sb_json(&b, message, strlen(message));
+    sb_str(&b, "}");
+    if (b.oom) {
+        sb_free(&b);
+    }
+    return b.p;
+}
+
+// ---- URL and destination -----------------------------------------------------------------------
+
+typedef struct {
+    bool https;
+    char host[HOST_MAX + 1];
+    int port;
+    bool explicit_port;
+    const char *path;  // from the first '/' or '?' after the authority; "" if none
+    size_t path_len;   // without any #fragment
+} url_t;
+
+static bool parse_url(const char *url, url_t *u, char *err)
+{
+    memset(u, 0, sizeof(*u));
+    for (const char *p = url; *p; ++p) {
+        if ((unsigned char)*p <= 0x20 || *p == 0x7F) {
+            snprintf(err, ERR_MAX, "'url' must not contain spaces or control characters");
+            return false;
+        }
+    }
+    const char *sep = strstr(url, "://");
+    if (!sep || sep == url) {
+        snprintf(err, ERR_MAX, "'url' must be an absolute http or https URL");
+        return false;
+    }
+    const size_t scheme_len = (size_t)(sep - url);
+    if (scheme_len == 4 && strncasecmp(url, "http", 4) == 0) {
+        u->https = false;
+    } else if (scheme_len == 5 && strncasecmp(url, "https", 5) == 0) {
+        u->https = true;
+    } else {
+        snprintf(err, ERR_MAX, "'url' must use http or https");
+        return false;
+    }
+    const char *auth = sep + 3;
+    const size_t auth_len = strcspn(auth, "/?#");
+    const char *host = auth;
+    for (const char *p = auth; p < auth + auth_len; ++p) {
+        if (*p == '@') {
+            snprintf(err, ERR_MAX, "credentials in the URL are not supported; send an Authorization header");
+            return false;
+        }
+    }
+    if (auth_len == 0) {
+        snprintf(err, ERR_MAX, "'url' must be an absolute http or https URL");
+        return false;
+    }
+    if (host[0] == '[') {
+        snprintf(err, ERR_MAX, "IPv6 destinations are not supported by this device");
+        return false;
+    }
+    const char *colon = memchr(host, ':', auth_len);
+    const size_t host_len = colon ? (size_t)(colon - host) : auth_len;
+    if (host_len == 0 || host_len > HOST_MAX) {
+        snprintf(err, ERR_MAX, "'url' has an invalid host");
+        return false;
+    }
+    memcpy(u->host, host, host_len);
+    u->port = u->https ? 443 : 80;
+    if (colon) {
+        const char *p = colon + 1;
+        const char *end = auth + auth_len;
+        long port = 0;
+        if (p == end) {
+            port = u->port;  // "host:" means the default port
+        }
+        for (; p < end; ++p) {
+            if (*p < '0' || *p > '9' || port > 65535) {
+                port = -1;
+                break;
+            }
+            port = port * 10 + (*p - '0');
+        }
+        if (port < 1 || port > 65535) {
+            snprintf(err, ERR_MAX, "'url' has an invalid port");
+            return false;
+        }
+        u->port = (int)port;
+        u->explicit_port = colon + 1 != end;
+    }
+    u->path = auth + auth_len;
+    u->path_len = strcspn(u->path, "#");
+    return true;
+}
+
+// Strict a.b.c.d (no octal, hex or short forms). Network byte order.
+static bool parse_ipv4(const char *s, uint32_t *out)
+{
+    uint32_t v = 0;
+    for (int part = 0; part < 4; ++part) {
+        if (*s < '0' || *s > '9' || (s[0] == '0' && s[1] >= '0' && s[1] <= '9')) {
+            return false;
+        }
+        unsigned n = 0;
+        while (*s >= '0' && *s <= '9') {
+            n = n * 10 + (unsigned)(*s++ - '0');
+            if (n > 255) {
+                return false;
+            }
+        }
+        v = (v << 8) | n;
+        if (part < 3 && *s++ != '.') {
+            return false;
+        }
+    }
+    if (*s) {
+        return false;
+    }
+    *out = htonl(v);
+    return true;
+}
+
+static bool resolve(const char *host, uint32_t *ip, char *err)
+{
+    if (parse_ipv4(host, ip)) {
+        return true;
+    }
+    const struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) {
+        snprintf(err, ERR_MAX, "could not resolve %s", host);
+        return false;
+    }
+    *ip = ((const struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+    freeaddrinfo(res);
+    return true;
+}
+
+static int prefix_len(uint32_t mask)
+{
+    int n = 0;
+    while (mask & 0x80000000u) {
+        n++;
+        mask <<= 1;
+    }
+    return n;
+}
+
+// Only LAN destinations. ip is in network byte order.
+static bool lan_destination(uint32_t ip, char *err)
+{
+    uint32_t self_n = 0;
+    uint32_t mask_n = 0;
+    if (!wifi_ip_info(&self_n, &mask_n)) {
+        snprintf(err, ERR_MAX, "the device is not on a network right now");
+        return false;
+    }
+    const uint32_t a = ntohl(ip);
+    const uint32_t self = ntohl(self_n);
+    const uint32_t mask = ntohl(mask_n);
+    char shown[16];
+    snprintf(shown, sizeof(shown), "%u.%u.%u.%u", (unsigned)(a >> 24), (unsigned)(a >> 16) & 0xFF,
+             (unsigned)(a >> 8) & 0xFF, (unsigned)a & 0xFF);
+    const char *why = NULL;
+    // Only a reasonably small own subnet counts as LAN, so a /8 of public space doesn't.
+    const bool own_subnet = prefix_len(mask) >= 16 && (a & mask) == (self & mask);
+    const bool is_private = (a >> 24) == 10 || (a >> 20) == 0xAC1 || (a >> 16) == 0xC0A8 || (a >> 16) == 0xA9FE;
+    if ((a >> 24) == 127) {
+        why = "a loopback address";
+    } else if (a == self) {
+        why = "the T-Circle itself";
+    } else if ((a >> 24) == 0) {
+        why = "not a valid destination";
+    } else if (a >= 0xE0000000u) {
+        why = "a multicast, broadcast or reserved address";
+    } else if (own_subnet && prefix_len(mask) <= 30 && (a == (self & mask) || a == (self | ~mask))) {
+        why = "the network or broadcast address of the local subnet";
+    } else if (!is_private && !own_subnet) {
+        snprintf(err, ERR_MAX,
+                 "%s is a public address. The T-Circle only reaches the local network (private, link-local or its "
+                 "own subnet); use web.http_request for the internet",
+                 shown);
+        return false;
+    }
+    if (why) {
+        snprintf(err, ERR_MAX, "%s is %s; the T-Circle only reaches other devices on the local network", shown, why);
+        return false;
+    }
+    return true;
+}
+
+// ---- Response parsing --------------------------------------------------------------------------
+
+typedef struct {
+    cJSON *headers;  // canonical name -> [values]
+    char field[HEADER_NAME_MAX + 1];
+    size_t field_len;
+    sb_t value;
+    bool in_value;
+    bool field_too_long;
+    size_t header_bytes;
+    bool headers_done;
+    bool complete;
+    sb_t body;
+    size_t limit;  // keep at most limit bytes; one more means truncated
+    bool truncated;
+    bool oom;
+} resp_t;
+
+// Go's textproto.CanonicalMIMEHeaderKey for the usual token characters: content-type -> Content-Type.
+static void canonical_name(char *s)
+{
+    bool upper = true;
+    for (; *s; ++s) {
+        if (*s >= 'a' && *s <= 'z' && upper) {
+            *s -= 'a' - 'A';
+        } else if (*s >= 'A' && *s <= 'Z' && !upper) {
+            *s += 'a' - 'A';
+        }
+        upper = *s == '-';
+    }
+}
+
+static int commit_header(resp_t *r)
+{
+    if (!r->in_value) {
+        return 0;
+    }
+    r->in_value = false;
+    if (r->field_too_long || r->field_len == 0) {
+        sb_free(&r->value);
+        r->field_len = 0;
+        r->field_too_long = false;
+        return 0;
+    }
+    r->field[r->field_len] = 0;
+    canonical_name(r->field);
+    cJSON *list = cJSON_GetObjectItemCaseSensitive(r->headers, r->field);
+    if (!list) {
+        list = cJSON_AddArrayToObject(r->headers, r->field);
+    }
+    cJSON *item = cJSON_CreateString(r->value.p ? r->value.p : "");
+    if (!list || !item) {
+        cJSON_Delete(item);
+        r->oom = true;
+        return 1;
+    }
+    cJSON_AddItemToArray(list, item);
+    sb_free(&r->value);
+    r->field_len = 0;
+    return 0;
+}
+
+static int on_header_field(http_parser *p, const char *at, size_t len)
+{
+    resp_t *r = p->data;
+    if (commit_header(r) != 0) {
+        return 1;
+    }
+    r->header_bytes += len;
+    if (r->field_len + len > HEADER_NAME_MAX) {
+        r->field_too_long = true;
+    } else {
+        memcpy(r->field + r->field_len, at, len);
+        r->field_len += len;
+    }
+    return r->header_bytes > HEADERS_MAX;
+}
+
+static int on_header_value(http_parser *p, const char *at, size_t len)
+{
+    resp_t *r = p->data;
+    r->in_value = true;
+    r->header_bytes += len;
+    sb_add(&r->value, at, len);
+    if (r->value.oom) {
+        r->oom = true;
+        return 1;
+    }
+    return r->header_bytes > HEADERS_MAX;
+}
+
+static int on_headers_complete(http_parser *p)
+{
+    resp_t *r = p->data;
+    r->headers_done = true;
+    return commit_header(r);
+}
+
+static int on_body(http_parser *p, const char *at, size_t len)
+{
+    resp_t *r = p->data;
+    const size_t room = r->limit - r->body.len;
+    if (len > room) {
+        sb_add(&r->body, at, room);
+        r->truncated = true;
+        return 1;  // enough: stop reading
+    }
+    sb_add(&r->body, at, len);
+    if (r->body.oom) {
+        r->oom = true;
+        return 1;
+    }
+    return 0;
+}
+
+static int on_message_complete(http_parser *p)
+{
+    ((resp_t *)p->data)->complete = true;
+    return 0;
+}
+
+// ---- Request -----------------------------------------------------------------------------------
+
+static const char *const METHODS[] = {"GET", "POST", "PUT", "PATCH", "DELETE"};
+
+static bool header_is(const char *name, const char *want)
+{
+    return strcasecmp(name, want) == 0;
+}
+
+// Header values as salix-connect's stringFromAny would print the common JSON types.
+static char *header_value(const cJSON *v)
+{
+    if (cJSON_IsString(v)) {
+        return strdup(v->valuestring);
+    }
+    if (cJSON_IsNull(v)) {
+        return strdup("");
+    }
+    if (cJSON_IsBool(v)) {
+        return strdup(cJSON_IsTrue(v) ? "true" : "false");
+    }
+    return cJSON_PrintUnformatted(v);
+}
+
+// Request line and headers. Framing headers (Host, Content-Length, Connection, Transfer-Encoding)
+// are always the device's own.
+static bool build_request(sb_t *req, const char *method, const url_t *u, const cJSON *headers, size_t body_len,
+                          char *err)
+{
+    sb_str(req, method);
+    sb_str(req, " ");
+    if (u->path_len == 0 || u->path[0] != '/') {
+        sb_str(req, "/");
+    }
+    sb_add(req, u->path, u->path_len);
+    sb_str(req, " HTTP/1.1\r\nHost: ");
+    sb_str(req, u->host);
+    if (u->explicit_port) {
+        char port[8];
+        snprintf(port, sizeof(port), ":%d", u->port);
+        sb_str(req, port);
+    }
+    sb_str(req, "\r\nConnection: close\r\n");
+    bool has_type = false;
+    bool has_agent = false;
+    const cJSON *list = cJSON_IsObject(headers) ? headers : NULL;
+    const cJSON *h;
+    cJSON_ArrayForEach(h, list)
+    {
+        const char *name = h->string;
+        if (!name || !name[0] || header_is(name, "Host") || header_is(name, "Content-Length") ||
+            header_is(name, "Connection") || header_is(name, "Transfer-Encoding")) {
+            continue;
+        }
+        for (const char *c = name; *c; ++c) {
+            if ((unsigned char)*c <= 0x20 || *c == ':' || *c == 0x7F) {
+                snprintf(err, ERR_MAX, "invalid header name: %.60s", name);
+                return false;
+            }
+        }
+        char *value = header_value(h);
+        if (!value) {
+            snprintf(err, ERR_MAX, "out of memory");
+            return false;
+        }
+        if (strpbrk(value, "\r\n")) {
+            free(value);
+            snprintf(err, ERR_MAX, "header %.60s has a line break in its value", name);
+            return false;
+        }
+        has_type |= header_is(name, "Content-Type");
+        has_agent |= header_is(name, "User-Agent");
+        sb_str(req, name);
+        sb_str(req, ": ");
+        sb_str(req, value);
+        sb_str(req, "\r\n");
+        free(value);
+    }
+    if (!has_agent) {
+        sb_str(req, "User-Agent: " USER_AGENT "\r\n");
+    }
+    if (body_len > 0 && !has_type) {
+        sb_str(req, "Content-Type: application/json\r\n");
+    }
+    // Like Go's net/http: an empty body still gets "Content-Length: 0" on POST, PUT and PATCH.
+    if (body_len > 0 || strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 || strcmp(method, "PATCH") == 0) {
+        char line[40];
+        snprintf(line, sizeof(line), "Content-Length: %u\r\n", (unsigned)body_len);
+        sb_str(req, line);
+    }
+    sb_str(req, "\r\n");
+    if (req->oom) {
+        snprintf(err, ERR_MAX, "out of memory");
+        return false;
+    }
+    return true;
+}
+
+static int remaining_ms(int64_t deadline_us)
+{
+    const int64_t left = (deadline_us - esp_timer_get_time()) / 1000;
+    return left > 0 ? (int)left : 0;
+}
+
+static bool write_all(esp_transport_handle_t t, const char *p, size_t n, int64_t deadline_us)
+{
+    while (n > 0) {
+        const int ms = remaining_ms(deadline_us);
+        if (ms == 0) {
+            return false;
+        }
+        const int w = esp_transport_write(t, p, (int)n, ms);
+        if (w <= 0) {
+            return false;
+        }
+        p += w;
+        n -= (size_t)w;
+    }
+    return true;
+}
+
+static char *response_frame(const char *id, int status, const resp_t *r, const char *url, const char *method)
+{
+    char *headers = cJSON_PrintUnformatted(r->headers);
+    sb_t b = {0};
+    char num[64];
+    sb_str(&b, "{\"id\":");
+    sb_json(&b, id, strlen(id));
+    snprintf(num, sizeof(num), ",\"type\":\"response\",\"result\":{\"status\":%d,\"headers\":", status);
+    sb_str(&b, num);
+    sb_str(&b, headers ? headers : "{}");
+    sb_str(&b, ",\"body\":");
+    sb_json(&b, r->body.p ? r->body.p : "", r->body.len);
+    sb_str(&b, r->truncated ? ",\"truncated\":true" : ",\"truncated\":false");
+    sb_str(&b, ",\"final_url\":");
+    sb_json(&b, url, strlen(url));
+    sb_str(&b, ",\"method\":");
+    sb_json(&b, method, strlen(method));
+    snprintf(num, sizeof(num), ",\"body_bytes\":%u}}", (unsigned)r->body.len);
+    sb_str(&b, num);
+    cJSON_free(headers);
+    if (b.oom || !headers) {
+        sb_free(&b);
+    }
+    return b.p;
+}
+
+char *lan_http_run(const char *id, const cJSON *params)
+{
+    char err[ERR_MAX] = "";
+    const int64_t started_us = esp_timer_get_time();
+    if (!cJSON_IsObject(params)) {
+        params = NULL;  // every field below has a default or a clear error
+    }
+
+    // Method (default POST, like salix-connect).
+    const cJSON *jm = cJSON_GetObjectItemCaseSensitive(params, "method");
+    const char *raw_method = cJSON_IsString(jm) && jm->valuestring[0] ? jm->valuestring : "POST";
+    const char *method = NULL;
+    for (size_t i = 0; i < sizeof(METHODS) / sizeof(METHODS[0]); ++i) {
+        if (strcasecmp(raw_method, METHODS[i]) == 0) {
+            method = METHODS[i];
+        }
+    }
+    if (!method) {
+        snprintf(err, sizeof(err), "unsupported HTTP method: %.40s", raw_method);
+        return error_frame(id, err);
+    }
+
+    const cJSON *ju = cJSON_GetObjectItemCaseSensitive(params, "url");
+    if (!cJSON_IsString(ju) || !ju->valuestring[0]) {
+        return error_frame(id, "'url' is required");
+    }
+    const char *url_text = ju->valuestring;
+    url_t url;
+    if (!parse_url(url_text, &url, err)) {
+        return error_frame(id, err);
+    }
+
+    const cJSON *jt = cJSON_GetObjectItemCaseSensitive(params, "timeout_seconds");
+    // salix-connect's default (120 s) is over the device cap, so no value or a bad one means the cap.
+    int timeout_s = LAN_HTTP_TIMEOUT_MAX_S;
+    if (cJSON_IsNumber(jt) && jt->valuedouble >= 1 && jt->valuedouble < LAN_HTTP_TIMEOUT_MAX_S) {
+        timeout_s = (int)jt->valuedouble;
+    }
+    const cJSON *jx = cJSON_GetObjectItemCaseSensitive(params, "max_bytes");
+    double max_bytes = cJSON_IsNumber(jx) ? jx->valuedouble : 0;
+    const size_t limit = (max_bytes <= 0 || max_bytes > LAN_HTTP_MAX_BYTES) ? LAN_HTTP_MAX_BYTES : (size_t)max_bytes;
+
+    const cJSON *jb = cJSON_GetObjectItemCaseSensitive(params, "body");
+    const char *body = cJSON_IsString(jb) ? jb->valuestring : "";
+    const size_t body_len = strlen(body);
+
+    const int64_t deadline_us = started_us + (int64_t)timeout_s * 1000000;
+    uint32_t ip = 0;
+    if (!resolve(url.host, &ip, err) || !lan_destination(ip, err)) {
+        ESP_LOGW(TAG, "%s refused: %s", id, err);
+        return error_frame(id, err);
+    }
+    char ip_text[16];
+    inet_ntoa_r(*(struct in_addr *)&ip, ip_text, sizeof(ip_text));
+
+    sb_t req = {0};
+    if (!build_request(&req, method, &url, cJSON_GetObjectItemCaseSensitive(params, "headers"), body_len, err)) {
+        sb_free(&req);
+        return error_frame(id, err);
+    }
+
+    esp_transport_handle_t t = url.https ? esp_transport_ssl_init() : esp_transport_tcp_init();
+    resp_t r = {.headers = cJSON_CreateObject(), .limit = limit};
+    char *buf = heap_caps_malloc(READ_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *frame = NULL;
+    int status = 0;
+    if (!t || !r.headers || !buf) {
+        snprintf(err, sizeof(err), "out of memory");
+        goto done;
+    }
+    if (url.https) {
+        esp_transport_ssl_crt_bundle_attach(t, esp_crt_bundle_attach);
+        // The connection goes to the IP checked above (no second lookup to rebind), while TLS
+        // still verifies the certificate against the name in the URL.
+        esp_transport_ssl_set_common_name(t, url.host);
+    }
+
+    ESP_LOGI(TAG, "%s %s %s:%d%s (timeout %d s, max %u B)", id, method, url.host, url.port, url.https ? " tls" : "",
+             timeout_s, (unsigned)limit);
+    if (esp_transport_connect(t, ip_text, url.port, remaining_ms(deadline_us)) < 0) {
+        const int e = esp_transport_get_errno(t);
+        if (remaining_ms(deadline_us) == 0) {
+            snprintf(err, sizeof(err), "request to %s timed out after %d s", url.host, timeout_s);
+        } else if (url.https && e == 0) {
+            snprintf(err, sizeof(err), "TLS connection to %s:%d failed (handshake or untrusted certificate)", url.host,
+                     url.port);
+        } else {
+            snprintf(err, sizeof(err), "connect to %s:%d failed: %s", url.host, url.port,
+                     e ? strerror(e) : "connection refused or unreachable");
+        }
+        goto done;
+    }
+    if (!write_all(t, req.p, req.len, deadline_us) || !write_all(t, body, body_len, deadline_us)) {
+        snprintf(err, sizeof(err), remaining_ms(deadline_us) ? "sending the request to %s failed"
+                                                              : "request to %s timed out while sending",
+                 url.host);
+        goto done;
+    }
+
+    http_parser parser;
+    http_parser_init(&parser, HTTP_RESPONSE);
+    parser.data = &r;
+    http_parser_settings settings = {
+        .on_header_field = on_header_field,
+        .on_header_value = on_header_value,
+        .on_headers_complete = on_headers_complete,
+        .on_body = on_body,
+        .on_message_complete = on_message_complete,
+    };
+    while (!r.complete && !r.truncated) {
+        const int ms = remaining_ms(deadline_us);
+        if (ms == 0) {
+            snprintf(err, sizeof(err), "request to %s timed out after %d s", url.host, timeout_s);
+            goto done;
+        }
+        const int n = esp_transport_read(t, buf, READ_CHUNK, ms > 1000 ? 1000 : ms);
+        if (n == ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT) {
+            continue;
+        }
+        if (n < 0) {
+            // Closed (FIN or error): an HTTP/1.0-style body ends here; tell the parser.
+            http_parser_execute(&parser, &settings, NULL, 0);
+            if (!r.complete && !r.truncated) {
+                snprintf(err, sizeof(err), "%s closed the connection before the whole response arrived", url.host);
+                goto done;
+            }
+            break;
+        }
+        const size_t used = http_parser_execute(&parser, &settings, buf, (size_t)n);
+        if (r.oom) {
+            snprintf(err, sizeof(err), "out of memory reading the response");
+            goto done;
+        }
+        if (used != (size_t)n && !r.truncated && !r.complete) {
+            snprintf(err, sizeof(err), r.header_bytes > HEADERS_MAX ? "response headers from %s are too large"
+                                                                    : "invalid HTTP response from %s",
+                     url.host);
+            goto done;
+        }
+    }
+    status = parser.status_code;
+    frame = response_frame(id, status, &r, url_text, method);
+    if (!frame) {
+        snprintf(err, sizeof(err), "out of memory building the response");
+    }
+
+done:
+    ESP_LOGI(TAG, "%s -> %s%d, %u B%s, %lld ms", id, frame ? "" : "error ", frame ? status : 0, (unsigned)r.body.len,
+             r.truncated ? " (truncated)" : "", (long long)((esp_timer_get_time() - started_us) / 1000));
+    if (!frame) {
+        ESP_LOGW(TAG, "%s failed: %s", id, err);
+        frame = error_frame(id, err);
+    }
+    if (t) {
+        esp_transport_close(t);
+        esp_transport_destroy(t);
+    }
+    free(buf);
+    sb_free(&req);
+    sb_free(&r.value);
+    sb_free(&r.body);
+    cJSON_Delete(r.headers);
+    return frame;
+}

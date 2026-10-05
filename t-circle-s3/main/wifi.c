@@ -298,6 +298,17 @@ void wifi_ip_string(char *out, size_t len)
     }
 }
 
+bool wifi_ip_info(uint32_t *ip, uint32_t *netmask)
+{
+    esp_netif_ip_info_t info;
+    if (!s_up || !s_netif || esp_netif_get_ip_info(s_netif, &info) != ESP_OK || info.ip.addr == 0) {
+        return false;
+    }
+    *ip = info.ip.addr;
+    *netmask = info.netmask.addr;
+    return true;
+}
+
 esp_err_t wifi_wait(uint32_t timeout_ms)
 {
     if (!s_started || s_mode == MODE_NONE) {

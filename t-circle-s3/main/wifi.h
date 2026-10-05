@@ -50,5 +50,8 @@ bool wifi_is_up(void);
 // "a.b.c.d", or "" when down.
 void wifi_ip_string(char *out, size_t len);
 
+// The station's IPv4 address and netmask, in network byte order. False when down.
+bool wifi_ip_info(uint32_t *ip, uint32_t *netmask);
+
 // Block until the station has an IP, or the timeout elapses.
 esp_err_t wifi_wait(uint32_t timeout_ms);
