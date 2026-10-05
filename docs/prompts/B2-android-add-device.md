@@ -11,7 +11,7 @@ Signed-in user → Settings › Devices › Add device. The app finds the T-Circ
 ## Context
 
 - Voice credentials today: `app/src/main/java/surf/comma/android/voice/VoiceCredentials.kt`, which calls `POST /v1/comma/workspaces/:ws/voice-api-keys` with a name and `expires_at`. Mint one key per device, named after the device. Ask the user about expiry; the plan defaults to long-lived and revoked on unpair.
-- Connector token: `POST /v1/comma/workspaces/:ws/connector-token`. Backend: `~/Desktop/AFK/Cue/systems/apps/comma_web/lib/comma_web/router.ex:2046, 4689-4712`. Pass a device name. Ask whether to set a first-registration window; a token with no expiry does not expire. The response includes `device_id`.
+- Connector token: `POST /v1/comma/workspaces/:ws/connector-token`. Backend: `~/Desktop/AFK/Cue/systems/apps/comma_web/lib/comma_web/router.ex:2046, 4689-4712`. Pass a device name. Ask whether to set a first-registration window; a token with no expiry does not expire. The response includes `device_id` and `connect_url`. Write `connect_url` to the device as-is: it is the Salix address the device dials for `/v1/connect`, not the API base URL (A1 report, item 5).
 - Device list and status: `GET /v1/comma/workspaces/:ws/devices[/:id]`.
 - Follow the repo's AGENTS.md/CLAUDE.md, Comma design tokens and the existing settings-page patterns. Visible text is English.
 

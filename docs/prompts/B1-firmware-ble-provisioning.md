@@ -14,7 +14,8 @@ A freshly flashed T-Circle can be set up from the Comma Android app with no comp
   - `wifi_scan`: write to start a scan; notify a JSON list `[{ssid, rssi, secure}]`. 2.4 GHz only; say so in the UI text.
   - `wifi_credentials`: write `{ssid, password}`.
   - `credentials`: write JSON:
-    - `server`: for example `https://salix-staging.cue.surf`
+    - `server`: the voice base URL, for example `https://salix-staging.cue.surf`
+    - `connect_url`: the Connector URL returned with the connector token. It's the Salix address, not the API address (see `docs/reports/A1-report.md`).
     - `workspace_id`, `group_id`
     - `connector_token`
     - `voice_key` (`salix_vk_…`)
