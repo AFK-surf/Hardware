@@ -6,3 +6,5 @@ managed_components/
 .cache/
 secrets.h
 .DS_Store
+tools/.venv/
+tools/.mini-device-access.json*

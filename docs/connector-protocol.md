@@ -1,0 +1,151 @@
+# Comma Connector protocol: the subset T-Circle implements
+
+2026-10-05 · verified by `tools/mini_connector.py` against a local Salix (A1). Evidence and reasoning are in `reports/A1-report.md`.
+Line numbers refer to Cue `main` at `d52347f1e`, under `systems/`.
+
+## 1. Credential
+
+A connector token (`salix_conn_…`) is minted per device:
+
+```
+POST /v1/comma/workspaces/:ws/connector-token      (user session, full workspace session)
+{"name": "T-Circle", "alias": "tcircle"}
+→ 201 {"token": "salix_conn_…", "device_id": "dev_…", "connector_id": "conn_…",
+        "connect_url": "wss://<salix-host>/v1/connect", "server": "wss://<salix-host>",
+        "credential_generation": 1, "expires_at": null, …}
+```
+
+- Store `token` and `connect_url` in NVS. **Use `connect_url` as given.** It is the Salix host, not the Comma API host (locally `ws://127.0.0.1:4000`, not `:4200`).
+- `expires_at: null` means it never expires. Revocation shows up as HTTP 401/403 on the next dial (or as the socket closing).
+- The token fixes `device_id`, so every reconnect lands on the same device record.
+
+## 2. Dial
+
+```
+GET {connect_url}?name=T-Circle&alias=tcircle&os=esp-idf&arch=xtensa&scope=<scope>
+Authorization: Bearer salix_conn_…
+X-Salix-Connector-Instance-ID: <random UUID per boot>
+(normal WebSocket upgrade, no permessage-deflate)
+```
+
+| Field | Required? | Notes |
+|---|---|---|
+| `Authorization` | **yes** | Header only. `Bearer ` prefix optional; a token in the query string is rejected (401). |
+| `scope` | **yes, in practice** | `""` (operations allowed) or `local_file_read` (read-only). Any other value is rejected with 400. Send it on every dial (see §5). |
+| `name` | no | Defaults to the token's name. |
+| `alias` | no | Defaults to the token's alias. |
+| `os`, `arch` | no | Shown in Settings. |
+| `X-Salix-Connector-Instance-ID` | no | ≤128 bytes. Keep it stable across reconnects within one boot; generate a new one each boot. |
+| `group_id` | **never** | 400 `group_id is not accepted with connector credential auth`. |
+
+Handshake failures are JSON `{"error": "..."}` bodies: 401 `unauthorized` (bad, missing or revoked token), 403 (credential revoked or expired), 400 (bad `scope` or `group_id` present), 503 (try again later).
+
+## 3. Frames
+
+One JSON object per WebSocket **text** frame. The server ignores binary frames, invalid JSON and unknown `type`s. Max frame is 16 MiB each way; T-Circle should cap its own buffers far lower (§6).
+
+### Server → device
+
+```json
+{"type":"connected","connector_run_id":"run_voWRnWbVJmOE1kJJ","device_id":"dev_Pc8wBuEUfP5LT55XBx3qBw",
+ "connector_id":"conn_ZnWGBt3zzh8-ZSiYBjW5lQ","owner_user_id":"usr_HT4lByGvItZN","connection_generation":12}
+```
+Sent once, right after the upgrade. Logging it is enough; no reply is needed.
+
+```json
+{"type":"heartbeat"}
+```
+Sent every 15 s. **Reply with `{"type":"heartbeat"}` every time.**
+
+```json
+{"id":"req_7GSGEDzFTz13NEO9","type":"request","method":"http_request",
+ "params":{"method":"POST","url":"http://192.168.5.19:8765/mcp",
+           "headers":{"accept":"application/json, text/event-stream","content-type":"application/json"},
+           "body":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
+           "timeout_seconds":115,"max_bytes":10485760}}
+```
+
+```json
+{"id":"req_LB4ksvfUcC8ykGEY","type":"request","method":"device_access","params":{"allow_operations":true}}
+```
+
+The server may send **any** method name. Capabilities don't declare methods, so every request needs an answer (§4).
+
+### Device → server
+
+**metadata**: send right after the socket opens (no need to wait for `connected`), and again whenever access changes.
+```json
+{"type":"metadata",
+ "capabilities":{"scope":"","device_access":true,"execution_boundary":"lan-gateway",
+                 "persistent_processes":false,"computer_use_tool":false,"host_access_required":false,
+                 "runtime_probe":false,"meeting_runtime":false,
+                 "component_versions":{"t-circle":"0.1.0"}},
+ "skills":[],
+ "system_info":{"client_source":"t-circle","hostname":"T-Circle","os_type":"esp-idf","arch":"xtensa",
+                "collected_at":1791187838}}
+```
+- `capabilities.scope` must match the current access state (`""` or `"local_file_read"`).
+- `system_info.hostname` becomes the name shown in Settings › Devices.
+- `skills` is optional. The server stores it but no agent reads it, so `[]` or omitting it has no effect.
+- Unknown keys are allowed and stored (the public projection drops them). Do **not** send `agent_runtimes`.
+
+**heartbeat**: `{"type":"heartbeat"}`, as a reply to each server heartbeat.
+
+**response**: echo `id` exactly.
+```json
+{"id":"req_7GSGEDzFTz13NEO9","type":"response",
+ "result":{"status":200,"headers":{"Content-Type":["application/json"]},"body":"{…}",
+           "truncated":false,"final_url":"http://192.168.5.19:8765/mcp","method":"POST","body_bytes":118}}
+```
+
+**error**: echo `id`. The `error` string reaches the agent verbatim.
+```json
+{"id":"req_eR4BgPf5e2AK4xTo","type":"error","error":"method \"http_request\" is not permitted for a local_file_read connector"}
+```
+
+## 4. Methods
+
+### `http_request`
+Params: `method` (GET/POST/PUT/PATCH/DELETE; default **POST**), `url` (absolute `http`/`https`, required), `headers` (string → string), `body` (string), `timeout_seconds` (default 120), `max_bytes`.
+- If `body` is non-empty and no Content-Type header is set, send `Content-Type: application/json`.
+- Do **not** follow redirects. Return the 3xx as is; `final_url` = the request URL.
+- Read at most `min(max_bytes, device cap)` bytes. Set `truncated: true` when the body was longer.
+- `headers` in the result: header name → **array** of values.
+- `body` in the result: UTF-8 text (replace invalid bytes).
+- Errors (bad URL, unsupported method, connect failure, timeout): send an `error` frame with a short message.
+- **Gate:** while access is read-only, reply `error` without touching the network (§5).
+
+### `device_access`
+Params `{"allow_operations": bool}`. Anything else → `error` `allow_operations must be a boolean`.
+1. Save the new access state to NVS (`true` → `""`, `false` → `local_file_read`).
+2. Re-send `metadata` with the new `capabilities.scope`. **Required**: the server's routing view and Settings' `allows_operations` come only from metadata (or the dial `scope`), never from this response.
+3. Reply `{"allows_operations": <bool>}`. Comma checks the value matches the request, or the Settings toggle fails.
+
+### Anything else
+Reply with `error` `unknown method: <name>`. The server hands that string to the caller and keeps the socket open.
+
+## 5. Access state
+
+- On first boot, or when nothing is stored, the device is **read-only** (`local_file_read`), like salix-connect `--device`.
+- Always send the current state as the dial `scope` and as `metadata.capabilities.scope`. Once a device has reported a scope, a later connection that reports none is shown with **no command environment** at all; the server treats the old scope as stale (verified).
+- The server does **not** enforce access on the device-placed MCP path. Settings toggles the device's own state, and only the device's check stops `http_request` (verified: with access off, the call reached the device and was refused there). **The firmware gate is the real gate.**
+
+## 6. Liveness, timeouts, limits
+
+| Item | Value |
+|---|---|
+| Server heartbeat interval | 15 s |
+| Server drops the socket when | ≥45 s since the last **device** `heartbeat` frame. Checked on each 15 s tick; closes with code 1011. Other frames don't count. |
+| Device read timeout (salix-connect) | 45 s without any frame → treat as dead, reconnect |
+| Server wait on `http_request` | 120 s (or `timeout_seconds`+5 s, capped at 120 s) |
+| Server wait on `device_access` / other methods | 30 s |
+| Late reply (after the server timed out) | Silently dropped |
+| Pending requests per socket | 256; T-Circle can handle them one at a time but must answer each |
+| Max frame | 16 MiB server side. T-Circle: cap `http_request` bodies at e.g. 32 KiB and report `truncated` (the MCP path asks for `max_bytes` = 10 MiB) |
+
+## 7. Reconnect
+
+- On close or error: reconnect with exponential backoff (1 s → 30 s, with jitter). Reset the backoff after a connection that lasted more than 60 s.
+- On HTTP 401/403 at the handshake: stop and wait for re-provisioning (the token was revoked). Don't loop.
+- Every reconnect gets a new `connector_run_id` and `connection_generation`, but the same `device_id`. Send `scope` and `metadata` again each time.
+- Settings shows the device `disconnected` as soon as the socket closes, and `connected` again within ~1 s of the new dial (verified).
