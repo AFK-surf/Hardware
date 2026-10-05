@@ -36,7 +36,18 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
 CONFIG_WS_BUFFER_SIZE=4096
 # pcm16_24k is 48 KB/s each way. Without a proxy the RTT to Cloudflare is
 # ~250 ms, so the 5760-byte default windows cap TCP near 23 KB/s (close 4410).
+# The send buffer stays at 24 KB (0.5 s of audio, about 2x the bandwidth-delay
+# product): a bigger one holds more stale audio that bursts out after a stall
+# and trips the server's too_fast check (close 4400).
 CONFIG_LWIP_TCP_WND_DEFAULT=65535
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65535
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+# Sends take their own lock. Otherwise every send waits while the websocket task reads a whole
+# agent-audio frame (up to 16 KB) under the shared lock, often 300-500 ms, which drops mic audio
+# and delays output.played into 4410.
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+# Agent audio stalls for 2-4 s on lossy Wi-Fi, which the server closes as 4410. SACK lets the
+# server resend just the lost segment instead of waiting out a retransmission timeout, and a
+# receive mailbox of 64 holds a full 64 KB window (32 x 1440 B is only 46 KB).
+CONFIG_LWIP_TCP_SACK_OUT=y

@@ -22,7 +22,6 @@
 #define CST816D_IRQ_PERIODIC 0x40
 
 #define TAP_MAX_US (280 * 1000)
-#define DOUBLE_GAP_US (450 * 1000)
 #define BOOT_DEBOUNCE_US (20 * 1000)
 
 static const char *TAG = "touch";
@@ -37,16 +36,8 @@ static atomic_bool s_boot_held = false;
 static bool s_boot_raw = false;
 static int64_t s_boot_change_us = 0;
 
-typedef enum {
-    PHASE_IDLE = 0,
-    PHASE_DOWN,
-    PHASE_WAIT_SECOND,
-    PHASE_SECOND,
-} phase_t;
-
-static phase_t s_phase = PHASE_IDLE;
+static bool s_tap_armed = false;
 static int64_t s_down_us = 0;
-static int64_t s_up_us = 0;
 
 static esp_err_t touch_read_register(uint8_t reg, uint8_t *value)
 {
@@ -157,36 +148,14 @@ board_touch_gesture_t board_touch_poll(void)
     s_screen_held = screen;
 
     if (pressed) {
-        const bool overdue_click = s_phase == PHASE_WAIT_SECOND && now - s_up_us > DOUBLE_GAP_US;
         s_down_us = now;
-        s_phase = (s_phase == PHASE_WAIT_SECOND && !overdue_click) ? PHASE_SECOND : PHASE_DOWN;
-        s_screen_raw = screen;
-        s_screen_held = screen;
-        if (overdue_click) {
+        s_tap_armed = true;
+    }
+    if (released && s_tap_armed) {
+        s_tap_armed = false;
+        if (now - s_down_us <= TAP_MAX_US) {
             return BOARD_TOUCH_CLICK;
         }
-    }
-
-    if (released) {
-        const int64_t held_us = now - s_down_us;
-        if (s_phase == PHASE_SECOND) {
-            s_phase = PHASE_IDLE;
-            if (held_us <= TAP_MAX_US) {
-                return BOARD_TOUCH_DOUBLE;
-            }
-        } else if (s_phase == PHASE_DOWN) {
-            if (held_us <= TAP_MAX_US) {
-                s_phase = PHASE_WAIT_SECOND;
-                s_up_us = now;
-            } else {
-                s_phase = PHASE_IDLE;
-            }
-        }
-    }
-
-    if (s_phase == PHASE_WAIT_SECOND && !screen && now - s_up_us > DOUBLE_GAP_US) {
-        s_phase = PHASE_IDLE;
-        return BOARD_TOUCH_CLICK;
     }
     return BOARD_TOUCH_NONE;
 }
@@ -199,9 +168,4 @@ bool board_touch_screen_held(void)
 bool board_touch_boot_held(void)
 {
     return s_boot_held;
-}
-
-bool board_touch_talk_held(void)
-{
-    return s_screen_held || s_boot_held;
 }

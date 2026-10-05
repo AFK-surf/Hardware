@@ -21,20 +21,23 @@ static void logo_task(void *arg)
 static void ui_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "tap the screen to start a call, double-tap to hang up");
+    ESP_LOGI(TAG, "tap the screen to call, tap again to hang up");
     for (;;) {
         board_touch_gesture_t gesture = board_touch_poll();
-        if (gesture == BOARD_TOUCH_CLICK && cue_voice_can_start()) {
-            if (!wifi_has_credentials()) {
-                ESP_LOGE(TAG, "WIFI_SSID is still the placeholder");
-            } else if (wifi_wait(20000) != ESP_OK) {
-                ESP_LOGW(TAG, "Wi-Fi not up");
-            } else if (cue_voice_start() != ESP_OK) {
-                ESP_LOGE(TAG, "voice session did not start");
-            }
-        } else if (gesture == BOARD_TOUCH_DOUBLE) {
-            ESP_LOGI(TAG, "double tap");
+        const cue_voice_state_t state = cue_voice_state();
+        display_set_animating(state == CUE_VOICE_CONNECTING || state == CUE_VOICE_UP);
+        if (gesture != BOARD_TOUCH_CLICK) {
+            // Not a tap.
+        } else if (state == CUE_VOICE_CONNECTING || state == CUE_VOICE_UP) {
             cue_voice_end();
+        } else if (!cue_voice_can_start()) {
+            ESP_LOGW(TAG, "a call cannot start yet");
+        } else if (!wifi_has_credentials()) {
+            ESP_LOGE(TAG, "WIFI_SSID is still the placeholder");
+        } else if (wifi_wait(20000) != ESP_OK) {
+            ESP_LOGW(TAG, "Wi-Fi not up");
+        } else if (cue_voice_start() != ESP_OK) {
+            ESP_LOGE(TAG, "voice session did not start");
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }

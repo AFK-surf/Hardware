@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -19,3 +20,12 @@ int playback_take_played(char names[][80], int max_names);
 
 // Queued audio in bytes and marks not yet played, for diagnostics.
 void playback_stats(int *queued_bytes, int *pending_marks);
+
+// Play the ringback until the agent's first speech arrives, or until turned off.
+void playback_ringback(bool on);
+
+// True while the ringback plays or queued audio that holds speech (not just silence) has yet to reach the speaker.
+bool playback_speaking(void);
+
+// Agent audio received since the last call: bytes and peak sample. Resets both.
+void playback_take_rx(int *bytes, int *peak);

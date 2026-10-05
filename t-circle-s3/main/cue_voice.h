@@ -10,7 +10,7 @@ typedef enum {
     CUE_VOICE_FAILED,
 } cue_voice_state_t;
 
-// Open one cue.voice.v1 session. Wi-Fi must already have an IP.
+// Open one comma.voice.v1 session. Wi-Fi must already have an IP.
 // A rejected key (close 4401) refuses later start calls until reboot.
 esp_err_t cue_voice_start(void);
 

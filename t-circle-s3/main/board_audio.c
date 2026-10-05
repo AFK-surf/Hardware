@@ -1,5 +1,5 @@
 // LilyGO T-Circle-S3 V1.1. PDM mic on I2S0, MAX98357A on I2S1.
-// Sample rate is 24 kHz for cue.voice.v1 pcm16_24k.
+// Sample rate is 24 kHz for comma.voice.v1 pcm16_24k.
 // Filter corners match the 16 kHz T-Circle driver:
 // mic DC block 12.8 Hz, mic low-pass 4.83 kHz, speaker DC block 120 Hz.
 // The speaker fade-in stays 6 ms.

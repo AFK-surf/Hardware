@@ -2,6 +2,8 @@
 
 #include "board_audio.h"
 
+#include <math.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -17,6 +19,17 @@
 #define MARK_MAX 32
 #define PLAYED_MAX 32
 #define MARK_NAME_LEN 80
+// A sample above this counts as speech. The downlink may carry silence between replies.
+#define SPEECH_PEAK 300
+// Agent audio arrives in bursts (gaps up to ~1.5 s on office Wi-Fi). After the queue runs dry,
+// playback waits for this much audio, or for a pause in arrivals, before it starts again.
+#define PREBUFFER_BYTES (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 5)
+#define PREBUFFER_WAIT_US (200 * 1000)
+// Ringback while dialing, as in the Android app's ringback.wav: 440 + 480 Hz for 1 s, then 3 s off.
+#define RING_ON_SAMPLES AUDIO_SAMPLE_RATE_HZ
+#define RING_CYCLE_SAMPLES (AUDIO_SAMPLE_RATE_HZ * 4)
+#define RING_FADE_SAMPLES (AUDIO_SAMPLE_RATE_HZ / 100)
+#define RING_AMPLITUDE 2500.0f
 
 static const char *TAG = "play";
 
@@ -38,6 +51,14 @@ static SemaphoreHandle_t s_lock;
 static int64_t s_last_audio_us;
 static uint8_t s_carry;
 static bool s_has_carry;
+// Write position just past the last audio that held speech; the speaker is "speaking" until read passes it.
+static int64_t s_speech_until;
+static bool s_buffering = true;
+static atomic_bool s_ringing;
+static int s_ring_pos;
+static int64_t s_last_push_us;
+static int64_t s_rx_bytes;
+static int s_rx_peak;
 
 static void release_locked(void)
 {
@@ -82,15 +103,52 @@ static int copy_out(int16_t *dst, int samples)
     return bytes / (int)sizeof(int16_t);
 }
 
+static void fill_ringback(int16_t *out, int samples)
+{
+    for (int i = 0; i < samples; ++i) {
+        int pos = s_ring_pos;
+        s_ring_pos = (s_ring_pos + 1) % RING_CYCLE_SAMPLES;
+        if (pos >= RING_ON_SAMPLES) {
+            out[i] = 0;
+            continue;
+        }
+        float t = (float)pos / AUDIO_SAMPLE_RATE_HZ;
+        float fade = 1.0f;
+        if (pos < RING_FADE_SAMPLES) {
+            fade = (float)pos / RING_FADE_SAMPLES;
+        } else if (pos > RING_ON_SAMPLES - RING_FADE_SAMPLES) {
+            fade = (float)(RING_ON_SAMPLES - pos) / RING_FADE_SAMPLES;
+        }
+        float v = RING_AMPLITUDE * fade * (sinf(2.0f * (float)M_PI * 440.0f * t) + sinf(2.0f * (float)M_PI * 480.0f * t));
+        out[i] = (int16_t)v;
+    }
+}
+
 static void playback_task(void *arg)
 {
     (void)arg;
     int16_t chunk[256];
     for (;;) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        int samples = s_buf ? copy_out(chunk, 256) : 0;
+        if (s_buffering && (s_filled >= PREBUFFER_BYTES ||
+                            (s_filled > 0 && esp_timer_get_time() - s_last_push_us > PREBUFFER_WAIT_US))) {
+            s_buffering = false;
+        }
+        int samples = (s_buf && !s_buffering) ? copy_out(chunk, 256) : 0;
+        if (samples == 0) {
+            s_buffering = true;
+        }
         int64_t last = s_last_audio_us;
         xSemaphoreGive(s_lock);
+        if (s_ringing) {
+            // The tone replaces whatever was queued (the server's paced silence), which is still
+            // consumed above so its marks keep being answered.
+            fill_ringback(chunk, 256);
+            if (board_audio_play_pcm16_mono(chunk, 256) != ESP_OK) {
+                ESP_LOGE(TAG, "speaker write failed");
+            }
+            continue;
+        }
         if (samples > 0) {
             if (board_audio_play_pcm16_mono(chunk, samples) != ESP_OK) {
                 ESP_LOGE(TAG, "speaker write failed");
@@ -139,8 +197,25 @@ static void write_locked(const uint8_t *pcm, size_t len)
     if (len > first) {
         memcpy(s_buf, pcm + first, len - first);
     }
+    int peak = 0;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        int16_t sample = (int16_t)(pcm[i] | (pcm[i + 1] << 8));
+        int magnitude = sample < 0 ? -(int)sample : sample;
+        if (magnitude > peak) {
+            peak = magnitude;
+        }
+    }
     s_write_at += (int64_t)len;
     s_filled += (int)len;
+    s_rx_bytes += (int64_t)len;
+    if (peak > s_rx_peak) {
+        s_rx_peak = peak;
+    }
+    if (peak >= SPEECH_PEAK) {
+        s_speech_until = s_write_at;
+        // The agent's first speech ends the ringback.
+        s_ringing = false;
+    }
 }
 
 // A binary frame may end mid-sample. The odd byte is kept and joined to the next frame.
@@ -165,6 +240,7 @@ void playback_push(const uint8_t *pcm, size_t len)
     if (len > 0) {
         write_locked(pcm, len);
     }
+    s_last_push_us = esp_timer_get_time();
     xSemaphoreGive(s_lock);
 }
 
@@ -195,6 +271,8 @@ void playback_clear(void)
     s_read_at = s_write_at;
     s_filled = 0;
     s_has_carry = false;
+    s_speech_until = s_write_at;
+    s_buffering = true;
     for (int i = 0; i < s_mark_count; ++i) {
         s_marks[i].at = s_read_at;
     }
@@ -233,5 +311,40 @@ void playback_stats(int *queued_bytes, int *pending_marks)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *queued_bytes = s_filled;
     *pending_marks = s_mark_count;
+    xSemaphoreGive(s_lock);
+}
+
+void playback_ringback(bool on)
+{
+    s_ring_pos = 0;
+    s_ringing = on;
+}
+
+bool playback_speaking(void)
+{
+    if (s_ringing) {
+        return true;
+    }
+    if (!s_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool speaking = s_read_at < s_speech_until;
+    xSemaphoreGive(s_lock);
+    return speaking;
+}
+
+void playback_take_rx(int *bytes, int *peak)
+{
+    if (!s_lock) {
+        *bytes = 0;
+        *peak = 0;
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *bytes = (int)s_rx_bytes;
+    *peak = s_rx_peak;
+    s_rx_bytes = 0;
+    s_rx_peak = 0;
     xSemaphoreGive(s_lock);
 }

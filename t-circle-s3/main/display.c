@@ -3,6 +3,8 @@
 
 #include "display.h"
 
+#include <stdatomic.h>
+
 #include "cue_logo_frames.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -116,31 +118,48 @@ esp_err_t display_init(void)
     return ESP_OK;
 }
 
+static atomic_bool s_animating;
+
+void display_set_animating(bool animating)
+{
+    s_animating = animating;
+}
+
+static void draw_frame(int frame, int *buf)
+{
+    xSemaphoreTake(s_fb_free[*buf], portMAX_DELAY);
+    expand(frames_start + (size_t)frame * CUE_LOGO_FRAME_BYTES, s_fb[*buf]);
+    s_inflight[s_inflight_head++ & 3] = (uint8_t)*buf;
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb[*buf]));
+    *buf ^= 1;
+}
+
 void display_run_logo(void)
 {
     const TickType_t period = pdMS_TO_TICKS(1000 / CUE_LOGO_FPS);
     const int steps = CUE_LOGO_FRAMES - 1 + CUE_LOGO_HOLD_FRAMES;
     TickType_t wake = xTaskGetTickCount();
     int buf = 0;
-    bool backlight_on = false;
 
-    for (int cycle = 0;; ++cycle) {
-        int64_t cycle_start = esp_timer_get_time();
+    // Idle: the finished logo, still.
+    draw_frame(CUE_LOGO_FRAMES - 1, &buf);
+    gpio_set_level(LCD_BL, 0);
+
+    for (;;) {
+        if (!s_animating) {
+            vTaskDelay(period);
+            wake = xTaskGetTickCount();
+            continue;
+        }
+        // In a call: loop the animation. A pass that is under way when the call ends plays to its
+        // last frame, so the logo always comes to rest whole.
         for (int step = 0; step < steps; ++step) {
-            int frame = step < CUE_LOGO_FRAMES ? step : CUE_LOGO_FRAMES - 1;
             if (step < CUE_LOGO_FRAMES) {
-                xSemaphoreTake(s_fb_free[buf], portMAX_DELAY);
-                expand(frames_start + (size_t)frame * CUE_LOGO_FRAME_BYTES, s_fb[buf]);
-                s_inflight[s_inflight_head++ & 3] = (uint8_t)buf;
-                ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb[buf]));
-                buf ^= 1;
-                if (!backlight_on) {
-                    gpio_set_level(LCD_BL, 0);
-                    backlight_on = true;
-                }
+                draw_frame(step, &buf);
+            } else if (!s_animating) {
+                break;
             }
             vTaskDelayUntil(&wake, period);
         }
-        ESP_LOGI(TAG, "cycle %d: %lld ms", cycle, (long long)(esp_timer_get_time() - cycle_start) / 1000);
     }
 }
