@@ -6,6 +6,15 @@ Read first: `~/Desktop/AFK/Hardware/docs/connector-plan.md`, `docs/connector-pro
 
 The cloud agent can reach a LAN HTTP service through the T-Circle. For example, it reads `http://<a LAN device>/` on the office network and gets the response back. The user's permission toggle is respected.
 
+## Before you start
+
+- Start after B1's branch (`codex/ble-provisioning`) is rebased onto main and merged, because it rewrites `connector_credentials()` and the startup wiring. Work on top of that.
+- **Free internal RAM first.** A2 measured internal free heap at 26 KB during a call with the Connector up (lowest 23 KB; `docs/reports/A2-report.md`). An HTTP client and a worker task won't fit safely. Before adding anything:
+  - move task stacks that don't need internal RAM to PSRAM (`xTaskCreateWithCaps(..., MALLOC_CAP_SPIRAM)`): logo, ui, connector, and the new worker;
+  - check where the Wi-Fi/lwIP and mbedTLS buffers live (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, dynamic buffers).
+  
+  Target: lowest internal free ≥ 40 KB during a call with the Connector up and one LAN request in flight. Measure before and after, and don't regress the voice fixes (`git log` for 81297a7).
+
 ## Do
 
 1. Implement `http_request` in `main/connector.c` with the same params and result shape as the Go reference (`~/Desktop/AFK/Cue/systems/connector/salix-connect/main.go:4283-4362`):
