@@ -71,3 +71,51 @@
 - 若在蓝牙刚打开、适配器还没就绪时开始扫描，扫描会静默失败停在「正在查找」，需返回重进（模拟器上没遇到）。
 - 隐藏 SSID 无法手动输入（固件也不列出隐藏网络）。
 - `removeBond` 没调（契约说可选）。
+
+## B2b：设备详情页「Allow operations」开关
+
+2026-10-05 · 同分支 `codex/add-device-ble`，提交 `8bdd09b`（在 `96a5a6e` 之上），未推送。
+
+### 做了什么
+
+- 设置 › 设备 › 某台设备：新增一行 "Allow operations"，副标题 "Lets Comma act through this device. Off keeps it read-only."。**所有 Connector 设备都显示**（电脑也有）。
+- 状态来自 `GET devices/:id` 的 `allows_operations`；详情页打开时重新拉一次这台设备（404 则从列表移除）。
+- 切换调 `PUT devices/:id/access`，体 `{"allow_operations": bool}`，以返回的 `allows_operations`（设备自己的回答）为准。等回答期间开关先显示目标值，再点无效。
+- **打开**前弹一次确认："Allow operations?" / "Comma will be able to send requests on your local network through this device." / Allow。每次打开都确认，关闭不确认。
+- 离线：开关置灰，下方显示 "Device is offline."。
+- 失败：开关回到原值，下方红字说明原因：
+
+| 后端返回 | 显示 |
+|---|---|
+| `device_access_unavailable` | The device didn’t confirm the change. Try again. |
+| `disconnected` | Device is offline.（同时把这台设备标成离线，开关置灰） |
+| `timeout` | The device didn’t answer in time. Try again. |
+| 403 / 404 | 账号无权限 / 设备已不在工作区 |
+| 网络 / 其他 | 复用网络提示 / "Comma couldn’t change the device’s access." |
+
+（后端 `comma_error` 对这几个原子都是 400 + `{"error": "<原子>"}`，所以按 `error` 字段区分。）
+- 开关是新写的 `SettingsSwitch`（app 里原来没有开关控件，二选一设置都是 On/Off 菜单）：轨道 `bg.brandSolid` / `border.primary`，白色圆点；圆点位移用 `springSpatial`，轨道颜色 150 ms softInOut。无障碍上整行报告为 Switch，带勾选状态。
+- 中文、英文文案都加了。
+
+### 测试
+
+- 新 `HomeDeviceAccessApiTest`（5）：PUT 路径/方法/请求体、解析回答、缺字段报错、`device_access_unavailable` 识别、GET 读 `allows_operations`（缺省为只读）、错误码映射。
+- `HomeDevicesTest` +5：等回答时显示目标值且重复点击忽略；未确认→回退+原因、下次重试清掉；`disconnected`→标离线；断网→回退；单设备刷新更新状态、消失则移除。
+- `SettingsPagesTest` +2（Robolectric）：打开要确认、关闭不确认，PUT 体正确；离线设备开关置灰、显示提示、点击不发请求。
+- 全量 `testDevDebugUnitTest` 1147 个全绿；`lintDevDebug` 没有新问题。
+
+### 真机（手机 `23112153D000003`，T-Circle 在线，staging）
+
+经用户同意 `adb install -r` 装上本分支 staging debug 包。每一步都**强制停止 app 再重新进入**设备详情（内存里的状态全部清空，值来自后端）：
+
+1. 初始：关（截图 `B2b-screens/b2b-0-off.png`）。
+2. 打开 → 弹出确认 → Allow → 开关打开，没有报错；重启后读回仍是**开**（`b2b-1-on.png`）。
+3. 关闭（不弹确认）→ 重启后读回是**关**。
+4. 离线的 Mac（Computer）：开关置灰 + "Device is offline."（`b2b-3-offline.png`）。
+
+T-Circle 最后的状态是**关**（只读），和开始时一样。板子本身没动。
+
+### 说明
+
+- "confirmation once" 我理解成每次打开只问一次，不是每台设备一辈子只问一次；如果要的是后者再改。
+- 失败原因 `timeout`/`disconnected` 这两个分支只有单测覆盖，真机没造出来过（没有拔板子）。
