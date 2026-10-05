@@ -82,3 +82,56 @@ NimBLE 走 PSRAM（`MEM_ALLOC_MODE_EXTERNAL`）；BLE 关掉后控制器内存�
 - Connector 在凭证一存好就启动（BLE 还在），状态经 `provisioning_set_connector_state()` 报给 app：`connector_connecting` / `connector_up`（带后端 `device_id`）/ `connector_failed`。
 - 未配网时 Wi-Fi 没有目标网络，`wifi_wait` 立刻返回错误；Connector 的等待循环对此加了 1 s 间隔，不会空转。
 - **这部分只编译过，没上板**（A2 合入后板子还没刷，也还没有真实 connector token）。
+
+## B1b：板上验收与合并（2026-10-05）
+
+擦整片 flash 后刷 B1 分支，用 staging 真实凭证（connector token → `dev_M3Z6mxvKhQSYEwyYTber-g`，scope `local_file_read`）经 macOS + `tools/ble_provision.py` 配网。办公室 `ToEverything-IOT`。
+
+### 第一次刷：发现问题，已修
+
+凭证保存后 Connector 立刻拨号，但 BLE 还开着，控制器占着内部 RAM：`heap_internal=12463`，`websocket_client: Error create websocket task` 连续 6 次，直到 30 s 后 BLE 关掉（堆回到 52 KB）才连上。契约要求 BLE 开着时就报 `connector_up`，所以这是 bug。
+
+修复 `08dfe19`：
+- logo 任务栈（8 KB）放 PSRAM（`xTaskCreateWithCaps`），它只往 PSRAM 帧缓冲画、不碰 flash 写。
+- Connector 的 `esp_websocket_client_init` 前后用 `heap_caps_malloc_extmem_enable(0 / CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL)`，把客户端两块 4 KB 收发缓冲（普通 malloc，≤16 KB 默认进内部）挪到 PSRAM。websocket 任务栈本身在 esp_websocket_client 1.8 里固定用内部 RAM，挪不了。
+- 首拨和拨号失败的日志加了最大连续块。
+
+### 验收结果（修复后）
+
+| 项 | 结果 |
+| --- | --- |
+| 出厂配网 | `saved` → `connector_connecting` → `connector_up`（`device_id` = `dev_M3Z6mxvKhQSYEwyYTber-g`），保存后 4.3 s，BLE 仍开着；app 断开后 `BLE off` |
+| 设置 › 设备 | 用户在手机 Comma staging 上看到 T-Circle「在线」 |
+| Connector 在线时通话 | 88.6 s，`caller_hangup`，`close 1000`，无 4410/4400；Connector 全程在线无重连；`mic_dropped` 只有两秒（4、1），都在 agent 说话、麦克风静音时 |
+| 断电重插 | NVS 读到配置 → 6 s 拿 IP → 11 s Connector 上线，全程无 BLE；再打 64.2 s 正常 |
+| 重新配对（BOOT 3–10 s） | 配对模式下 Connector 保持在线；测试客户端会先写 `wifi_credentials`（同一网络），Wi-Fi 重连导致 Connector 断一次；写 `credentials` 后 `credentials changed, reconnecting`，保存后 8.7 s `connector_up`，无需重启；随后 `BLE off` |
+| BLE 是否全关 | 关后 8 s 扫描看不到 `Comma-*`；内部堆回到配对前水平（51.5 → 50.8 KB） |
+
+### 内部堆（`heap_caps_*(MALLOC_CAP_INTERNAL)`）
+
+| 场景 | 空闲 | 最低 |
+| --- | --- | --- |
+| 开机后（无 BLE），首拨前 | 67.2 KB（最大块 31 KB） | |
+| Connector 在线、BLE 关、空闲 | 51.5 KB（修复前 34.4 KB） | 49.9 KB |
+| 通话中（本次开机没起过 BLE，数字干净） | 17.1 KB | **14.4 KB**（A2 是 23 KB） |
+| 出厂配网，BLE 开 + Connector 握手 | 首拨前 20.6 KB（最大块 7.7 KB）→ 5.9 KB | 3.1 KB |
+| 配对模式（BLE 开）+ Connector 已在线 | 5.1 KB | **2.8 KB** |
+
+B1 让通话最低值降了约 9 KB：NimBLE/配网代码多 25 KB 静态 DIRAM，logo 栈挪走省回 8 KB。BLE 窗口期只剩 3 KB 左右，能跑通但没有余量。
+
+### 合并
+
+`codex/ble-provisioning` rebase 到 main（只多了 docs 提交，固件树与上板测试的完全相同），main 快进到分支头，未推送。`docs/connector-plan.md` 标了 B1 完成、`secrets.h` 只作开发覆盖（需 `COMMA_DEV_SECRETS 1`）。
+
+### 板子现状
+
+已配网（T-Circle，staging，`ToEverything-IOT`），跑 main 的固件，Connector 在线。没有 `secrets.h` 覆盖。
+
+### A3 必须知道
+
+- **先腾内部 RAM 再加 HTTP client**。通话中只剩 14 KB；配对模式里 BLE + 在线 Connector 已经到 2.8 KB，再多一个 TLS 连接会在 BLE 窗口期失败或崩。可选：配对模式期间暂停 Connector；把不碰 flash 写的任务栈挪 PSRAM（`ui` 任务会擦 NVS 恢复出厂、`prov` 存 NVS、`connector` 写 allow 标志，这三个不能挪）；调低 `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`（全局，影响通话，要测）。
+- `heap_caps_malloc_extmem_enable()` 是全局开关，`connector.c` 只在 init 那一刻改并马上恢复；别的模块照抄时也要立刻恢复。
+- websocket 任务栈在 esp_websocket_client 1.8 里只能在内部 RAM（`xTaskCreatePinnedToCore`）。
+- 给 B2：轮换凭证时只写 `credentials`，不要写 `wifi_credentials`，否则 Wi-Fi 会重连一次、Connector 掉线一次（测试客户端的 `provision` 总是两个都写）。
+
+串口日志：`/private/tmp/claude-501/-Users-mafuzhen/f54661df-ccbe-4e40-aabc-a9495e53a393/scratchpad/tcircle.log`（临时目录）。

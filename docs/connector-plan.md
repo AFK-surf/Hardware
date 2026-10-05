@@ -60,7 +60,7 @@ T-Circle（ESP32-S3）只做两件事：
 
 | 步骤 | 内容 |
 |---|---|
-| **B1 固件** | 未配对时 BLE 广播 `Comma-XXXX`；GATT：Wi-Fi 列表、写 Wi-Fi、写凭证（server、group、connector token、voice key）、状态通知；**圆屏显示 6 位配对码**（LE Secure Connections passkey）；凭证存 NVS；长按 10 s 恢复出厂 |
+| **B1 固件** ✅ 2026-10-05 已合 main（B1b 板上验收，报告 `docs/reports/B1-report.md`） | 未配对时 BLE 广播 `Comma-XXXX`；GATT：Wi-Fi 列表、写 Wi-Fi、写凭证（server、group、connector token、voice key）、状态通知；**圆屏显示 6 位配对码**（LE Secure Connections passkey）；凭证存 NVS；长按 10 s 恢复出厂 |
 | **B2 安卓** | 设置 › 设备 › 添加设备：扫描 → 配对码 → 选 Wi-Fi → app 申请 connector token + voice key 写入设备 → 等设备上线 |
 | **B3** | 去掉 `secrets.h`；解绑时吊销两个凭证 |
 
@@ -92,6 +92,8 @@ B1 ─▶ B2 ─▶ B3（并行，B3 等 A2）
 
 - **板子只有一块**（`/dev/cu.usbmodem1101`，MAC `98:a3:16:f5:5d:28`）：同一时间只能一个 agent 烧录；烧录前先问用户。
 - 办公室 Wi-Fi 用 2.4 GHz 的 `ToEverything-IOT`（`ToEverything` 只有 5 GHz）；回家要改回 `Zhen`。
+- **凭证走 NVS**（BLE 配网写入，`device_config_get()` 是唯一入口）。`main/secrets.h` 现在只是开发覆盖，必须定义 `COMMA_DEV_SECRETS 1` 才生效；没有它照样能编译。板子现在已用 staging 凭证配好网（T-Circle，`dev_M3Z6mxvKhQSYEwyYTber-g`）。
+- **内部 RAM 很紧**：通话中最低 14.4 KB（B1 后，A2 时 23 KB）；配对模式里 Connector 在线时最低 2.8 KB。A3 加 HTTP client 前必须先腾内存。
 - 固件 IDF 6.0.2：`. ~/.espressif/tools/activate_idf_v6.0.2.sh`。
 - Git 身份 `aaaa-zhen <m502002313@gmail.com>`。
 - 报告写到 `docs/reports/<步骤>-report.md`，不要追加进 prompt 文件。
