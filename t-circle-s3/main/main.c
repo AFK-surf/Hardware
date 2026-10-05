@@ -1,5 +1,6 @@
 #include "board_audio.h"
 #include "board_touch.h"
+#include "connector.h"
 #include "cue_voice.h"
 #include "display.h"
 #include "playback.h"
@@ -57,6 +58,7 @@ void app_main(void)
     ESP_ERROR_CHECK(display_init());
     if (wifi_has_credentials()) {
         wifi_start();
+        connector_start();
     } else {
         ESP_LOGW(TAG, "Wi-Fi credentials are not set");
     }

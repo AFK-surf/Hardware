@@ -1,0 +1,613 @@
+#include "connector.h"
+
+#include "secrets.h"
+#include "wifi.h"
+
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "cJSON.h"
+#include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "esp_websocket_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "nvs.h"
+
+#define WS_OP_TEXT 0x1
+#define WS_OP_CLOSE 0x8
+#define WS_OP_PING 0x9
+#define WS_OP_PONG 0xA
+
+// Requests carry no big payloads until A3. A larger text frame is dropped; if its id can be read
+// from the first chunk, it still gets an error so the caller does not wait out its timeout.
+#define RX_MAX (16 * 1024)
+#define ID_MAX 64
+// The server heartbeats every 15 s. Like salix-connect, 45 s without any frame means the link is dead.
+#define READ_TIMEOUT_US (45LL * 1000000)
+#define STATS_PERIOD_US (30LL * 1000000)
+#define BACKOFF_MIN_MS 1000
+#define BACKOFF_MAX_MS 60000
+// A connection that lasted this long resets the backoff.
+#define STABLE_US (60LL * 1000000)
+#define SEND_TIMEOUT_MS 5000
+// Below the voice tasks (websocket 5, sender 6, uplink 5): the Connector only ever waits.
+#define CONNECTOR_TASK_PRIO 2
+#define CONNECTOR_WS_PRIO 3
+
+#define SCOPE_READ_ONLY "local_file_read"
+#define SCOPE_OPERATIONS ""
+#define NVS_NAMESPACE "connector"
+#define NVS_KEY_ALLOW "allow_ops"
+#define FIRMWARE_VERSION "0.1.0"
+
+#ifndef CUE_CONNECTOR_URL
+#define CUE_CONNECTOR_URL ""
+#endif
+#ifndef CUE_CONNECTOR_TOKEN
+#define CUE_CONNECTOR_TOKEN ""
+#endif
+
+static const char *TAG = "connector";
+
+typedef enum {
+    EV_OPEN,
+    EV_TEXT,     // data: NUL-terminated frame, PSRAM, freed by the receiver
+    EV_TOO_BIG,  // data: request id, or NULL when it could not be read
+    EV_CLOSED,
+} event_kind_t;
+
+typedef struct {
+    event_kind_t kind;
+    char *data;
+} event_t;
+
+typedef struct {
+    const char *url;
+    const char *token;
+} credentials_t;
+
+static QueueHandle_t s_events;
+static esp_websocket_client_handle_t s_client;
+static atomic_bool s_up;
+static atomic_int s_close_code;
+static atomic_int s_handshake_status;
+static bool s_allow_operations;
+static char s_instance_id[37];
+static char s_uri[384];
+static char s_headers[512];
+
+static uint8_t *s_rx;
+static size_t s_frame_got;
+static size_t s_frame_len;
+static uint8_t s_opcode;
+static bool s_assembling;
+
+static int s_reconnects;
+static int64_t s_heartbeat_us;
+static int64_t s_stats_us;
+
+// The one place credentials come from. B1 replaces this with values provisioned over BLE into NVS.
+static bool connector_credentials(credentials_t *out)
+{
+    out->url = CUE_CONNECTOR_URL;
+    out->token = CUE_CONNECTOR_TOKEN;
+    return strncmp(out->url, "ws", 2) == 0 && strncmp(out->token, "salix_conn_", 11) == 0;
+}
+
+static const char *current_scope(void)
+{
+    return s_allow_operations ? SCOPE_OPERATIONS : SCOPE_READ_ONLY;
+}
+
+// Read-only until the user allows operations in Settings, like salix-connect --device.
+static void load_access(void)
+{
+    nvs_handle_t nvs;
+    uint8_t allow = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        nvs_get_u8(nvs, NVS_KEY_ALLOW, &allow);
+        nvs_close(nvs);
+    }
+    s_allow_operations = allow != 0;
+}
+
+static esp_err_t save_access(bool allow)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(nvs, NVS_KEY_ALLOW, allow ? 1 : 0);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return err;
+}
+
+static void make_instance_id(void)
+{
+    uint8_t b[16];
+    esp_fill_random(b, sizeof(b));
+    b[6] = (b[6] & 0x0F) | 0x40;
+    b[8] = (b[8] & 0x3F) | 0x80;
+    snprintf(s_instance_id, sizeof(s_instance_id),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0], b[1], b[2], b[3], b[4],
+             b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+}
+
+static void post(event_kind_t kind, char *data)
+{
+    event_t ev = {.kind = kind, .data = data};
+    if (xQueueSend(s_events, &ev, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "event queue full, dropped event %d", kind);
+        free(data);
+    }
+}
+
+static char *psram_strndup(const char *src, size_t len)
+{
+    char *out = heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out) {
+        memcpy(out, src, len);
+        out[len] = 0;
+    }
+    return out;
+}
+
+// Best effort: find a top-level "id":"req_..." in the first chunk of an oversized frame. A quote
+// escaped inside a string value is preceded by a backslash, which rules out ids in bodies.
+static char *find_request_id(const char *data, size_t len)
+{
+    static const char key[] = "\"id\":\"";
+    const size_t key_len = sizeof(key) - 1;
+    for (size_t i = 0; i + key_len < len; ++i) {
+        if (memcmp(data + i, key, key_len) != 0 || (i > 0 && data[i - 1] == '\\')) {
+            continue;
+        }
+        const char *start = data + i + key_len;
+        size_t n = 0;
+        while (start + n < data + len && n < ID_MAX &&
+               (start[n] == '_' || start[n] == '-' || (start[n] >= '0' && start[n] <= '9') ||
+                (start[n] >= 'a' && start[n] <= 'z') || (start[n] >= 'A' && start[n] <= 'Z'))) {
+            n++;
+        }
+        if (n > 0 && start + n < data + len && start[n] == '"') {
+            return psram_strndup(start, n);
+        }
+    }
+    return NULL;
+}
+
+static void consume_chunk(const esp_websocket_event_data_t *event)
+{
+    if (!event || !event->data_ptr || event->data_len <= 0) {
+        return;
+    }
+    if (event->op_code == WS_OP_PING || event->op_code == WS_OP_PONG) {
+        return;
+    }
+    const size_t chunk = (size_t)event->data_len;
+    const size_t offset = event->payload_offset > 0 ? (size_t)event->payload_offset : 0;
+    const size_t total = event->payload_len > 0 ? (size_t)event->payload_len : chunk;
+    if (offset == 0) {
+        s_assembling = true;
+        s_opcode = event->op_code;
+        s_frame_len = total;
+        s_frame_got = 0;
+        if (total > RX_MAX) {
+            s_assembling = false;
+            ESP_LOGW(TAG, "drop oversized frame: %u bytes", (unsigned)total);
+            if (event->op_code == WS_OP_TEXT) {
+                post(EV_TOO_BIG, find_request_id(event->data_ptr, chunk));
+            }
+            return;
+        }
+    }
+    if (!s_assembling || offset != s_frame_got || chunk > s_frame_len - s_frame_got) {
+        s_assembling = false;
+        return;
+    }
+    memcpy(s_rx + offset, event->data_ptr, chunk);
+    s_frame_got += chunk;
+    if (s_frame_got < s_frame_len || !event->fin) {
+        return;
+    }
+    s_assembling = false;
+    if (s_opcode == WS_OP_CLOSE) {
+        s_close_code = s_frame_len >= 2 ? (s_rx[0] << 8) | s_rx[1] : 0;
+    } else if (s_opcode == WS_OP_TEXT) {
+        char *text = psram_strndup((const char *)s_rx, s_frame_len);
+        if (text) {
+            post(EV_TEXT, text);
+        } else {
+            ESP_LOGW(TAG, "out of memory for a %u-byte frame", (unsigned)s_frame_len);
+        }
+    }
+    // The server ignores binary frames, so it never sends any.
+}
+
+// Runs in the websocket client's task. Never sends: replies go out from connector_task.
+static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    const esp_websocket_event_data_t *event = data;
+    if (id == WEBSOCKET_EVENT_CONNECTED) {
+        s_up = true;
+        post(EV_OPEN, NULL);
+    } else if (id == WEBSOCKET_EVENT_DATA) {
+        consume_chunk(event);
+    } else if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED || id == WEBSOCKET_EVENT_ERROR) {
+        int http = event ? event->error_handle.esp_ws_handshake_status_code : 0;
+        if (http != 0) {
+            s_handshake_status = http;
+        }
+        // ERROR and DISCONNECTED can both arrive; the session ends on the first, the rest are drained.
+        s_up = false;
+        post(EV_CLOSED, NULL);
+    }
+}
+
+static bool send_json(const char *json)
+{
+    if (!s_client || !esp_websocket_client_is_connected(s_client)) {
+        return false;
+    }
+    int sent = esp_websocket_client_send_text(s_client, json, (int)strlen(json), pdMS_TO_TICKS(SEND_TIMEOUT_MS));
+    if (sent < 0) {
+        ESP_LOGW(TAG, "send failed");
+        return false;
+    }
+    return true;
+}
+
+static bool send_object(cJSON *obj)
+{
+    char *json = obj ? cJSON_PrintUnformatted(obj) : NULL;
+    cJSON_Delete(obj);
+    if (!json) {
+        ESP_LOGW(TAG, "out of memory building a frame");
+        return false;
+    }
+    bool ok = send_json(json);
+    cJSON_free(json);
+    return ok;
+}
+
+static void send_metadata(void)
+{
+    char collected_at[40] = "";
+    time_t now = time(NULL);
+    // No SNTP on the board: leave the timestamp out rather than send 1970.
+    if (now > 1700000000) {
+        snprintf(collected_at, sizeof(collected_at), ",\"collected_at\":%lld", (long long)now);
+    }
+    char json[640];
+    int n = snprintf(json, sizeof(json),
+                     "{\"type\":\"metadata\","
+                     "\"capabilities\":{\"scope\":\"%s\",\"device_access\":true,\"execution_boundary\":\"lan-gateway\","
+                     "\"persistent_processes\":false,\"computer_use_tool\":false,\"host_access_required\":false,"
+                     "\"runtime_probe\":false,\"meeting_runtime\":false,"
+                     "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
+                     "\"skills\":[],"
+                     "\"system_info\":{\"client_source\":\"t-circle\",\"hostname\":\"T-Circle\",\"os_type\":\"esp-idf\","
+                     "\"arch\":\"xtensa\"%s}}",
+                     current_scope(), collected_at);
+    if (n <= 0 || (size_t)n >= sizeof(json)) {
+        ESP_LOGE(TAG, "metadata does not fit");
+        return;
+    }
+    if (send_json(json)) {
+        ESP_LOGI(TAG, "sent metadata scope=%s", s_allow_operations ? "\"\"" : SCOPE_READ_ONLY);
+    }
+}
+
+static void send_error(const char *id, const char *message)
+{
+    cJSON *obj = cJSON_CreateObject();
+    if (obj) {
+        cJSON_AddStringToObject(obj, "id", id);
+        cJSON_AddStringToObject(obj, "type", "error");
+        cJSON_AddStringToObject(obj, "error", message);
+    }
+    send_object(obj);
+}
+
+static void handle_device_access(const char *id, const cJSON *params)
+{
+    const cJSON *allow = cJSON_IsObject(params) ? cJSON_GetObjectItemCaseSensitive(params, "allow_operations") : NULL;
+    if (!cJSON_IsBool(allow)) {
+        send_error(id, "allow_operations must be a boolean");
+        return;
+    }
+    const bool value = cJSON_IsTrue(allow);
+    esp_err_t err = save_access(value);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving access failed: %s", esp_err_to_name(err));
+        send_error(id, "could not save device access");
+        return;
+    }
+    if (value != s_allow_operations) {
+        ESP_LOGI(TAG, "access: %s", value ? "operations allowed" : "read-only");
+    }
+    s_allow_operations = value;
+    // The server learns the new scope only from metadata, so it goes out before the response.
+    send_metadata();
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *result = cJSON_CreateObject();
+    if (obj && result) {
+        cJSON_AddStringToObject(obj, "id", id);
+        cJSON_AddStringToObject(obj, "type", "response");
+        cJSON_AddBoolToObject(result, "allows_operations", value);
+        cJSON_AddItemToObject(obj, "result", result);
+        result = NULL;
+    }
+    cJSON_Delete(result);
+    send_object(obj);
+}
+
+static void handle_request(const char *id, const char *method, const cJSON *params)
+{
+    ESP_LOGI(TAG, "request %s %s", id, method);
+    if (strcmp(method, "device_access") == 0) {
+        handle_device_access(id, params);
+    } else if (strcmp(method, "http_request") == 0) {
+        // The read-only wording matches salix-connect, so the agent sees the same refusal.
+        send_error(id, s_allow_operations ? "http_request is not supported by this firmware yet"
+                                          : "method \"http_request\" is not permitted for a local_file_read connector");
+    } else {
+        char message[128];
+        snprintf(message, sizeof(message), "unknown method: %.100s", method);
+        send_error(id, message);
+    }
+}
+
+static void handle_text(const char *json)
+{
+    cJSON *root = cJSON_Parse(json);
+    if (!root) {
+        ESP_LOGW(TAG, "ignored malformed text frame");
+        return;
+    }
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
+    const char *kind = cJSON_IsString(type) ? type->valuestring : "";
+    if (strcmp(kind, "heartbeat") == 0) {
+        // Only the device's own heartbeat frames keep the socket alive server-side (45 s).
+        if (send_json("{\"type\":\"heartbeat\"}")) {
+            s_heartbeat_us = esp_timer_get_time();
+        }
+    } else if (strcmp(kind, "request") == 0) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        const cJSON *method = cJSON_GetObjectItemCaseSensitive(root, "method");
+        if (!cJSON_IsString(id) || id->valuestring[0] == '\0') {
+            ESP_LOGW(TAG, "request without an id");
+        } else if (!cJSON_IsString(method)) {
+            send_error(id->valuestring, "method must be a string");
+        } else {
+            handle_request(id->valuestring, method->valuestring,
+                           cJSON_GetObjectItemCaseSensitive(root, "params"));
+        }
+    } else if (strcmp(kind, "connected") == 0) {
+        const cJSON *run = cJSON_GetObjectItemCaseSensitive(root, "connector_run_id");
+        const cJSON *device = cJSON_GetObjectItemCaseSensitive(root, "device_id");
+        const cJSON *generation = cJSON_GetObjectItemCaseSensitive(root, "connection_generation");
+        ESP_LOGI(TAG, "connected run=%s device=%s generation=%d", cJSON_IsString(run) ? run->valuestring : "",
+                 cJSON_IsString(device) ? device->valuestring : "",
+                 cJSON_IsNumber(generation) ? generation->valueint : -1);
+    } else {
+        ESP_LOGI(TAG, "ignored frame type=%s", kind);
+    }
+    cJSON_Delete(root);
+}
+
+static void log_stats(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (now - s_stats_us < STATS_PERIOD_US) {
+        return;
+    }
+    s_stats_us = now;
+    char age[24] = "never";
+    if (s_heartbeat_us != 0) {
+        snprintf(age, sizeof(age), "%llds", (long long)((now - s_heartbeat_us) / 1000000));
+    }
+    ESP_LOGI(TAG, "stats connected=%s last_heartbeat=%s reconnects=%d heap_internal=%u (min %u) psram=%u",
+             s_up ? "yes" : "no", age, s_reconnects, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+// Sleep for ms while still logging stats.
+static void wait_ms(uint32_t ms)
+{
+    int64_t until = esp_timer_get_time() + (int64_t)ms * 1000;
+    while (esp_timer_get_time() < until) {
+        log_stats();
+        int64_t left_ms = (until - esp_timer_get_time()) / 1000;
+        vTaskDelay(pdMS_TO_TICKS(left_ms > 1000 ? 1000 : (left_ms > 0 ? left_ms : 1)));
+    }
+}
+
+static void drain_events(void)
+{
+    event_t ev;
+    while (xQueueReceive(s_events, &ev, 0) == pdTRUE) {
+        free(ev.data);
+    }
+}
+
+static bool build_dial(const credentials_t *creds)
+{
+    // scope goes on every dial, or a reconnect leaves the device with no command environment.
+    int n = snprintf(s_uri, sizeof(s_uri), "%s?name=T-Circle&alias=tcircle&os=esp-idf&arch=xtensa&scope=%s",
+                     creds->url, current_scope());
+    if (n <= 0 || (size_t)n >= sizeof(s_uri)) {
+        return false;
+    }
+    n = snprintf(s_headers, sizeof(s_headers), "Authorization: Bearer %s\r\nX-Salix-Connector-Instance-ID: %s\r\n",
+                 creds->token, s_instance_id);
+    return n > 0 && (size_t)n < sizeof(s_headers);
+}
+
+// One connection, from dial to close. Returns how long the socket was open, in microseconds.
+static int64_t run_session(const credentials_t *creds)
+{
+    if (!build_dial(creds)) {
+        ESP_LOGE(TAG, "connect URL or token too long");
+        return 0;
+    }
+    s_close_code = 0;
+    s_handshake_status = 0;
+    s_assembling = false;
+    drain_events();
+
+    esp_websocket_client_config_t cfg = {
+        .uri = s_uri,
+        .headers = s_headers,
+        .transport = WEBSOCKET_TRANSPORT_OVER_SSL,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .disable_auto_reconnect = true,
+        .buffer_size = 4096,
+        .task_stack = 6144,
+        .task_prio = CONNECTOR_WS_PRIO,
+        .network_timeout_ms = 10000,
+        .ping_interval_sec = 15,
+        .pingpong_timeout_sec = 45,
+    };
+    if (strncmp(s_uri, "ws://", 5) == 0) {
+        cfg.transport = WEBSOCKET_TRANSPORT_OVER_TCP;
+        cfg.crt_bundle_attach = NULL;
+    }
+    s_client = esp_websocket_client_init(&cfg);
+    if (!s_client) {
+        ESP_LOGE(TAG, "websocket client init failed");
+        return 0;
+    }
+    esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, on_ws, NULL);
+    ESP_LOGI(TAG, "dialing %s", s_uri);
+    int64_t opened_us = 0;
+    int64_t last_rx_us = esp_timer_get_time();
+    if (esp_websocket_client_start(s_client) != ESP_OK) {
+        ESP_LOGE(TAG, "websocket client start failed");
+    } else {
+        for (;;) {
+            log_stats();
+            event_t ev;
+            if (xQueueReceive(s_events, &ev, pdMS_TO_TICKS(1000)) != pdTRUE) {
+                if (opened_us != 0 && esp_timer_get_time() - last_rx_us > READ_TIMEOUT_US) {
+                    ESP_LOGW(TAG, "no frame for 45 s, reconnecting");
+                    break;
+                }
+                continue;
+            }
+            if (ev.kind == EV_CLOSED) {
+                break;
+            }
+            last_rx_us = esp_timer_get_time();
+            if (ev.kind == EV_OPEN) {
+                opened_us = last_rx_us;
+                s_heartbeat_us = 0;
+                ESP_LOGI(TAG, "socket open");
+                send_metadata();
+            } else if (ev.kind == EV_TEXT) {
+                handle_text(ev.data);
+            } else if (ev.kind == EV_TOO_BIG) {
+                if (ev.data) {
+                    send_error(ev.data, "request too large for this device");
+                }
+            }
+            free(ev.data);
+        }
+    }
+    s_up = false;
+    esp_websocket_client_handle_t client = s_client;
+    s_client = NULL;
+    esp_websocket_client_stop(client);
+    esp_websocket_client_destroy(client);
+    drain_events();
+    ESP_LOGW(TAG, "closed code=%d handshake=%d after %llds", (int)s_close_code, (int)s_handshake_status,
+             (long long)(opened_us ? (esp_timer_get_time() - opened_us) / 1000000 : 0));
+    return opened_us ? esp_timer_get_time() - opened_us : 0;
+}
+
+static void connector_task(void *arg)
+{
+    (void)arg;
+    credentials_t creds;
+    if (!connector_credentials(&creds)) {
+        ESP_LOGW(TAG, "CUE_CONNECTOR_URL / CUE_CONNECTOR_TOKEN not set, Connector off");
+        vTaskDelete(NULL);
+        return;
+    }
+    load_access();
+    make_instance_id();
+    ESP_LOGI(TAG, "access: %s, instance %s", s_allow_operations ? "operations allowed" : "read-only", s_instance_id);
+    uint32_t backoff_ms = BACKOFF_MIN_MS;
+    bool first = true;
+    for (;;) {
+        if (!wifi_is_up()) {
+            ESP_LOGI(TAG, "waiting for Wi-Fi");
+            while (wifi_wait(1000) != ESP_OK) {
+                log_stats();
+            }
+        }
+        if (first) {
+            ESP_LOGI(TAG, "before first dial: heap_internal=%u psram=%u",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            first = false;
+        } else {
+            s_reconnects++;
+        }
+        int64_t lasted_us = run_session(&creds);
+        const int http = s_handshake_status;
+        if (http == 401 || http == 403) {
+            // The token was revoked. Retrying would not help; wait for re-provisioning (B1/B3).
+            ESP_LOGE(TAG, "handshake HTTP %d: token rejected, Connector stopped until reboot", http);
+            for (;;) {
+                wait_ms(60000);
+            }
+        }
+        if (lasted_us >= STABLE_US) {
+            backoff_ms = BACKOFF_MIN_MS;
+        }
+        // Full jitter over the upper half, so a fleet that lost the backend together spreads out.
+        uint32_t delay_ms = backoff_ms / 2 + esp_random() % (backoff_ms / 2 + 1);
+        ESP_LOGI(TAG, "reconnecting in %u ms", (unsigned)delay_ms);
+        wait_ms(delay_ms);
+        backoff_ms = backoff_ms * 2 > BACKOFF_MAX_MS ? BACKOFF_MAX_MS : backoff_ms * 2;
+    }
+}
+
+void connector_start(void)
+{
+    static bool started;
+    if (started) {
+        return;
+    }
+    started = true;
+    s_events = xQueueCreate(16, sizeof(event_t));
+    s_rx = heap_caps_malloc(RX_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_events || !s_rx) {
+        ESP_LOGE(TAG, "out of memory, Connector off");
+        return;
+    }
+    if (xTaskCreate(connector_task, "connector", 6144, NULL, CONNECTOR_TASK_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "task create failed, Connector off");
+    }
+}
+
+bool connector_is_up(void)
+{
+    return s_up;
+}
