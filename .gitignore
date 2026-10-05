@@ -3,5 +3,6 @@ build-preview/
 build.log
 sdkconfig.old
 managed_components/
-main/secrets.h
+.cache/
+secrets.h
 .DS_Store
