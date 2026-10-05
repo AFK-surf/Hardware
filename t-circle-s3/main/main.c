@@ -154,7 +154,10 @@ void app_main(void)
     ESP_ERROR_CHECK(display_init());
     ESP_ERROR_CHECK(wifi_init());
 
-    if (xTaskCreate(logo_task, "logo", 8192, NULL, 3, NULL) != pdPASS) {
+    // The logo task only draws into the PSRAM framebuffers, so its stack can live there too. That
+    // leaves 8 KB more internal RAM for the Connector, which has to start while BLE still holds
+    // its controller memory.
+    if (xTaskCreateWithCaps(logo_task, "logo", 8192, NULL, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "logo task create failed");
     }
 

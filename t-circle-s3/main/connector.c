@@ -499,7 +499,12 @@ static int64_t run_session(const credentials_t *creds)
         cfg.transport = WEBSOCKET_TRANSPORT_OVER_TCP;
         cfg.crt_bundle_attach = NULL;
     }
+    // The client mallocs two buffer_size buffers, which CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL would
+    // put in internal RAM. Right after BLE provisioning that has ~12 KB left, too little for them
+    // plus the task stack, so steer this one init to PSRAM. Connector traffic is light.
+    heap_caps_malloc_extmem_enable(0);
     s_client = esp_websocket_client_init(&cfg);
+    heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
     if (!s_client) {
         ESP_LOGE(TAG, "websocket client init failed");
         return 0;
@@ -510,7 +515,9 @@ static int64_t run_session(const credentials_t *creds)
     int64_t opened_us = 0;
     int64_t last_rx_us = esp_timer_get_time();
     if (esp_websocket_client_start(s_client) != ESP_OK) {
-        ESP_LOGE(TAG, "websocket client start failed");
+        ESP_LOGE(TAG, "websocket client start failed (heap_internal=%u, largest %u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     } else {
         for (;;) {
             log_stats();
@@ -593,8 +600,9 @@ static void connector_task(void *arg)
             }
         }
         if (first) {
-            ESP_LOGI(TAG, "before first dial: heap_internal=%u psram=%u",
+            ESP_LOGI(TAG, "before first dial: heap_internal=%u (largest %u) psram=%u",
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
             first = false;
         } else {
