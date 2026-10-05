@@ -37,6 +37,14 @@ The Router agent can make a connected gateway device (first the T-Circle; any Co
 4. Tests for the tool (validation, dispatch, error mapping) and the protocol entry. Update `docs/tools-integrations.md`.
 5. Verify locally with A1's `mini_connector.py`, then on staging with the T-Circle (A3).
 
+## Running in parallel with A1
+
+A1 (the protocol spike) may still be running. If `docs/connector-protocol.md` doesn't exist yet:
+- Work from the code itself. Steps 1–4 don't depend on A1.
+- Use your own git worktree of Cue on a branch (`codex/lan-request-tool`), not the main checkout.
+- Don't start a second local dev stack while A1's is up: ports and the shared `@cue-dev` app data collide. Run unit tests only. Do step 5 after A1 reports, or coordinate with the user.
+- Once A1's report lands, re-check your protocol entry against it.
+
 ## Notes
 
 - The agent needs somewhere in the cloud to compute encrypted payloads for protocols like miIO. A1's report says whether that exists. If it doesn't, propose the smallest option (for example a sandboxed Python runner tool) in the PR description rather than building it here.
