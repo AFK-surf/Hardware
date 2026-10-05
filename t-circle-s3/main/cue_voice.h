@@ -14,6 +14,9 @@ typedef enum {
 // A rejected key (close 4401) refuses later start calls until reboot.
 esp_err_t cue_voice_start(void);
 
+// New credentials were provisioned: allow calls again after a 4401.
+void cue_voice_credentials_changed(void);
+
 // Ask the session to send session.end. Safe to call when idle.
 void cue_voice_end(void);
 

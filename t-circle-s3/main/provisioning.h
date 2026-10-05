@@ -1,0 +1,27 @@
+#pragma once
+
+// BLE provisioning: the Comma app gives the device its Wi-Fi network and Comma credentials.
+// The GATT contract is in docs/ble-provisioning.md.
+//
+// BLE runs only while provisioning is active (unprovisioned, or pairing mode entered with a
+// BOOT hold). It is shut down completely otherwise, and a call never starts while it runs.
+
+#include <stdbool.h>
+
+#include "esp_err.h"
+
+// Start advertising as Comma-XXXX. Needs wifi_init() and display_init() first.
+esp_err_t provisioning_start(void);
+
+// Leave pairing mode. Asynchronous: provisioning_active() turns false once BLE is down.
+// An unprovisioned device ignores this.
+void provisioning_stop(void);
+
+bool provisioning_active(void);
+
+// Draw the current pairing screen again (after something else used the display).
+void provisioning_redraw(void);
+
+// For the Connector (A2): report its state so a connected app sees it in `status`.
+// state: "connector_connecting", "connector_up" or "connector_failed". device_id may be NULL.
+void provisioning_set_connector_state(const char *state, const char *device_id);

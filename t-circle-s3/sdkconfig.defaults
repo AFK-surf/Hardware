@@ -51,3 +51,29 @@ CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
 # server resend just the lost segment instead of waiting out a retransmission timeout, and a
 # receive mailbox of 64 holds a full 64 KB window (32 x 1440 B is only 46 KB).
 CONFIG_LWIP_TCP_SACK_OUT=y
+
+# BLE provisioning (provisioning.c). NimBLE, peripheral only, one connection, and only while
+# unprovisioned or in pairing mode: BLE is fully shut down before a call can start.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+# LE Secure Connections only, authenticated (passkey on the screen). Bonds stay in RAM: they
+# only need to last one pairing session.
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_LEGACY=n
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_SM_SC_ONLY=1
+CONFIG_BT_NIMBLE_NVS_PERSIST=n
+# The credentials JSON is a few hundred bytes; one write at the largest MTU fits it.
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+# GATT writes are parsed on the host task (a 513-byte buffer plus cJSON).
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y

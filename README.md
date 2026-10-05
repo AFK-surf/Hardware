@@ -12,4 +12,7 @@ cd t-circle-s3
 idf.py build flash monitor -p /dev/cu.usbmodem2101
 ```
 
-Secrets live in each device's `main/secrets.h` (gitignored; copy from `secrets.h.example`).
+The T-Circle has no compiled-in secrets: the Comma app sets it up over BLE (`docs/ble-provisioning.md`;
+test client `t-circle-s3/tools/ble_provision.py`). Hold BOOT 3 s for pairing mode, 10 s to factory reset.
+For a dev board, `main/secrets.h` with `COMMA_DEV_SECRETS 1` overrides that (gitignored; copy from
+`secrets.h.example`).

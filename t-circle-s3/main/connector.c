@@ -1,6 +1,8 @@
 #include "connector.h"
 
+#if __has_include("secrets.h")
 #include "secrets.h"
+#endif
 #include "wifi.h"
 
 #include <stdatomic.h>

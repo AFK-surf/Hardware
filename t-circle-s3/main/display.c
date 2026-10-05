@@ -4,6 +4,7 @@
 #include "display.h"
 
 #include <stdatomic.h>
+#include <string.h>
 
 #include "cue_logo_frames.h"
 #include "driver/gpio.h"
@@ -16,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "ui_card.h"
 
 #define LCD_HOST SPI2_HOST
 #define LCD_W 160
@@ -125,6 +127,43 @@ void display_set_animating(bool animating)
     s_animating = animating;
 }
 
+// ---- Text cards -------------------------------------------------------------------------------
+
+static portMUX_TYPE s_card_mux = portMUX_INITIALIZER_UNLOCKED;
+static ui_card_t s_card;
+static bool s_card_on_req;
+static atomic_bool s_card_dirty;
+
+static void set_card(bool on, const char *label, const char *big, const char *body)
+{
+    taskENTER_CRITICAL(&s_card_mux);
+    s_card_on_req = on;
+    strlcpy(s_card.label, label ? label : "", sizeof(s_card.label));
+    strlcpy(s_card.big, big ? big : "", sizeof(s_card.big));
+    strlcpy(s_card.body, body ? body : "", sizeof(s_card.body));
+    s_card_dirty = true;
+    taskEXIT_CRITICAL(&s_card_mux);
+}
+
+void display_show_card(const char *label, const char *big, const char *body)
+{
+    set_card(true, label, big, body);
+}
+
+void display_show_logo(void)
+{
+    set_card(false, NULL, NULL, NULL);
+}
+
+static void draw_card(const ui_card_t *card, int *buf)
+{
+    xSemaphoreTake(s_fb_free[*buf], portMAX_DELAY);
+    ui_card_render(card, s_fb[*buf], s_lut);
+    s_inflight[s_inflight_head++ & 3] = (uint8_t)*buf;
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb[*buf]));
+    *buf ^= 1;
+}
+
 static void draw_frame(int frame, int *buf)
 {
     xSemaphoreTake(s_fb_free[*buf], portMAX_DELAY);
@@ -145,15 +184,29 @@ void display_run_logo(void)
     draw_frame(CUE_LOGO_FRAMES - 1, &buf);
     gpio_set_level(LCD_BL, 0);
 
+    bool card_on = false;
     for (;;) {
-        if (!s_animating) {
+        if (s_card_dirty) {
+            ui_card_t card;
+            taskENTER_CRITICAL(&s_card_mux);
+            card = s_card;
+            card_on = s_card_on_req;
+            s_card_dirty = false;
+            taskEXIT_CRITICAL(&s_card_mux);
+            if (card_on) {
+                draw_card(&card, &buf);
+            } else {
+                draw_frame(CUE_LOGO_FRAMES - 1, &buf);
+            }
+        }
+        if (card_on || !s_animating) {
             vTaskDelay(period);
             wake = xTaskGetTickCount();
             continue;
         }
         // In a call: loop the animation. A pass that is under way when the call ends plays to its
         // last frame, so the logo always comes to rest whole.
-        for (int step = 0; step < steps; ++step) {
+        for (int step = 0; step < steps && !s_card_dirty; ++step) {
             if (step < CUE_LOGO_FRAMES) {
                 draw_frame(step, &buf);
             } else if (!s_animating) {

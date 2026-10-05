@@ -2,8 +2,8 @@
 
 #include "board_audio.h"
 #include "board_touch.h"
+#include "device_config.h"
 #include "playback.h"
-#include "secrets.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -105,9 +105,8 @@ static const char *close_meaning(int code)
     }
 }
 
-static bool session_url(char *out, size_t out_len)
+static bool session_url(const char *server, const char *group, char *out, size_t out_len)
 {
-    const char *server = CUE_VOICE_SERVER;
     const char *scheme = "wss";
     if (strncmp(server, "https://", 8) == 0) {
         server += 8;
@@ -122,7 +121,7 @@ static bool session_url(char *out, size_t out_len)
     } else {
         return false;
     }
-    int n = snprintf(out, out_len, "%s://%s/v1/agent-groups/%s/voice/sessions", scheme, server, CUE_VOICE_GROUP);
+    int n = snprintf(out, out_len, "%s://%s/v1/agent-groups/%s/voice/sessions", scheme, server, group);
     return n > 0 && (size_t)n < out_len;
 }
 
@@ -601,17 +600,30 @@ esp_err_t cue_voice_start(void)
     if (s_uplink_running || state == CUE_VOICE_CONNECTING || state == CUE_VOICE_UP) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (strncmp(CUE_VOICE_KEY, "salix_vk_", 9) != 0) {
-        ESP_LOGE(TAG, "CUE_VOICE_KEY is not a voice agent key");
-        return ESP_ERR_INVALID_STATE;
+    device_config_t *dc = calloc(1, sizeof(*dc));
+    if (!dc) {
+        return ESP_ERR_NO_MEM;
     }
-    if (!session_url(s_uri, sizeof(s_uri))) {
-        ESP_LOGE(TAG, "bad CUE_VOICE_SERVER or group");
-        return ESP_ERR_INVALID_ARG;
+    esp_err_t cfg_err = ESP_OK;
+    if (!device_config_get(dc)) {
+        ESP_LOGE(TAG, "not provisioned");
+        cfg_err = ESP_ERR_INVALID_STATE;
+    } else if (strncmp(dc->voice_key, "salix_vk_", 9) != 0) {
+        ESP_LOGE(TAG, "voice key is not a voice agent key");
+        cfg_err = ESP_ERR_INVALID_STATE;
+    } else if (!session_url(dc->server, dc->group_id, s_uri, sizeof(s_uri))) {
+        ESP_LOGE(TAG, "bad voice server or group");
+        cfg_err = ESP_ERR_INVALID_ARG;
+    } else {
+        int header_n = snprintf(s_headers, sizeof(s_headers), "Authorization: Bearer %s\r\n", dc->voice_key);
+        if (header_n < 0 || (size_t)header_n >= sizeof(s_headers)) {
+            cfg_err = ESP_ERR_INVALID_SIZE;
+        }
     }
-    int header_n = snprintf(s_headers, sizeof(s_headers), "Authorization: Bearer %s\r\n", CUE_VOICE_KEY);
-    if (header_n < 0 || (size_t)header_n >= sizeof(s_headers)) {
-        return ESP_ERR_INVALID_SIZE;
+    memset(dc, 0, sizeof(*dc));
+    free(dc);
+    if (cfg_err != ESP_OK) {
+        return cfg_err;
     }
     if (!s_rx) {
         s_rx = heap_caps_malloc(RX_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -697,6 +709,11 @@ esp_err_t cue_voice_start(void)
     playback_ringback(true);
     ESP_LOGI(TAG, "dialing %s", s_uri);
     return ESP_OK;
+}
+
+void cue_voice_credentials_changed(void)
+{
+    s_key_rejected = false;
 }
 
 void cue_voice_end(void)
