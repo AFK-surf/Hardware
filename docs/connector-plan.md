@@ -69,7 +69,7 @@ T-Circle（ESP32-S3）只做两件事：
 | 内容 | 时机 |
 |---|---|
 | **C1** 放宽 4410（2 s → 8 s 可配）和 4400（允许卡顿后补发） | 现在（交给后端开发同事） |
-| **C2** Connector 协议加 `udp_request`；新 agent 工具 `device.lan_request`（HTTP/UDP）；「家庭网关」skill | A3/A4 前 |
+| **C2** Connector 协议加 `udp_request`；新 agent 工具 `device.lan_request`（HTTP/UDP）；「家庭网关」skill | A3/A4 前（交给后端开发同事） |
 | **C3** 米家等 skill（加密在云端算，T-Circle 只发包） | A4 |
 
 ## 顺序
