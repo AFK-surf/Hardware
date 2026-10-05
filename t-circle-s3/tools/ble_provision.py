@@ -64,12 +64,14 @@ async def cmd_scan(args):
     seen = {}
 
     def on_adv(d, adv):
-        if SERVICE in [u.lower() for u in adv.service_uuids] and d.address not in seen:
-            seen[d.address] = adv.local_name or d.name
-            print(f"{seen[d.address]}  {d.address}  rssi {adv.rssi}")
+        # The name is in the scan response, so the first report of a device may lack it.
+        if SERVICE in [u.lower() for u in adv.service_uuids]:
+            seen[d.address] = (adv.local_name or d.name or seen.get(d.address, (None,))[0], adv.rssi)
 
     async with BleakScanner(on_adv):
         await asyncio.sleep(args.timeout)
+    for address, (name, rssi) in seen.items():
+        print(f"{name}  {address}  rssi {rssi}")
     if not seen:
         print("none")
 
@@ -98,7 +100,9 @@ async def pair(client):
     for attempt in range(60):
         try:
             return await client.read_gatt_char(INFO)
-        except BleakError as e:
+        except (BleakError, asyncio.TimeoutError, TimeoutError) as e:
+            if not client.is_connected:
+                sys.exit("disconnected while pairing (wrong code or cancelled?)")
             if attempt % 5 == 0:
                 log(f"waiting for pairing: {e}")
             await asyncio.sleep(2)
