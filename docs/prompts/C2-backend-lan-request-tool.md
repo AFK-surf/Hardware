@@ -45,7 +45,12 @@ A1 (the protocol spike) may still be running. If `docs/connector-protocol.md` do
 - Don't start a second local dev stack while A1's is up: ports and the shared `@cue-dev` app data collide. Run unit tests only. Do step 5 after A1 reports, or coordinate with the user.
 - Once A1's report lands, re-check your protocol entry against it.
 
+## Decided after A1 (2026-10-05)
+
+- **Encrypted LAN protocols are encoded in the backend with Elixir `:crypto`.** There is no always-available cloud Python (A1 report, "Cloud compute for miIO"). Add a codec option to `device.lan_request` (or a sibling tool); start with `miio` (MD5 + AES-128-CBC, UDP 54321: hello handshake, then encrypted JSON-RPC). The device only sends and receives bytes. Keep the codec boundary generic, because Gree (AES-ECB) and Tuya local come next. Which commands to send and what to read back stays in skills.
+- **Static device secrets need a store.** `credential_env` resolves OAuth credentials only. There is nowhere to keep a Hue app key or a miIO device token. Add a per-group secret store that tools can reference by name, so tokens never enter the transcript. A4 (Mi light end to end) depends on it.
+- A1 findings that affect the tool: the server does not check device access for requests from device-placed MCP, so the device-side gate is the only boundary (`docs/reports/A1-report.md`). Decide whether `device.lan_request` should also check the device's reported access state on the server. Recommended, as defence in depth.
+
 ## Notes
 
-- The agent needs somewhere in the cloud to compute encrypted payloads for protocols like miIO. A1's report says whether that exists. If it doesn't, propose the smallest option (for example a sandboxed Python runner tool) in the PR description rather than building it here.
 - Open a PR. Don't merge without review.
