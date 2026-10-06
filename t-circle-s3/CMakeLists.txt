@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(cue_logo)
 
+# lan_discover (A5) sweeps the subnet with ARP and reads the replies out of lwIP's ARP table. With
+# the default 10 entries, one batch of replies pushes out the next and the router's own entry.
+# No Kconfig for it in IDF 6.0.2; PUBLIC so main's loop over the table sees the same size.
+idf_component_get_property(lwip_lib lwip COMPONENT_LIB)
+target_compile_definitions(${lwip_lib} PUBLIC ARP_TABLE_SIZE=32)
+
 # NimBLE gives up on pairing after 30 s without SMP progress (BLE_SM_TIMEOUT_MS, no Kconfig). The
 # device shows a passkey that the person types on the phone, which often takes longer, so build a
 # copy of ble_sm.c with 90 s instead. IDF itself is left untouched; if the line ever changes, the

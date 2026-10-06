@@ -2,10 +2,12 @@
 #include "net_watchdog.h"
 
 #include "device_config.h"
+#include "lan_discover.h"
 #include "lan_http.h"
 #include "provisioning.h"
 #include "wifi.h"
 
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,11 +49,18 @@
 // Below the voice tasks (websocket 5, sender 6, uplink 5): the Connector only ever waits.
 #define CONNECTOR_TASK_PRIO 2
 #define CONNECTOR_WS_PRIO 3
-// LAN requests run one at a time on their own task so the Connector task keeps answering
-// heartbeats. A few more wait in line; past that the device answers "busy".
+// LAN requests (http_request, lan_discover) run one at a time on their own task so the Connector
+// task keeps answering heartbeats. A few more wait in line; past that the device answers "busy".
 #define LAN_WORKER_PRIO 2
 #define LAN_WORKER_STACK 8192
 #define LAN_QUEUE_LEN 4
+
+// Dev builds only (main/CMakeLists.txt): run lan_discover every N seconds through the LAN worker and
+// its access gate, and log the reply, for testing on the board before the backend can ask for it.
+#ifndef COMMA_LAN_DISCOVER_SELFTEST_S
+#define COMMA_LAN_DISCOVER_SELFTEST_S 0
+#endif
+#define SELFTEST_SESSION UINT_MAX
 
 #define SCOPE_READ_ONLY "local_file_read"
 #define SCOPE_OPERATIONS ""
@@ -75,8 +84,14 @@ typedef struct {
     unsigned session;
 } event_t;
 
+typedef enum {
+    LAN_HTTP_REQUEST,
+    LAN_DISCOVER,
+} lan_method_t;
+
 typedef struct {
     char id[ID_MAX + 1];
+    lan_method_t method;
     cJSON *params;     // detached from the request frame, freed by the worker
     unsigned session;  // the socket the request came in on
 } lan_job_t;
@@ -341,7 +356,8 @@ static void send_metadata(void)
                      "\"persistent_processes\":false,\"computer_use_tool\":false,\"host_access_required\":false,"
                      "\"runtime_probe\":false,\"meeting_runtime\":false,"
                      // Not part of salix-connect's set: tells the backend (C2) what this gateway does.
-                     "\"lan_gateway\":{\"methods\":[\"http_request\"],\"max_bytes\":%d,\"max_timeout_seconds\":%d},"
+                     "\"lan_gateway\":{\"methods\":[\"http_request\",\"lan_discover\"],\"max_bytes\":%d,"
+                     "\"max_timeout_seconds\":%d},"
                      "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
                      "\"system_info\":{\"client_source\":\"t-circle\",\"hostname\":\"T-Circle\",\"os_type\":\"esp-idf\","
@@ -400,27 +416,42 @@ static void handle_device_access(const char *id, const cJSON *params)
     send_object(obj);
 }
 
-// The read-only wording matches salix-connect, so the agent sees the same refusal.
-#define READ_ONLY_REFUSAL "method \"http_request\" is not permitted for a local_file_read connector"
+static const char *lan_method_name(lan_method_t method)
+{
+    return method == LAN_DISCOVER ? "lan_discover" : "http_request";
+}
 
-// The access gate. The server does not check access on the device-placed MCP path, so this is the
-// only thing between the cloud and the LAN while the user has not allowed operations.
-static void handle_http_request(const char *id, cJSON *root)
+// The read-only wording matches salix-connect, so the agent sees the same refusal.
+static void send_read_only_refusal(const char *id, lan_method_t method)
+{
+    char message[96];
+    snprintf(message, sizeof(message), "method \"%s\" is not permitted for a local_file_read connector",
+             lan_method_name(method));
+    send_error(id, message);
+}
+
+// The access gate, for every method that touches the LAN. The server does not check access on the
+// device-placed MCP path, so this is the only thing between the cloud and the LAN while the user has
+// not allowed operations.
+static void handle_lan_request(const char *id, lan_method_t method, cJSON *root)
 {
     if (!s_allow_operations) {
         ESP_LOGW(TAG, "%s refused: read-only", id);
-        send_error(id, READ_ONLY_REFUSAL);
+        send_read_only_refusal(id, method);
         return;
     }
     if (!s_lan_ready) {
-        send_error(id, "http_request is unavailable: the device could not start its LAN worker");
+        char message[96];
+        snprintf(message, sizeof(message), "%s is unavailable: the device could not start its LAN worker",
+                 lan_method_name(method));
+        send_error(id, message);
         return;
     }
     if (strlen(id) > ID_MAX) {
         send_error(id, "request id too long for this device");
         return;
     }
-    lan_job_t job = {.session = s_session};
+    lan_job_t job = {.session = s_session, .method = method};
     strlcpy(job.id, id, sizeof(job.id));
     job.params = cJSON_DetachItemFromObjectCaseSensitive(root, "params");
     if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
@@ -436,26 +467,61 @@ static void lan_worker(void *arg)
         lan_job_t job;
         xQueueReceive(s_lan_jobs, &job, portMAX_DELAY);
         char *frame;
-        if (job.session != s_session) {
+        const bool selftest = job.session == SELFTEST_SESSION;
+        if (!selftest && job.session != s_session) {
             ESP_LOGI(TAG, "%s skipped: its socket closed", job.id);
             frame = NULL;
         } else if (!s_allow_operations) {
             // Access was turned off while this one waited in line.
+            char message[96];
+            snprintf(message, sizeof(message), "method \"%s\" is not permitted for a local_file_read connector",
+                     lan_method_name(job.method));
             cJSON *obj = cJSON_CreateObject();
             cJSON_AddStringToObject(obj, "id", job.id);
             cJSON_AddStringToObject(obj, "type", "error");
-            cJSON_AddStringToObject(obj, "error", READ_ONLY_REFUSAL);
+            cJSON_AddStringToObject(obj, "error", message);
             frame = cJSON_PrintUnformatted(obj);
             cJSON_Delete(obj);
+        } else if (job.method == LAN_DISCOVER) {
+            frame = lan_discover_run(job.id, job.params);
         } else {
             frame = lan_http_run(job.id, job.params);
         }
         cJSON_Delete(job.params);
-        if (frame) {
+        if (frame && selftest) {
+            const size_t len = strlen(frame);
+            for (size_t at = 0; at < len; at += 400) {
+                ESP_LOGI(TAG, "%s [%u/%u] %.400s", job.id, (unsigned)(at / 400 + 1), (unsigned)((len + 399) / 400),
+                         frame + at);
+            }
+            free(frame);
+        } else if (frame) {
             post_session(EV_REPLY, frame, job.session);
         }
     }
 }
+
+#if COMMA_LAN_DISCOVER_SELFTEST_S > 0
+static void selftest_task(void *arg)
+{
+    (void)arg;
+    for (unsigned n = 1;; ++n) {
+        vTaskDelay(pdMS_TO_TICKS(COMMA_LAN_DISCOVER_SELFTEST_S * 1000));
+        if (!wifi_is_up()) {
+            continue;
+        }
+        lan_job_t job = {.session = SELFTEST_SESSION, .method = LAN_DISCOVER};
+        snprintf(job.id, sizeof(job.id), "selftest_%u", n);
+        if (!s_allow_operations) {
+            ESP_LOGW(TAG, "%s refused: read-only", job.id);
+            continue;
+        }
+        if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "%s: LAN worker busy", job.id);
+        }
+    }
+}
+#endif
 
 static void handle_request(const char *id, const char *method, cJSON *root)
 {
@@ -464,7 +530,9 @@ static void handle_request(const char *id, const char *method, cJSON *root)
     if (strcmp(method, "device_access") == 0) {
         handle_device_access(id, params);
     } else if (strcmp(method, "http_request") == 0) {
-        handle_http_request(id, root);
+        handle_lan_request(id, LAN_HTTP_REQUEST, root);
+    } else if (strcmp(method, "lan_discover") == 0) {
+        handle_lan_request(id, LAN_DISCOVER, root);
     } else {
         char message[128];
         snprintf(message, sizeof(message), "unknown method: %.100s", method);
@@ -748,8 +816,14 @@ void connector_start(void)
     s_lan_ready = xTaskCreateWithCaps(lan_worker, "lan", LAN_WORKER_STACK, NULL, LAN_WORKER_PRIO, NULL,
                                       MALLOC_CAP_SPIRAM) == pdPASS;
     if (!s_lan_ready) {
-        ESP_LOGE(TAG, "LAN worker create failed, http_request off");
+        ESP_LOGE(TAG, "LAN worker create failed, http_request and lan_discover off");
     }
+#if COMMA_LAN_DISCOVER_SELFTEST_S > 0
+    ESP_LOGW(TAG, "lan_discover self-test every %d s (dev build)", COMMA_LAN_DISCOVER_SELFTEST_S);
+    if (s_lan_ready) {
+        xTaskCreateWithCaps(selftest_task, "lan_selftest", 3072, NULL, LAN_WORKER_PRIO, NULL, MALLOC_CAP_SPIRAM);
+    }
+#endif
     if (xTaskCreate(connector_task, "connector", 6144, NULL, CONNECTOR_TASK_PRIO, NULL) != pdPASS) {
         ESP_LOGE(TAG, "task create failed, Connector off");
     }

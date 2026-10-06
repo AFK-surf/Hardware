@@ -51,6 +51,10 @@ CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
 # server resend just the lost segment instead of waiting out a retransmission timeout, and a
 # receive mailbox of 64 holds a full 64 KB window (32 x 1440 B is only 46 KB).
 CONFIG_LWIP_TCP_SACK_OUT=y
+# lan_discover (A5): a router answering SSDP ssdp:all sends a dozen or more datagrams at once, and
+# mDNS answers arrive in bursts while the call tasks keep the discovery task waiting. The default
+# mailbox of 6 drops the rest.
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
 
 # BLE provisioning (provisioning.c). NimBLE, peripheral only, one connection, and only while
 # unprovisioned or in pairing mode: BLE is fully shut down before a call can start.
