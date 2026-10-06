@@ -13,7 +13,8 @@ Test client: `t-circle-s3/tools/ble_provision.py` (bleak). Visible text in the a
 | In a call | **off**; pairing mode cannot start during a call, and a call cannot start while BLE is on |
 
 Hold BOOT 10 s = factory reset: the screen counts down from 3 s on, then NVS is erased (credentials,
-Wi-Fi, BLE keys) and the device restarts unprovisioned. The app tells the user this on unpair.
+Wi-Fi, BLE keys) and the device restarts unprovisioned. A hold only counts if it starts after boot: if BOOT is
+still down when the device restarts, it is ignored until let go, so holding on erases once. The app tells the user this on unpair.
 
 ## Advertising
 
@@ -111,8 +112,11 @@ may disconnect after `saved`, or wait a few seconds for `connector_up` first.
 
 In pairing mode on an already provisioned device, writing only `credentials` (no
 `wifi_credentials`) keeps the stored Wi-Fi network; this is how credentials are rotated. Writing
-`wifi_credentials` there moves the device to the new network; if pairing mode ends without a save,
-it goes back to the stored network.
+`wifi_credentials` there tries the new network; the stored one is never overwritten by a network that
+did not connect. The device goes straight back to the stored network on `wifi_failed`, when the app
+disconnects before `saved`, or when pairing mode ends without a save. Pairing mode stays open
+(advertising) until its timeout, so the app can reconnect and try again, but a reconnecting app must
+write `wifi_credentials` again: a trial does not survive a disconnect, even one that reached `wifi_up`.
 
 ### `status`
 

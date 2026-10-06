@@ -800,6 +800,28 @@ static bool wifi_ready_for_commit(void)
     return s.was_provisioned && wifi_is_up();
 }
 
+// Pairing mode on a provisioned device: a network the app sent failed, or the app left before
+// saving. Go straight back to the stored network so the device is not offline until pairing mode
+// times out. Pairing mode itself stays open; the app may connect again and send another network.
+static void back_to_stored_wifi(const char *why)
+{
+    if (!s.wifi_pending || s_saved || !s.was_provisioned) {
+        return;
+    }
+    s.wifi_pending = false;
+    device_config_t *cfg = calloc(1, sizeof(*cfg));
+    memset(&s.wifi, 0, sizeof(s.wifi));
+    if (cfg && device_config_get(cfg)) {
+        ESP_LOGI(TAG, "%s: back to the stored network", why);
+        strlcpy(s.wifi.ssid, cfg->wifi_ssid, sizeof(s.wifi.ssid));  // later `status` names it
+        wifi_connect(cfg->wifi_ssid, cfg->wifi_password, true);
+    }
+    if (cfg) {
+        memset(cfg, 0, sizeof(*cfg));
+        free(cfg);
+    }
+}
+
 static void handle(const event_t *ev)
 {
     switch (ev->type) {
@@ -809,6 +831,7 @@ static void handle(const event_t *ev)
     case EV_DISCONNECTED:
         s.idle_since_us = esp_timer_get_time();
         if (!s_saved) {
+            back_to_stored_wifi("app left without saving");
             show(SCREEN_ADVERTISING);
         }
         break;
@@ -843,6 +866,7 @@ static void handle(const event_t *ev)
             s.error = "failed";
             publish_status("wifi_failed", "failed");
             show(SCREEN_WIFI_FAILED);
+            back_to_stored_wifi("wifi_failed");
         } else {
             publish_status("wifi_connecting", NULL);
             show(SCREEN_WIFI_CONNECTING);
@@ -896,12 +920,14 @@ static void poll_wifi(void)
         s.error = wifi_error(result);
         publish_status("wifi_failed", s.error);
         show(SCREEN_WIFI_FAILED);
+        back_to_stored_wifi("wifi_failed");
     } else if (esp_timer_get_time() - s.wifi_since_us > WIFI_TRIAL_TIMEOUT_US) {
         wifi_disconnect();
         s.last_result = WIFI_RESULT_FAILED;
         s.error = "timeout";
         publish_status("wifi_failed", "timeout");
         show(SCREEN_WIFI_FAILED);
+        back_to_stored_wifi("wifi_failed");
     }
 }
 
@@ -948,14 +974,8 @@ static void prov_task(void *arg)
         free(s.creds);
         s.creds = NULL;
     }
-    // Left pairing mode without saving, after trying another network: go back to the stored one.
-    if (!s_saved && s.wifi_pending) {
-        device_config_t cfg;
-        if (device_config_get(&cfg)) {
-            wifi_connect(cfg.wifi_ssid, cfg.wifi_password, true);
-        }
-        memset(&cfg, 0, sizeof(cfg));
-    }
+    // Left pairing mode without saving while trying another network: go back to the stored one.
+    back_to_stored_wifi("pairing mode ended");
     memset(&s.wifi, 0, sizeof(s.wifi));
     if (s_saved) {
         vTaskDelay(pdMS_TO_TICKS(2000));  // let "All set" show

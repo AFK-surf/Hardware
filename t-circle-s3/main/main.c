@@ -49,6 +49,12 @@ static void ui_task(void *arg)
     (void)arg;
     ESP_LOGI(TAG, "tap the screen to call, tap again to hang up; hold BOOT 3 s to pair, 10 s to reset");
     bool boot_tracking = false;
+    // BOOT already down at boot (e.g. still held after a reset): ignore it until it is let go, so
+    // one long hold erases once instead of every 10 s.
+    bool boot_wait_release = board_touch_boot_held();
+    if (boot_wait_release) {
+        ESP_LOGI(TAG, "BOOT held at boot, ignored until released");
+    }
     int64_t boot_down_us = 0;
     int shown_left = -1;
     int64_t notice_until = 0;
@@ -75,7 +81,9 @@ static void ui_task(void *arg)
 
         // BOOT hold. A hold that starts during a call is the call's push-to-talk, not this.
         const bool boot = board_touch_boot_held();
-        if (boot && !boot_tracking && !in_call) {
+        if (boot_wait_release) {
+            boot_wait_release = boot;
+        } else if (boot && !boot_tracking && !in_call) {
             boot_tracking = true;
             boot_down_us = now;
             shown_left = -1;

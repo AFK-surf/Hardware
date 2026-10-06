@@ -135,3 +135,34 @@ B1 让通话最低值降了约 9 KB：NimBLE/配网代码多 25 KB 静态 DIRAM�
 - 给 B2：轮换凭证时只写 `credentials`，不要写 `wifi_credentials`，否则 Wi-Fi 会重连一次、Connector 掉线一次（测试客户端的 `provision` 总是两个都写）。
 
 串口日志：`/private/tmp/claude-501/-Users-mafuzhen/f54661df-ccbe-4e40-aabc-a9495e53a393/scratchpad/tcircle.log`（临时目录）。
+
+## B1c：B2c 发现的两个配对问题（2026-10-06）
+
+Prompt：`docs/prompts/B1c-firmware-pairing-fixes.md`。IDF 6.0.2，只 `app-flash`（NVS 保留），串口 `/dev/cu.usbmodem101`。
+
+### 改动
+
+- **F1 按住 BOOT 连续恢复出厂**（`main/main.c`）：`ui_task` 起来时如果 BOOT 已按下，置 `boot_wait_release`，松开前整个 BOOT 逻辑不看这个键；之后新按下的才计时。3–10 s 配对、≥10 s 恢复出厂不变。串口打一行 `BOOT held at boot, ignored until released`。
+- **F2 配对模式试连失败后不回原网络**（`main/provisioning.c`）：新函数 `back_to_stored_wifi()`，已配网设备在三种情况下立刻 `wifi_connect(存储的网络, keep_retrying)`：`wifi_failed`（错误密码 / 找不到 / 30 s 超时 / 连接调用失败）、app 在 `saved` 前断开、配对模式结束（原有逻辑并入）。配对模式继续广播直到 5 分钟超时。
+  - 回去时清 `wifi_pending`，失败的 SSID/密码从 RAM 清掉（`s.wifi` 改存存储网络的 SSID，之后的 `status` 报的是实际所在网络）。`commit()` 只在 `wifi_pending` 时用 app 发来的网络，所以失败的凭证永远写不进 NVS；app 之后只写 `credentials` 就是轮换路径，保留存储网络。
+  - 代价：app 断开会丢掉正在进行（哪怕已 `wifi_up`）的试连，重连后要重新写 `wifi_credentials`。`docs/ble-provisioning.md` 已写明。
+- `docs/ble-provisioning.md`：补上述两条行为。
+
+### 板上验收
+
+| 项 | 结果 |
+| --- | --- |
+| F2 错误密码（`ble_provision.py wrong-password`，已配网 `dev_yAA…` 进配对模式） | ✅ 两次（两个固件版本各一次）。`wifi_failed: wrong_password` 11:47:37 → `back to the stored network` → 11:47:40 拿 IP → 11:47:44 `connector_up`，**7 s**；第一次 11:42:53 → 11:43:00，也是 7 s。之后仍在广播 |
+| F2 试连中途 app 离开（临时脚本写 `NoSuchNet-B1c` 后 1 s 断开） | ✅ 两次。`app left without saving: back to the stored network` 11:47:59 → 11:48:06 `connector_up`，**7 s**；修 `ssid` 后 `status` 报 `ToEverything-IOT`（修之前报的是失败的 `NoSuchNet-B1c`） |
+| 之后点屏通话 | ⚠️ 第一通接通、agent 说完开场白，12 s 后上行卡住（`send_max_ms` 590 → 770 ms、`mic_dropped` 涨、`transport_poll_write(0)`）断线。BLE 已关、省电已关、Wi-Fi 在存储网络。第二通立刻重拨，正常通话 2 分钟、`mic_dropped` 0、`send_max_ms` ≤ 150。判断是一次性上行抖动，和本改动无关，但没找到根因 |
+| F1 按住 BOOT ~15 s | ✅ 11:52:41 `factory reset` → `NVS erased` → 重启 → `BOOT held at boot, ignored until released`，之后没有第二次擦除（旧固件会在 11:52:54 再擦） |
+| 回归：app 出厂添加 | ✅ 用户先移除 `dev_yAA…`，再 Add device：11:54:32 连上 → 输码 10 s → 扫描 16 个网络 → `wifi_up` → `saved` → 11:55:31 `connector_up`（新 `dev_DYYhXrF9yQ6RjBadR9Qslw`，只读）→ `BLE off`。连上到上线 59 s |
+
+### 注意
+
+- 配对模式里如果存储的网络本身连不上（比如搬家），`wifi_scan` 会一直回 `busy`：`wifi_scan()` 在 `WIFI_RESULT_CONNECTING` 时拒绝扫描，而 keep-retrying 模式连不上就一直是 CONNECTING。B1c 之前进配对模式时就是这样，B1c 让失败后回到存储网络，这种状态更常见了。用户只能恢复出厂再配。值得单独修（比如配对模式下扫描时暂停重连）。
+- 测试前 9-29 的旧串口记录进程（PID 7797，日志文件已被删）占着串口，经用户同意按 PID 杀掉。
+
+### 板子现状
+
+`dev_DYYhXrF9yQ6RjBadR9Qslw`，staging，`ToEverything-IOT`，在线、**只读**，跑 B1c 固件。`dev_yAA…` 已从手机移除（这台手机铸的，按 B2 设计已吊销）。串口日志：`/private/tmp/claude-501/-Users-mafuzhen/630fc2f7-160a-493f-b30e-37071bb5419d/scratchpad/b1c.log`（临时目录）。
