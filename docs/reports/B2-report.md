@@ -152,3 +152,11 @@ T-Circle 最后的状态是**关**（只读），和开始时一样。板子本�
 2. Wi-Fi 页点网络：键盘自动弹出、密码遮罩、眼睛按钮切换。
 3. Setting up 页：当前步骤图标在转。
 4. A5：拔板子，按上面的办法对比 app 和 API。
+
+### B2d 补充：对照 B1c 新配网行为（中途断开会丢掉试连的 Wi-Fi）
+
+按 `docs/ble-provisioning.md`（4647a42）核对 app，**不需要改流程**：
+- 选 Wi-Fi、连 Wi-Fi、铸凭证这三段里只要 BLE 断开，流程都直接判 `DISCONNECTED` 失败（铸好的凭证在到达时吊销）。"Try again" 从扫描重新开始，连接 → 配对 → **Wi-Fi 页重新选网输密码** → 重新写 `wifi_credentials`。app 不会自动重连，也没有只写 `credentials` 的路径。
+- 重新配对后、重发 Wi-Fi 之前，设备回到原网络发出的 `wifi_up` 会被忽略，不会拿它去铸凭证。
+- 写完 `credentials`、但还没收到 `saved` 时断开：照旧等新 `device_id` 上线 90 s。如果其实已经保存，设备会在新网络上线，app 确认凭证；如果没保存，设备会回原网络，新 id 不会上线，超时后吊销凭证。新行为下这个判断仍然成立。
+- 新增 JVM 测试 `reconnectingAfterADropSendsWifiAgainEvenIfTheDeviceWasOnIt`（提交 `d817975`）：到 `wifi_up` 后断开 → 重试 → 重新配对后停在 Wi-Fi 页；原网络的 `wifi_up` 不触发铸凭证；重新 Join 才会再写 Wi-Fi，新的 `wifi_up` 之后才铸凭证。
