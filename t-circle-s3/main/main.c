@@ -31,6 +31,8 @@
 #define CALL_OVER_US (3LL * 1000000)
 // A tap while the last call is still closing dials as soon as it has closed (normally < 2 s).
 #define DIAL_PENDING_US (6LL * 1000000)
+// Taps this soon after a hang-up tap are ignored, so a double tap to hang up doesn't redial.
+#define HANGUP_GUARD_US (500LL * 1000)
 // "Speaking" shows at once; "Listening" only after the agent has been quiet this long, so the
 // screen doesn't flicker between sentences.
 #define LISTENING_AFTER_US (600LL * 1000)
@@ -167,6 +169,7 @@ static void ui_task(void *arg)
     bool prov_was_active = provisioning_active();
     call_screen_t call_screen = {0};
     int64_t dial_pending_until = 0;
+    int64_t hung_up_at = 0;
 
     for (;;) {
         const int64_t now = esp_timer_get_time();
@@ -249,8 +252,11 @@ static void ui_task(void *arg)
         }
         if (gesture != BOARD_TOUCH_CLICK || boot_tracking) {
             // Not a tap.
+        } else if (hung_up_at != 0 && now - hung_up_at < HANGUP_GUARD_US) {
+            ESP_LOGI(TAG, "tap %lld ms after hanging up, ignored", (long long)((now - hung_up_at) / 1000));
         } else if (in_call) {
             cue_voice_end();
+            hung_up_at = now;
         } else if (ending) {
             ESP_LOGI(TAG, "tap while the last call is closing: dialing once it has closed");
             dial_pending_until = now + DIAL_PENDING_US;

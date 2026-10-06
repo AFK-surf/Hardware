@@ -11,7 +11,7 @@
 | Hang-up tones | **Done, heard on the board.** Normal end: one soft 620 Hz tone, 200 ms. Dropped: three 950 Hz beeps, 120 ms on / 100 ms off. Both synthesized in `playback.c`, quieter than the ringback. |
 | Screen sleep | **Done, seen on the board.** After 15 s without activity: backlight off, `DISPOFF` + `SLPIN` to the GC9D01. A tap, BOOT, any card (pairing, errors, notices) or a call wakes it. It never sleeps during a call, while a call is closing, during pairing mode, while BOOT is held, or while a notice or end card is up. |
 | One tap on a dark screen | **Wakes and dials** (verified). See *Tap on a sleeping screen*. |
-| Tap during the tone starts a new call | **Done, verified.** A tap while the last call is still closing is queued and dials as soon as the call has closed. |
+| Tap during the tone starts a new call | **Done, verified, with a 500 ms guard.** A tap while the last call is still closing is queued and dials as soon as the call has closed. But taps within 500 ms of a hang-up tap are ignored, so a double tap to hang up doesn't redial (the 200 ms tone falls inside that guard; see *Tap on a sleeping screen*). |
 | Current at 5 V | **Estimated only, no USB meter.** See *Power*. |
 | Chip temperature | Measured: see *Temperature*. |
 | Pairing passkey stays on | **Code-checked, not run on the board.** The screen is held awake for as long as `provisioning_active()`, which covers the whole BLE window including the passkey. |
@@ -55,7 +55,7 @@
 
 Exceptions, as before: in pairing mode a tap leaves pairing (on a provisioned device), and while BOOT is being held a tap does nothing. Both only happen with the screen on, because pairing and BOOT keep it awake.
 
-**Side effect of the queued tap:** a quick double tap to hang up becomes hang up + redial, because the second tap lands while the call is closing. That's what "a tap during the tone starts a new call" asks for, but it happened once by accident in testing (17:25:43). If it proves annoying, ignore taps for ~300 ms after a hang-up tap.
+**Double tap to hang up.** With only the queued tap, a quick double tap to hang up became hang up + redial: the second tap landed while the call was closing. That happened by accident in testing (17:25:43). At the user's request, taps within **500 ms** of a hang-up tap are now ignored (`HANGUP_GUARD_US`, logged as `tap N ms after hanging up, ignored`). Verified at 17:50:18 and 17:50:34: second taps 160 ms and 148 ms after the hang-up were ignored, and nothing redialed. A tap after 500 ms, still during closing, is queued as before. This guard only follows a hang-up tap: after a drop or a server end, any tap counts.
 
 ## Power
 
@@ -102,4 +102,5 @@ The board now runs the committed build (hook off), flashed 17:27.
 
 - The serial logger the V1 session left running (PID 20786, `v1.log`) was stopped with the user's OK to free the port.
 - `idf.py` still names the image `cue_logo.bin` (the project name); that's unrelated to the deleted frames file.
+- **The agent didn't greet once (17:48, `vc_01M489T0NZJ7PX6VP4G921BFMN`)**: the session started and the downlink carried only silence (`rx_peak=0`, no transcript) for 2+ minutes. The ringback plays until the agent first speaks, and the mic stays muted while it rings, so the call was stuck ringing: the caller couldn't speak and the 60 s idle hangup never fired (silence frames count as activity). That's a backend hiccup (the next call greeted at once), but the firmware waits forever on it. That predates D1. Suggested fix: stop the ringback and open the mic if the agent hasn't spoken ~8 s after `session.started`.
 - Seen twice, not caused by D1: after `session.end` the server's `session.ended` sometimes doesn't arrive within the 1 s wait, and the client logs `Client was not started` during teardown (17:12:06). The call still ends normally.
