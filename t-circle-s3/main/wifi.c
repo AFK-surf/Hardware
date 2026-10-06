@@ -31,6 +31,11 @@ static atomic_bool s_up;
 static atomic_int s_mode = MODE_NONE;
 static atomic_int s_result = WIFI_RESULT_IDLE;
 static atomic_int s_reason;
+// Automatic reconnects of a MODE_KEEP connection are held: by provisioning while an app is
+// connected, and by a scan while it runs. A connect attempt in flight blocks scanning, and an
+// unreachable network would otherwise be retried forever.
+static atomic_bool s_hold;
+static atomic_bool s_scanning;
 static int s_attempts;
 static int s_auth_failures;
 static int s_not_found;
@@ -84,10 +89,14 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
         xEventGroupClearBits(s_events, WIFI_UP_BIT);
         const connect_mode_t mode = s_mode;
         if (mode == MODE_KEEP) {
-            ESP_LOGW(TAG, "disconnected, reason %d, reconnecting", reason);
             if (s_result == WIFI_RESULT_UP) {
                 s_result = WIFI_RESULT_CONNECTING;
             }
+            if (s_hold || s_scanning) {
+                ESP_LOGW(TAG, "disconnected, reason %d, reconnects held", reason);
+                return;
+            }
+            ESP_LOGW(TAG, "disconnected, reason %d, reconnecting", reason);
             vTaskDelay(pdMS_TO_TICKS(500));
             esp_wifi_connect();
         } else if (mode == MODE_TRIAL) {
@@ -133,6 +142,24 @@ void wifi_keep_retrying(void)
 {
     if (s_mode == MODE_TRIAL) {
         s_mode = MODE_KEEP;
+    }
+}
+
+void wifi_hold_reconnect(bool hold)
+{
+    if (s_hold == hold) {
+        return;
+    }
+    s_hold = hold;
+    if (!s_started || s_mode != MODE_KEEP || s_up) {
+        return;
+    }
+    if (hold) {
+        ESP_LOGI(TAG, "reconnects held");
+        esp_wifi_disconnect();  // cancel an attempt in flight
+    } else {
+        ESP_LOGI(TAG, "reconnects resumed");
+        esp_wifi_connect();
     }
 }
 
@@ -219,11 +246,29 @@ esp_err_t wifi_scan(wifi_ap_t *out, size_t max, size_t *count)
     if (!s_started) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_result == WIFI_RESULT_CONNECTING) {
+    // An app's trial is busy until it ends (at most ~30 s). Reconnects to a stored network that is
+    // not up are cancelled for the scan instead: that network may be gone for good.
+    if (s_mode == MODE_TRIAL && s_result == WIFI_RESULT_CONNECTING) {
         return ESP_ERR_WIFI_STATE;
+    }
+    const bool reconnecting = s_mode == MODE_KEEP && !s_up;
+    s_scanning = true;
+    if (reconnecting) {
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
     const wifi_scan_config_t scan_cfg = {.show_hidden = false};
     esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+    if (err == ESP_ERR_WIFI_STATE && !s_up) {
+        ESP_LOGW(TAG, "scan refused while connecting; cancelling and retrying");
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        err = esp_wifi_scan_start(&scan_cfg, true);
+    }
+    s_scanning = false;
+    if (reconnecting && !s_hold && s_mode == MODE_KEEP && !s_up) {
+        esp_wifi_connect();
+    }
     if (err != ESP_OK) {
         return err;
     }

@@ -403,9 +403,11 @@ static int on_gap(struct ble_gap_event *event, void *arg)
         s_secure = false;
         s_sub_status = false;
         s_sub_scan = false;
-        ESP_LOGI(TAG, "connected, asking for pairing");
-        // Ask the phone to pair now, so the passkey dialog comes up right away.
-        ble_gap_security_initiate(event->connect.conn_handle);
+        // No Security Request here: the phone starts pairing when the app asks for it (or first
+        // touches a protected characteristic), right after the app's own instructions. A request
+        // sent on connect starts the SMP timer before the person is looking, and Android may show it
+        // only as a notification.
+        ESP_LOGI(TAG, "connected");
         post(EV_CONNECTED, 0, NULL);
         return 0;
 
@@ -445,7 +447,7 @@ static int on_gap(struct ble_gap_event *event, void *arg)
             post(EV_PAIRED, 0, NULL);
         } else {
             ESP_LOGW(TAG, "pairing failed, status %d", event->enc_change.status);
-            post(EV_PAIR_FAILED, 0, NULL);
+            post(EV_PAIR_FAILED, (uint32_t)event->enc_change.status, NULL);
             ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
         }
         return 0;
@@ -574,6 +576,7 @@ typedef enum {
     SCREEN_WIFI_UP,
     SCREEN_SAVED,
     SCREEN_PAIR_FAILED,
+    SCREEN_PAIR_TIMEOUT,
 } screen_t;
 
 typedef struct {
@@ -643,6 +646,9 @@ static void show(screen_t screen)
         break;
     case SCREEN_PAIR_FAILED:
         display_show_card("Pairing failed", NULL, "Try again from the app");
+        break;
+    case SCREEN_PAIR_TIMEOUT:
+        display_show_card("Pairing timed out", NULL, "Try again from the app");
         break;
     }
 }
@@ -785,6 +791,7 @@ static void commit(void)
         return;
     }
     wifi_keep_retrying();
+    wifi_hold_reconnect(false);
     s_saved = true;
     s.saved_us = esp_timer_get_time();
     ble_gap_adv_stop();
@@ -827,12 +834,22 @@ static void handle(const event_t *ev)
     switch (ev->type) {
     case EV_CONNECTED:
         s.idle_since_us = 0;
+        if (s.screen == SCREEN_PAIR_FAILED || s.screen == SCREEN_PAIR_TIMEOUT) {
+            show(SCREEN_ADVERTISING);
+        }
+        // Keep the radio free for scans while the app is here; see wifi_hold_reconnect.
+        wifi_hold_reconnect(true);
         break;
     case EV_DISCONNECTED:
         s.idle_since_us = esp_timer_get_time();
+        wifi_hold_reconnect(false);
         if (!s_saved) {
             back_to_stored_wifi("app left without saving");
-            show(SCREEN_ADVERTISING);
+            // A failed pairing stays on screen (the link drops right after it) until the next
+            // connection, so the person sees why.
+            if (s.screen != SCREEN_PAIR_FAILED && s.screen != SCREEN_PAIR_TIMEOUT) {
+                show(SCREEN_ADVERTISING);
+            }
         }
         break;
     case EV_PASSKEY:
@@ -845,7 +862,7 @@ static void handle(const event_t *ev)
         publish_status(s.wifi_pending && wifi_result() == WIFI_RESULT_UP ? "wifi_up" : "idle", NULL);
         break;
     case EV_PAIR_FAILED:
-        show(SCREEN_PAIR_FAILED);
+        show(ev->value == BLE_HS_ETIMEOUT ? SCREEN_PAIR_TIMEOUT : SCREEN_PAIR_FAILED);
         break;
     case EV_SCAN:
         do_scan();
@@ -974,6 +991,7 @@ static void prov_task(void *arg)
         free(s.creds);
         s.creds = NULL;
     }
+    wifi_hold_reconnect(false);
     // Left pairing mode without saving while trying another network: go back to the stored one.
     back_to_stored_wifi("pairing mode ended");
     memset(&s.wifi, 0, sizeof(s.wifi));

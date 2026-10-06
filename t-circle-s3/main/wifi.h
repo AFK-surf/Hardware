@@ -31,6 +31,11 @@ esp_err_t wifi_connect(const char *ssid, const char *password, bool keep_retryin
 // Turn a successful trial into a normal connection that reconnects forever.
 void wifi_keep_retrying(void);
 
+// Hold (true) or resume automatic reconnects of a keep_retrying connection that is down. Holding
+// cancels an attempt in flight; a connection that is up stays up. wifi_connect still makes its
+// first attempt while held.
+void wifi_hold_reconnect(bool hold);
+
 // Drop the link and stop retrying.
 void wifi_disconnect(void);
 
@@ -38,8 +43,9 @@ wifi_result_t wifi_result(void);
 // Last disconnect reason (wifi_err_reason_t), 0 if none.
 int wifi_last_reason(void);
 
-// Blocking scan. Fills up to max unique SSIDs, strongest first. Fails with ESP_ERR_WIFI_STATE
-// while a connect attempt is in progress.
+// Blocking scan (a few seconds). Fills up to max unique SSIDs, strongest first. Fails with
+// ESP_ERR_WIFI_STATE only while a trial is in progress; a keep_retrying attempt is cancelled for
+// the scan and resumed after it unless reconnects are held.
 esp_err_t wifi_scan(wifi_ap_t *out, size_t max, size_t *count);
 
 // Modem sleep must be on while BLE runs (Wi-Fi/BLE coexistence). Calls want it off.

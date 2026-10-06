@@ -68,8 +68,11 @@ Subscribe first, then write. The scan takes 2–4 s. Results come as one or more
 
 Collect pages `0..pages-1` and concatenate `aps`. At most 20 networks, unique by SSID (strongest
 RSSI kept), strongest first; hidden networks are left out. On failure a single page carries
-`"error": "busy"` (a Wi-Fi connect attempt is running; retry when it ends) or `"failed"`, with an
-empty `aps`. The radio is **2.4 GHz only**: say so in the UI ("Only 2.4 GHz networks are shown").
+`"error": "busy"` (a `wifi_credentials` trial is running; it ends within ~30 s, retry then) or
+`"failed"`, with an empty `aps`. Reconnects to the stored network never make a scan busy: while an
+app is connected in pairing mode the device holds them (so a stored network that is gone does not
+block the radio), and an attempt in flight is cancelled for the scan. They resume when the app
+disconnects or pairing mode ends. A connected stored network stays connected. The radio is **2.4 GHz only**: say so in the UI ("Only 2.4 GHz networks are shown").
 `secure: false` means an open network; send an empty password.
 
 ### `wifi_credentials`

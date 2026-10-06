@@ -166,3 +166,42 @@ Prompt：`docs/prompts/B1c-firmware-pairing-fixes.md`。IDF 6.0.2，只 `app-fla
 ### 板子现状
 
 `dev_DYYhXrF9yQ6RjBadR9Qslw`，staging，`ToEverything-IOT`，在线、**只读**，跑 B1c 固件。`dev_yAA…` 已从手机移除（这台手机铸的，按 B2 设计已吊销）。串口日志：`/private/tmp/claude-501/-Users-mafuzhen/630fc2f7-160a-493f-b30e-37071bb5419d/scratchpad/b1c.log`（临时目录）。
+
+## B1d：存储的网络连不上时扫描一直 busy（2026-10-06）
+
+Prompt：`docs/prompts/B1d-firmware-scan-while-offline.md`。IDF 6.0.2，只 `app-flash`。
+
+### 原因（已确认）
+
+是我们自己的判断，不是 IDF：`wifi_scan()` 在 `s_result == WIFI_RESULT_CONNECTING` 时直接回 `ESP_ERR_WIFI_STATE`（→ `busy`）。keep-retrying 模式下存储的网络连不上，每次断开都立刻重连，`s_result` 永远是 CONNECTING，扫描就永远 busy。另外 IDF 自己在连接进行中也会拒绝 `esp_wifi_scan_start`。
+
+### 改动
+
+- `wifi.c/h`：新 `wifi_hold_reconnect(bool)`。hold 时 keep 模式断开后不再自动重连，并 `esp_wifi_disconnect()` 取消正在进行的尝试；已连上的网络不受影响。释放时如果没连上就立刻 `esp_wifi_connect()`。`wifi_connect()` 在 hold 期间仍会做第一次尝试（B1c 的「立刻回原网络」靠它）。
+- `wifi_scan()`：只有 app 自己的试连（trial）进行中才回 busy，它最多 ~30 s 就结束。keep 模式没连上时先取消当前尝试、扫描期间暂停重连，扫完（没被 hold 的话）恢复；`esp_wifi_scan_start` 仍回 `ESP_ERR_WIFI_STATE` 就再取消一次、重试一次。
+- `provisioning.c`：app 连上（`EV_CONNECTED`）就 hold；app 断开、保存成功（`commit`）、配对模式结束都释放，释放在 `back_to_stored_wifi()` 之前。存储的凭证照旧只在新网络连上后才换。
+- `docs/ble-provisioning.md`：`busy` 的含义改为「只在 `wifi_credentials` 试连期间」，并写明配对时重连暂停。
+
+### 板上验收
+
+| 项 | 结果 |
+| --- | --- |
+| 1. 存储网络可达：配对 → 扫描 → 离开 | ✅ 配对后 5 s `scan found 20 networks`，Connector 全程在线不断（`dev_Kokf…`） |
+| 2a. 准备：app 把板子加到手机热点 `Zhen`，再关热点 | ✅ 13:00:40 上线 `dev_UJrF…`；关热点后一直 `reason 201`（找不到 AP）重连 |
+| 2b. 存储网络不可达：配对 → 扫描 | ✅ 14:54:18 app 连上 → `reconnects held` → 14:54:26 配对完成 → 14:54:32 `scan found 18 networks`（含 `ToEverything-IOT`），**配对后 6 s**；app 离开 → `reconnects resumed`。第二轮（14:58 关热点后）同样：配对 14:59:50 → 14:59:55 扫到 20 个 |
+| 2c. 加到 `ToEverything-IOT` | ✅ 中间一次用户误选了热点（热点又开着，成功加上 `dev_EaauLB…`）。最终 15:00:32 `wifi_up` → 15:00:50 `saved` → 15:00:56 `connector_up`，新设备 `dev_C4_DhwzQA9UxutZB5IJ8pA`（只读）。`saved` 前一次 `handshake=401` 是旧设备已被用户在 app 里移除、旧 token 失效，正常 |
+| 3. 点屏通话 | ⚠️ 能接通，但没有一通是用户自己挂的：① 15:01:09 起 65 s 后对端重置（`Connection reset by peer`，全程每秒掉 ~5 帧麦克风、`send_max` ~300 ms）；② 15:03:01 拨号 1.6 s 后被点挂断（大概率双击），正常收尾；③ 15:06:43 起 124 s：前 100 s 干净（`mic_dropped` 0、`send_max` ≤ 156 ms），最后 20 s 上行变慢，然后 `transport_poll_write(0)` 写超时断开（和 B1c 第一通一样）。期间 Wi-Fi 没断、Connector 心跳一直正常（15:09:02 `last_heartbeat=5s`），只有语音 socket 的上行卡死 |
+
+### 通话掉线：和 B1d 无关，但要单独查
+
+B1d 只在配对模式且 app 连着时改变重连行为，通话时 BLE 已关、hold 已释放。今天 5 通里 3 通非主动断开（B1c 一通 + B1d 两通），B2c 和 B1c 第二通是好的。共同点：Wi-Fi 和 Connector 都正常，只有 voice websocket（`salix-staging.cue.surf`）上行卡住 10 s（`network_timeout_ms`）后断。建议单独一个 prompt：记录通话中的 RSSI 和 TCP 发送队列、对比 Connector 同期写延迟、查服务端 voice 会话那一侧的断开原因（①是对端 RST）。
+
+### 注意
+
+- 第一次烧录时 B2d 会话的串口记录进程占着端口，esptool 没同步上但已把板子复位进下载模式（12:23:46–12:24:25 约 40 s），没写入任何东西；我手动复位回正常启动。之后等 B2d 用完才烧。烧录前要 `lsof` 看端口，被占就别烧。
+- 测试中板子被换过 USB 口，串口现在是 `/dev/cu.usbmodem1101`。
+- 后端/app 里可能还留着 `dev_UJrF…`、`dev_EaauLB…` 两个热点那次的设备，需要用户在 app 里确认已移除。
+
+### 板子现状
+
+`dev_C4_DhwzQA9UxutZB5IJ8pA`，staging，`ToEverything-IOT`，在线、只读，跑 B1d 固件。串口日志：`/private/tmp/claude-501/-Users-mafuzhen/630fc2f7-160a-493f-b30e-37071bb5419d/scratchpad/b1d.log`（临时目录）。
