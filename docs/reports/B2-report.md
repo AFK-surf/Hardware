@@ -160,3 +160,22 @@ T-Circle 最后的状态是**关**（只读），和开始时一样。板子本�
 - 重新配对后、重发 Wi-Fi 之前，设备回到原网络发出的 `wifi_up` 会被忽略，不会拿它去铸凭证。
 - 写完 `credentials`、但还没收到 `saved` 时断开：照旧等新 `device_id` 上线 90 s。如果其实已经保存，设备会在新网络上线，app 确认凭证；如果没保存，设备会回原网络，新 id 不会上线，超时后吊销凭证。新行为下这个判断仍然成立。
 - 新增 JVM 测试 `reconnectingAfterADropSendsWifiAgainEvenIfTheDeviceWasOnIt`（提交 `d817975`）：到 `wifi_up` 后断开 → 重试 → 重新配对后停在 Wi-Fi 页；原网络的 `wifi_up` 不触发铸凭证；重新 Join 才会再写 Wi-Fi，新的 `wifi_up` 之后才铸凭证。
+
+### B2d 真机验证（2026-10-06 12:01–12:53，手机 `23112153D000003`，板子固件 B1c `c18ceb8-dirty`）
+
+| 项 | 结果 |
+|---|---|
+| A1 | ✅ 改了实现（提交 `bc50372`）。之前那版只提前调 `createBond()`，在这台 Nothing 手机上**没用**：板子一连上就主动请求配对（`connected, asking for pairing`），抢在 app 之前。系统收到的是 consent 类请求（`pairingVariant=3`），判定不在前台弹窗，于是只发通知（`pairing-notification.png`）。没人点的话 30 s 后 SMP 超时（`status 13` / `SMP_CONN_TOUT`），连续 3 次都是这样。新做法：连接前让 app 发起一次经典蓝牙扫描并立即停止。Android 只在"手机刚扫描过设备"时把配对请求弹成前台对话框。实测有了这一步就变成系统对话框 "Pair with Comma-5D28?"（`pairing-dialog.png`），点 Pair 后是输码框（`pairing-code.png`）。连接 → 板子显示码 2 s，输码 → `paired` 12 s。提前 `createBond()` 那段代码留着，无害。 |
+| A2 | ✅ Setting up 页当前步骤图标在转（录屏取帧，每 1/8 s 一帧，相邻两帧方向差 22.5°，即 2 s 一圈；`setting-up-spin-frames.png`）。 |
+| A3 | ✅ 默认遮罩，眼睛按钮可切换显示/隐藏（`password-masked.png`、`password-shown.png`）。 |
+| A4 | ✅ 对话框一打开键盘就弹出（`mInputShown=true`），键盘还识别出是密码框（出现 Passwords 建议）。 |
+| A5 | ✅ 拔板子：12:18:34 USB 口消失（串口最后一行 12:18:32），12:19:38 列表在屏幕上自己变成 Offline，没碰手机，用时 64 s。后端：第一次拔板 12:01:05–12:01:34，设备页 12:06:15 显示 "Last active 4 minutes ago"，可见 `disconnected_at` 在 12:01:15–12:02:15 之间，即后端约 1 分钟内就标离线，符合 45 s 心跳超时。**不是后端问题。** |
+| 图标 | ✅（见上） |
+| 错误密码 + B1c 新行为 | ✅ 错误密码 6 s 后 `wifi_failed: wrong_password` → 板子 `back to the stored network`；app 回到 Wi-Fi 页，显示红字 "Wrong password for "ToEverything-IOT"."（`wrong-password.png`）。 |
+| 完整流程 | ✅ 正确密码：`wifi_up` 4 s → 写入凭证 1 s → `saved` → `connector_up` 7 s → app 显示 "All set · Online"（`done.png`）。板子 credentials 被轮换：新设备 **`dev_KokfkxljPn6yuBAjq3ucJA`**。 |
+
+注意 / 遗留：
+- **配对时限太紧**（B1 方向）：从板子请求配对到用户点 Pair，以及显示码后到输完码，都只有 30 s。对话框 / 通知没被注意到就失败。建议板子不主动发安全请求，让手机读加密特征时再触发配对；或者把时限放宽。app 侧已经尽量让请求弹成对话框。
+- 板子上一个设备 `dev_DYYhXrF9yQ6RjBadR9Qslw`（B1c 配的）还留在工作区，离线。它的凭证不是这台手机铸的，app 吊销不了，需要的话手动删。
+- 板子仍是只读（Allow operations 关）。
+- 测试期间临时打开了"充电时保持亮屏"，测完已恢复（`stay_on_while_plugged_in=0`）。
