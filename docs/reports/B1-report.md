@@ -205,3 +205,14 @@ B1d 只在配对模式且 app 连着时改变重连行为，通话时 BLE 已关
 ### 板子现状
 
 `dev_C4_DhwzQA9UxutZB5IJ8pA`，staging，`ToEverything-IOT`，在线、只读，跑 B1d 固件。串口日志：`/private/tmp/claude-501/-Users-mafuzhen/630fc2f7-160a-493f-b30e-37071bb5419d/scratchpad/b1d.log`（临时目录）。
+
+## B1e: pairing timing (2026-10-06)
+
+The B1e session closed before reporting; this section records what was verified.
+
+- **Changes.** The pairing trigger and on-screen code changes went in with `796868f`: the device no longer requests security on connect, so the app starts pairing; the code stays on screen until pairing ends; "Pairing timed out" shows on timeout. NimBLE's SMP timeout (`BLE_SM_TIMEOUT_MS`, no Kconfig) is raised from 30 s to 90 s by a build-time patched copy of `ble_sm.c` (`t-circle-s3/CMakeLists.txt`). The build fails loudly if IDF's line changes. The board was flashed with this build (15:12) and tested.
+- **User test on the board, with the Android app (B2d build):**
+  - Round 1, factory reset then Add device at normal pace: ✅ reached "All set".
+  - Round 2, wait about 60 s at the pairing prompt before acting: the system prompt disappeared at about 60 s and the app showed "Try again". The phone side (system pairing UI or the app) times out first, not the board. The user decided that **60 s is enough** and nothing more is needed.
+  - Round 3 (> 90 s, "Pairing timed out" on screen): not done.
+- **Open:** the device that B1d/B1e provisioned with the Mac script (`dev_C4_DhwzQA9UxutZB5IJ8pA`) did not appear in the Android app's device list (Settings › Devices) on 2026-10-06 ~15:15, even after a refresh. The cause isn't known; it could be a workspace/group mismatch from the script, or a list bug in B2. Worth checking in the next B2 pass.
