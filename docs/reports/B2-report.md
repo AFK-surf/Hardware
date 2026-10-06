@@ -119,3 +119,36 @@ T-Circle 最后的状态是**关**（只读），和开始时一样。板子本�
 
 - "confirmation once" 我理解成每次打开只问一次，不是每台设备一辈子只问一次；如果要的是后者再改。
 - 失败原因 `timeout`/`disconnected` 这两个分支只有单测覆盖，真机没造出来过（没有拔板子）。
+
+## B2d：B2c 真机测试里的安卓问题修复
+
+2026-10-06 · `codex/add-device-ble` 提交 `5dd4559`（基于 `8bdd09b`，未推送）· 手机 `23112153D000003` 已装 staging debug 包。T-Circle 当时被 B1c 占用（在通话中），**需要板子的项都没上真机验**。
+
+| 项 | 改动 | 真机 |
+|---|---|---|
+| A1 配对请求是通知 | ① 文案改为：手机会弹出配对请求；如果它出现在通知里，先点 **Pair & connect** 再输入码（中英文都改）。② `pair()` 在第一次加密读之前，若未绑定就由 app 自己调 `createBond()` 并等绑定完成（原来是加密读失败后才调）。依据：AOSP 设置在"发起绑定的 app 在前台"时倾向弹对话框而不是通知。 | ❌ 没验（要板子进配对模式）。是否真变成对话框未知；两种情况文案都对 |
+| A2 "Working…" 图标不转 | 当前步骤那一行的图标换成任务列表的 `TaskStatusIconView`（进行中图标，2 s 一圈匀速，只在可见且系统动画开启时转；DESIGN 里加载指示器匀速旋转是弹簧规则的例外）。 | ❌ 没验（要走到 Setting up） |
+| A3 密码明文 | 根因：`TextFieldDialog` 先设 `inputType` 再设 `isSingleLine = true`，后者装上 `SingleLineTransformationMethod`，把密码遮罩顶掉了。改为先单行再设类型；密码框右侧加显示/隐藏按钮（Central `IconEyeOpen`/`IconEyeSlash`，切换时光标位置不变，有无障碍描述）。 | ❌ 没验（要走到 Wi-Fi 页） |
+| A4 不自动聚焦 | 原来在 `post{}` 里 `showSoftInput`，此时对话框窗口往往还没拿到焦点，调用被忽略。改为对话框窗口带 `SOFT_INPUT_STATE_ALWAYS_VISIBLE`（新参数 `SettingsDialog(keyboard = true)`），构建时输入框先 `requestFocus()`。改名对话框也受益。 | ❌ 没验 |
+| A5 列表在线滞后 | 见下 | 部分 |
+| 图标 | Comma 硬件改用 Central `IconSpeaker`（`ic_settings_comma_device`），列表、扫描结果、完成页都换了；已登记 `IconSources`。 | ✅ 设备列表里 Comma-5D28 和 Mac/登录设备区分开了（`B2d-screens/devices-icon.png`） |
+
+### A5 结论：是 app 的问题
+
+- **app**：设备列表只在 `DevicesPage` 创建时拉一次。从设备详情页/添加设备页返回时，列表页还在栈里，不会重新拉，所以 B2c 里那次（进添加设备页试配对 → 板子掉线 → 返回）显示的是进页面时的旧值。
+- **后端**（读代码 `salix_web/connector_socket.ex`，未实测）：每 15 s 检查一次，45 s 没收到设备 heartbeat 就关连接，`terminate` 把记录改成 `disconnected`。所以后端最迟约 60 s 就会报离线，不会到 5 分钟。
+- **修复**：`SettingsPage` 加 `onTopChanged(top)`（`PageHost` 压栈/出栈时调用）。列表页重新到顶时立刻刷新；在顶且 app 在前台时每 15 s 刷新；被盖住时不轮询。
+- **没做到**：提示要求的"同一时刻对比 app 和 `GET …/devices/:id`"没做。板子在 B1c 手里（通话中，串口确认在线，app 显示 Online，一致），没法让它掉线；app 的 token 在 Keystore 里加密，也拿不出来直接调 API。下次板子空闲时：拔掉板子，每 10 s 记一次 API `status`/`disconnected_at` 和列表显示，预期两者都在 ≤60 s 内变成离线。如果 API 本身超过 60 s 还是 `connected`，就是后端问题，交给后端。
+
+### 测试
+
+- `SettingsPagesTest` +3（Robolectric）：列表被盖住时不轮询、回到顶部显示离线、在屏幕上 15 s 内跟上变化；密码默认遮罩、按钮切换且光标不动、输入框有焦点、窗口请求键盘；普通输入框没有显示按钮。
+- 全量 `testStagingDebugUnitTest` 1150 个：1 个失败是 `ServerTaskRepositoryTest`（任务流，没动过），单独重跑通过，属负载下超时；`IconSourcesTest` 通过；`verify-scroll-usage.py` 通过。
+- A2 旋转、A1 `createBond` 没有 JVM 测试（纯 UI / 依赖系统蓝牙）。
+
+### 下次板子空闲时验证
+
+1. 板子进配对模式（按 BOOT 3–10 s）→ 添加设备：看系统是**对话框**还是通知；文案是否对得上。
+2. Wi-Fi 页点网络：键盘自动弹出、密码遮罩、眼睛按钮切换。
+3. Setting up 页：当前步骤图标在转。
+4. A5：拔板子，按上面的办法对比 app 和 API。
