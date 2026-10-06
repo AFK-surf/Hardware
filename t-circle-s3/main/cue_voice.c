@@ -34,6 +34,10 @@
 #define RX_MAX (16 * 1024)
 #define FRAME_BYTES (AUDIO_FRAME_SAMPLES * (int)sizeof(int16_t))
 #define IDLE_HANGUP_US (60LL * 1000000)
+// The ringback plays, with the mic muted, until the agent first speaks. If it hasn't this long
+// after session.started (it once sent only silence for minutes, 2026-10-06), stop ringing, play the
+// connected tone and open the mic, so the caller can speak first.
+#define GREETING_WAIT_US (8LL * 1000000)
 // No echo canceller (GPT-Live does none either): the mic sends silence while agent speech plays
 // and for this long after.
 #define ECHO_TAIL_US (300LL * 1000)
@@ -766,6 +770,12 @@ static void uplink_task(void *arg)
         filled = 0;
 
         int64_t now = esp_timer_get_time();
+        int64_t started = s_started_us;
+        if (started != 0 && playback_ringing() && now - started >= GREETING_WAIT_US) {
+            ESP_LOGW(TAG, "agent silent %lld ms after session.started: ringback off, mic open",
+                     (long long)((now - started) / 1000));
+            playback_tone(PLAYBACK_TONE_CONNECTED);
+        }
         int64_t idle = s_idle_us;
         int queued_bytes = 0;
         int pending_marks = 0;

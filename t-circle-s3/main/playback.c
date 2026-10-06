@@ -30,18 +30,29 @@
 #define RING_CYCLE_SAMPLES (AUDIO_SAMPLE_RATE_HZ * 4)
 #define RING_FADE_SAMPLES (AUDIO_SAMPLE_RATE_HZ / 100)
 #define RING_AMPLITUDE 2500.0f
-// Hang-up tones, quieter than the ringback (two 2500 sines) and the agent's speech.
+// Status tones, quieter than the ringback (two 2500 sines) and the agent's speech.
 // Normal end: one soft 200 ms tone. Dropped: three short, higher beeps, so a drop never sounds
-// like a normal end.
+// like a normal end. Connected: two rising notes, "go ahead".
 #define TONE_FADE_SAMPLES (AUDIO_SAMPLE_RATE_HZ / 200)
-#define TONE_NORMAL_HZ 620.0f
-#define TONE_NORMAL_ON (AUDIO_SAMPLE_RATE_HZ / 5)
-#define TONE_NORMAL_AMPLITUDE 1500.0f
-#define TONE_DROP_HZ 950.0f
-#define TONE_DROP_ON (AUDIO_SAMPLE_RATE_HZ * 12 / 100)
-#define TONE_DROP_OFF (AUDIO_SAMPLE_RATE_HZ / 10)
-#define TONE_DROP_BEEPS 3
-#define TONE_DROP_AMPLITUDE 2000.0f
+#define MS(ms) (AUDIO_SAMPLE_RATE_HZ * (ms) / 1000)
+
+typedef struct {
+    float hz;
+    int on;   // samples
+    int off;  // silence after it
+} beep_t;
+
+typedef struct {
+    float amplitude;
+    int count;
+    beep_t beeps[3];
+} tone_def_t;
+
+static const tone_def_t TONES[] = {
+    [PLAYBACK_TONE_NORMAL] = {1500.0f, 1, {{620.0f, MS(200), 0}}},
+    [PLAYBACK_TONE_DROPPED] = {2000.0f, 3, {{950.0f, MS(120), MS(100)}, {950.0f, MS(120), MS(100)}, {950.0f, MS(120), MS(100)}}},
+    [PLAYBACK_TONE_CONNECTED] = {1500.0f, 2, {{660.0f, MS(80), MS(40)}, {990.0f, MS(100), 0}}},
+};
 
 static const char *TAG = "play";
 
@@ -142,32 +153,39 @@ static void fill_ringback(int16_t *out, int samples)
 // Fill one chunk of the hang-up tone. Returns false once the tone is over.
 static bool fill_tone(playback_tone_t tone, int16_t *out, int samples)
 {
-    const bool drop = tone == PLAYBACK_TONE_DROPPED;
-    const int on = drop ? TONE_DROP_ON : TONE_NORMAL_ON;
-    const int cycle = drop ? TONE_DROP_ON + TONE_DROP_OFF : TONE_NORMAL_ON;
-    const int total = drop ? cycle * TONE_DROP_BEEPS : on;
-    const float hz = drop ? TONE_DROP_HZ : TONE_NORMAL_HZ;
-    const float amplitude = drop ? TONE_DROP_AMPLITUDE : TONE_NORMAL_AMPLITUDE;
-    if (s_tone_pos >= total) {
-        return false;
-    }
+    const tone_def_t *def = &TONES[tone];
+    bool any = false;
     for (int i = 0; i < samples; ++i) {
-        const int pos = s_tone_pos++;
-        const int in_beep = pos % cycle;
-        if (pos >= total || in_beep >= on) {
+        int pos = s_tone_pos++;
+        const beep_t *beep = NULL;
+        for (int b = 0; b < def->count; ++b) {
+            if (pos < def->beeps[b].on + def->beeps[b].off) {
+                beep = &def->beeps[b];
+                break;
+            }
+            pos -= def->beeps[b].on + def->beeps[b].off;
+        }
+        if (!beep) {
+            // Past the end: the rest of this chunk is silence.
+            s_tone_pos--;
+            out[i] = 0;
+            continue;
+        }
+        any = true;
+        if (pos >= beep->on) {
             out[i] = 0;
             continue;
         }
         float fade = 1.0f;
-        if (in_beep < TONE_FADE_SAMPLES) {
-            fade = (float)in_beep / TONE_FADE_SAMPLES;
-        } else if (in_beep > on - TONE_FADE_SAMPLES) {
-            fade = (float)(on - in_beep) / TONE_FADE_SAMPLES;
+        if (pos < TONE_FADE_SAMPLES) {
+            fade = (float)pos / TONE_FADE_SAMPLES;
+        } else if (pos > beep->on - TONE_FADE_SAMPLES) {
+            fade = (float)(beep->on - pos) / TONE_FADE_SAMPLES;
         }
-        const float t = (float)in_beep / AUDIO_SAMPLE_RATE_HZ;
-        out[i] = (int16_t)(amplitude * fade * sinf(2.0f * (float)M_PI * hz * t));
+        const float t = (float)pos / AUDIO_SAMPLE_RATE_HZ;
+        out[i] = (int16_t)(def->amplitude * fade * sinf(2.0f * (float)M_PI * beep->hz * t));
     }
-    return true;
+    return any;
 }
 
 static void note_played_locked(void)
@@ -407,7 +425,8 @@ bool playback_ringing(void)
 
 bool playback_speaking(void)
 {
-    if (s_ringing) {
+    // A tone counts as speech, so the mic stays gated while it plays (no echo canceller).
+    if (s_ringing || s_tone != PLAYBACK_TONE_NONE) {
         return true;
     }
     if (!s_lock) {

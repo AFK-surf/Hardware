@@ -31,12 +31,13 @@ typedef enum {
     PLAYBACK_TONE_NONE = 0,
     PLAYBACK_TONE_NORMAL,   // one soft 200 ms tone: the call ended cleanly
     PLAYBACK_TONE_DROPPED,  // three short beeps: the call was lost
+    PLAYBACK_TONE_CONNECTED,  // two rising notes: connected, go ahead and speak
 } playback_tone_t;
 
-// Drop queued agent audio and play a hang-up tone once.
+// Stop the ringback, drop queued agent audio and play a tone once.
 void playback_tone(playback_tone_t tone);
 
-// True while the ringback plays or queued audio that holds speech (not just silence) has yet to reach the speaker.
+// True while the ringback or a tone plays, or queued audio that holds speech (not just silence) has yet to reach the speaker.
 bool playback_speaking(void);
 
 // Agent audio received since the last call: bytes and peak sample. Resets both.
