@@ -53,6 +53,16 @@ void wifi_set_power_save(bool on);
 
 bool wifi_is_up(void);
 
+// Counts IP_EVENT_STA_GOT_IP: changes each time the link comes (back) up.
+unsigned wifi_ip_generation(void);
+
+// The router's address while up (network byte order), 0 otherwise.
+uint32_t wifi_gateway(void);
+
+// Drop and rejoin the stored network (only when it's the kept network, not during pairing or a
+// scan). Returns false when nothing was done.
+bool wifi_rejoin(void);
+
 // "a.b.c.d", or "" when down.
 void wifi_ip_string(char *out, size_t len);
 

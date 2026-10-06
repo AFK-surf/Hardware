@@ -4,6 +4,7 @@
 #include "cue_voice.h"
 #include "device_config.h"
 #include "display.h"
+#include "net_watchdog.h"
 #include "playback.h"
 #include "provisioning.h"
 #include "wifi.h"
@@ -71,6 +72,7 @@ static void ui_task(void *arg)
         // while BLE is still up so the app can see connector_up in `status`.
         if (device_config_provisioned()) {
             connector_start();
+            net_watchdog_start();
         }
 
         const bool prov = provisioning_active();

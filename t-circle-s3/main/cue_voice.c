@@ -16,9 +16,13 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "lwip/priv/tcp_priv.h"
+#include "lwip/priv/tcpip_priv.h"
+#include "lwip/tcp.h"
 
 #define WS_OP_CONT 0x0
 #define WS_OP_TEXT 0x1
@@ -56,8 +60,28 @@
 // one burst, so the sender keeps at most this much backlog and drops the oldest audio beyond it.
 #define MIC_BACKLOG_MAX_BYTES (WIRE_BYTES_PER_MS * 300)
 #define SEND_CHUNK_BYTES (WIRE_FRAME_BYTES * 5)
-// A send that times out makes the client drop the connection, so this only covers a dead link.
-#define SEND_TIMEOUT_MS 3000
+// Any esp_websocket_client send that times out tears the connection down, and a send that blocks
+// holds the TX lock, which the websocket task needs for PONG: if it can't get it within 2 s
+// (CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS) the read fails and the client aborts too. A 3 s send
+// timeout closed 2 of 5 calls on office Wi-Fi (2026-10-06) on uplink stalls the server would have
+// ridden out. So the sender only writes when the voice socket's lwIP send buffer can take the whole
+// frame without blocking (tcp_room), and waits outside the lock otherwise, trimming the mic backlog.
+// UPLINK_STALL_LIMIT_MS is how long no audio frame may fit before the device hangs up itself. The
+// server gives up on a client that doesn't read for 8 s (slow_reader, #2504); an uplink that hasn't
+// drained 100 ms of audio in 10 s almost always means the downlink is dead too, so by then the
+// server has closed (and its close code says why). Shorter, and the device hangs up on stalls the
+// server tolerates; longer only keeps a dead call on screen. After a stall at most ~0.7 s of audio is
+// ahead (the frames in flight plus the 300 ms mic backlog), well inside the server's 5 s catch-up.
+#define UPLINK_STALL_LIMIT_MS 10000
+// Ceiling for a send that the gate let through (or every send, if the voice socket wasn't found).
+#define SEND_TIMEOUT_MS UPLINK_STALL_LIMIT_MS
+// A wait for room longer than this is logged as a stall, with the Wi-Fi and TCP state.
+#define STALL_LOG_MS 1000
+// What one audio frame costs in the send buffer: 2 websocket fragments (the client's 4096-byte
+// buffer), each a header and a payload write, each its own TLS record (~30 bytes), plus slack.
+#define AUDIO_SEND_OVERHEAD 256
+// pbufs one audio frame can take in the TCP send queue (4800 B / MSS plus the small header writes).
+#define AUDIO_SEND_SEGMENTS 16
 
 static const char *TAG = "cue";
 
@@ -77,6 +101,20 @@ static _Atomic int64_t s_send_max_us;
 static atomic_int s_close_code;
 static _Atomic int64_t s_idle_us;
 static bool s_start_sent;
+static atomic_int s_rx_ms_last;
+static _Atomic int64_t s_wait_since_us;
+
+// The voice socket in lwIP, found by local port when the websocket connects (0: not found, and the
+// sender falls back to plain blocking sends).
+static _Atomic uint16_t s_voice_port;
+#define KNOWN_PORTS_MAX 16
+static uint16_t s_known_ports[KNOWN_PORTS_MAX];
+static int s_known_count;
+// Worst TCP state the sender saw since the last stats line.
+static atomic_uint s_tcp_unacked_max;
+static atomic_uint s_tcp_nrtx_max;
+
+static void tcp_find_voice_socket(void);
 
 static void note_activity(void)
 {
@@ -138,12 +176,12 @@ static bool name_is_safe(const char *name)
     return true;
 }
 
-static int send_text(const char *json)
+static int send_text(const char *json, int timeout_ms)
 {
     if (!s_client || !esp_websocket_client_is_connected(s_client)) {
         return -1;
     }
-    return esp_websocket_client_send_text(s_client, json, (int)strlen(json), pdMS_TO_TICKS(2000));
+    return esp_websocket_client_send_text(s_client, json, (int)strlen(json), pdMS_TO_TICKS(timeout_ms));
 }
 
 static void note_close(int code)
@@ -364,6 +402,7 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)arg;
     (void)base;
     if (id == WEBSOCKET_EVENT_CONNECTED) {
+        tcp_find_voice_socket();
         s_ws_up = true;
         ESP_LOGI(TAG, "websocket connected");
     } else if (id == WEBSOCKET_EVENT_DATA) {
@@ -391,6 +430,163 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
+typedef struct {
+    struct tcpip_api_call_data call;
+    // in
+    uint16_t port;
+    bool collect;
+    // out
+    bool found;
+    int new_count;
+    uint16_t new_port;
+    uint32_t snd_buf;
+    uint32_t queue_len;
+    uint32_t unacked;
+    uint32_t snd_wnd;
+    uint32_t cwnd;
+    uint32_t nrtx;
+    int rto_ms;
+    int srtt_ms;
+} tcp_probe_t;
+
+static bool port_known(uint16_t port)
+{
+    for (int i = 0; i < s_known_count; ++i) {
+        if (s_known_ports[i] == port) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Runs on the tcpip thread (no core locking in this build), the only place pcbs may be read.
+static err_t tcp_probe_on_tcpip(struct tcpip_api_call_data *call)
+{
+    tcp_probe_t *p = (tcp_probe_t *)call;
+    if (p->collect) {
+        s_known_count = 0;
+        for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb && s_known_count < KNOWN_PORTS_MAX; pcb = pcb->next) {
+            s_known_ports[s_known_count++] = pcb->local_port;
+        }
+        return ERR_OK;
+    }
+    for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
+        if (p->port == 0) {
+            if (pcb->state == ESTABLISHED && !port_known(pcb->local_port)) {
+                p->new_count++;
+                p->new_port = pcb->local_port;
+            }
+            continue;
+        }
+        if (pcb->local_port != p->port) {
+            continue;
+        }
+        p->found = true;
+        p->snd_buf = tcp_sndbuf(pcb);
+        p->queue_len = tcp_sndqueuelen(pcb);
+        p->unacked = pcb->snd_nxt - pcb->lastack;
+        p->snd_wnd = pcb->snd_wnd;
+        p->cwnd = pcb->cwnd;
+        p->nrtx = pcb->nrtx;
+        p->rto_ms = pcb->rto * TCP_SLOW_INTERVAL;
+        p->srtt_ms = (pcb->sa >> 3) * TCP_SLOW_INTERVAL;
+        break;
+    }
+    return ERR_OK;
+}
+
+static bool tcp_probe(tcp_probe_t *p)
+{
+    uint16_t port = s_voice_port;
+    memset(p, 0, sizeof(*p));
+    if (port == 0) {
+        return false;
+    }
+    p->port = port;
+    if (tcpip_api_call(tcp_probe_on_tcpip, &p->call) != ERR_OK || !p->found) {
+        return false;
+    }
+    if (p->unacked > s_tcp_unacked_max) {
+        s_tcp_unacked_max = p->unacked;
+    }
+    if (p->nrtx > s_tcp_nrtx_max) {
+        s_tcp_nrtx_max = p->nrtx;
+    }
+    return true;
+}
+
+// Before dialing: remember which TCP connections already exist (the Connector's among them).
+static void tcp_remember_existing(void)
+{
+    tcp_probe_t p = {.collect = true};
+    s_voice_port = 0;
+    tcpip_api_call(tcp_probe_on_tcpip, &p.call);
+}
+
+// On connect: the voice socket is the one established connection that wasn't there before. If the
+// Connector or a LAN request connected in the same window it's ambiguous, and the gate stays off.
+static void tcp_find_voice_socket(void)
+{
+    tcp_probe_t p = {0};
+    tcpip_api_call(tcp_probe_on_tcpip, &p.call);
+    if (p.new_count == 1) {
+        s_voice_port = p.new_port;
+        ESP_LOGI(TAG, "voice socket: local port %u", (unsigned)p.new_port);
+    } else {
+        ESP_LOGW(TAG, "voice socket not identified (%d new connections): sends block, no TCP stats", p.new_count);
+    }
+}
+
+// The same test lwIP's select() uses for "writable". While it holds, a write of up to snd_buf bytes
+// neither waits in poll_write nor blocks in the socket.
+static bool tcp_writable(const tcp_probe_t *t)
+{
+    return t->snd_buf > TCP_SNDLOWAT && t->queue_len < TCP_SNDQUEUELOWAT;
+}
+
+static bool tcp_room(const tcp_probe_t *t, size_t bytes)
+{
+    return tcp_writable(t) && t->snd_buf >= bytes + AUDIO_SEND_OVERHEAD &&
+           t->queue_len + AUDIO_SEND_SEGMENTS <= TCP_SND_QUEUELEN;
+}
+
+static void describe_wifi(char *out, size_t len)
+{
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        snprintf(out, len, "rssi=? phy=?");
+        return;
+    }
+    wifi_ps_type_t ps = WIFI_PS_NONE;
+    esp_wifi_get_ps(&ps);
+    // IDF has no getter for the current TX/RX PHY rate, only the negotiated mode and bandwidth.
+    snprintf(out, len, "rssi=%d ch=%u phy=%s%s%s%s/%s ps=%d", ap.rssi, ap.primary, ap.phy_11b ? "b" : "",
+             ap.phy_11g ? "g" : "", ap.phy_11n ? "n" : "", ap.phy_11ax ? "ax" : "",
+             ap.second == WIFI_SECOND_CHAN_NONE ? "HT20" : "HT40", (int)ps);
+}
+
+static void describe_tcp(const tcp_probe_t *t, bool known, char *out, size_t len)
+{
+    if (!known) {
+        snprintf(out, len, "tcp=?");
+        return;
+    }
+    snprintf(out, len, "tcp_unacked=%u tcp_sndbuf=%u tcp_q=%u peer_wnd=%u cwnd=%u nrtx=%u rto_ms=%d srtt_ms=%d",
+             (unsigned)t->unacked, (unsigned)t->snd_buf, (unsigned)t->queue_len, (unsigned)t->snd_wnd,
+             (unsigned)t->cwnd, (unsigned)t->nrtx, t->rto_ms, t->srtt_ms);
+}
+
+static void log_stall(const char *what, int64_t waited_us, const tcp_probe_t *t, bool known)
+{
+    char wifi[64];
+    char tcp[160];
+    describe_wifi(wifi, sizeof(wifi));
+    describe_tcp(t, known, tcp, sizeof(tcp));
+    ESP_LOGW(TAG, "uplink %s waited_ms=%lld %s %s mic_backlog_ms=%d mic_dropped=%d rx_ms(last s)=%d", what,
+             (long long)(waited_us / 1000), wifi, tcp,
+             (int)xStreamBufferBytesAvailable(s_mic_queue) / WIRE_BYTES_PER_MS, (int)s_mic_dropped, (int)s_rx_ms_last);
+}
+
 static void send_played_marks(void)
 {
     char played[8][80];
@@ -402,19 +598,29 @@ static void send_played_marks(void)
         }
         char json[128];
         snprintf(json, sizeof(json), "{\"type\":\"output.played\",\"name\":\"%s\"}", played[i]);
-        send_text(json);
+        send_text(json, SEND_TIMEOUT_MS);
     }
 }
 
 // The only task that writes to the socket after session.start: played marks first, then mic audio
 // in 100 ms frames. Mic capture never waits on the network, and a slow audio send cannot hold
-// output.played back long enough for the server to close with 4410.
+// output.played back long enough for the server to close with 4410. Nothing is written until the
+// voice socket has room for it (tcp_room), so a stall is waited out here, outside the TX lock, while
+// the mic backlog stays capped; when room comes back, queued marks go out before any audio.
 static void sender_task(void *arg)
 {
     (void)arg;
     static uint8_t chunk[SEND_CHUNK_BYTES];
+    int64_t wait_since = 0;
     while (!s_stop) {
-        send_played_marks();
+        tcp_probe_t tcp;
+        const bool known = tcp_probe(&tcp);
+        if (!known || tcp_writable(&tcp)) {
+            send_played_marks();
+            if (known) {
+                tcp_probe(&tcp);
+            }
+        }
         size_t backlog = xStreamBufferBytesAvailable(s_mic_queue);
         if (backlog > MIC_BACKLOG_MAX_BYTES) {
             size_t excess = backlog - MIC_BACKLOG_MAX_BYTES;
@@ -431,14 +637,33 @@ static void sender_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        int64_t now = esp_timer_get_time();
+        if (known && !tcp_room(&tcp, SEND_CHUNK_BYTES)) {
+            if (wait_since == 0) {
+                wait_since = now;
+                s_wait_since_us = now;
+            }
+            if (now - wait_since >= UPLINK_STALL_LIMIT_MS * 1000LL) {
+                log_stall("dead, hanging up", now - wait_since, &tcp, known);
+                s_stop = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         size_t n = xStreamBufferReceive(s_mic_queue, chunk, sizeof(chunk), 0);
         if (n == 0 || !s_client || !esp_websocket_client_is_connected(s_client)) {
             continue;
         }
-        int64_t start = esp_timer_get_time();
+        int64_t start = wait_since != 0 ? wait_since : now;
+        // Set for the send too: it can still wait on the TX lock (the websocket task holds it while
+        // its own PING/PONG waits for room), and the stats loop must see that as a stall.
+        s_wait_since_us = start;
         int sent = esp_websocket_client_send_bin(s_client, (const char *)chunk, (int)n, pdMS_TO_TICKS(SEND_TIMEOUT_MS));
         int64_t took = esp_timer_get_time() - start;
         s_send_us = took;
+        wait_since = 0;
+        s_wait_since_us = 0;
         if (took > s_send_max_us) {
             s_send_max_us = took;
         }
@@ -461,12 +686,13 @@ static void uplink_task(void *arg)
     bool was_gated = false;
     int64_t speaker_quiet_since = 0;
     int64_t stats_at = 0;
+    int stall_logged_at = 0;
     int mic_peak = 0;
     while (!s_stop) {
         if (!s_start_sent && s_ws_up) {
             const char *start =
                 "{\"type\":\"session.start\",\"audio_format\":\"" WIRE_FORMAT "\",\"client\":\"t-circle/0.1\"}";
-            if (send_text(start) < 0) {
+            if (send_text(start, 2000) < 0) {
                 ESP_LOGE(TAG, "session.start send failed");
                 s_stop = true;
                 break;
@@ -535,21 +761,56 @@ static void uplink_task(void *arg)
         if (xStreamBufferSend(s_mic_queue, wire, sizeof(wire), 0) != sizeof(wire)) {
             s_mic_dropped++;
         }
+        // Stall lines come from here, not the sender, which may itself be stuck inside a send.
+        int64_t waiting_since = s_wait_since_us;
+        if (waiting_since != 0 && now - waiting_since >= (stall_logged_at + 1) * STALL_LOG_MS * 1000LL &&
+            stall_logged_at < 64) {
+            tcp_probe_t tcp;
+            const bool known = tcp_probe(&tcp);
+            log_stall(stall_logged_at == 0 ? "stall" : "still stalled", now - waiting_since, &tcp, known);
+            // Every 1, 2, 4, 8 s: enough to follow a long stall without flooding the log.
+            stall_logged_at = stall_logged_at == 0 ? 1 : stall_logged_at * 2;
+        } else if (waiting_since == 0 && stall_logged_at != 0) {
+            tcp_probe_t tcp;
+            const bool known = tcp_probe(&tcp);
+            log_stall("stall over", s_send_us, &tcp, known);
+            stall_logged_at = 0;
+        }
         if (now - stats_at >= 1000000) {
             int rx_bytes = 0;
             int rx_peak = 0;
             playback_take_rx(&rx_bytes, &rx_peak);
+            const int rx_ms = rx_bytes / (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 1000);
+            s_rx_ms_last = rx_ms;
+            // A send still waiting counts toward send_max, so a stall shows while it lasts.
+            int64_t send_max_us = s_send_max_us;
+            if (waiting_since != 0 && now - waiting_since > send_max_us) {
+                send_max_us = now - waiting_since;
+            }
+            tcp_probe_t tcp;
+            const bool known = tcp_probe(&tcp);
+            char wifi[64];
+            describe_wifi(wifi, sizeof(wifi));
             ESP_LOGI(TAG,
                      "stats rx_ms=%d rx_peak=%d queue_ms=%d marks=%d send_ms=%lld send_max_ms=%lld mic_backlog_ms=%d mic_dropped=%d mic=%s "
                      "mic_peak=%d",
-                     rx_bytes / (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 1000), rx_peak,
+                     rx_ms, rx_peak,
                      queued_bytes / (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 1000), pending_marks,
-                     (long long)(s_send_us / 1000), (long long)(s_send_max_us / 1000),
+                     (long long)(s_send_us / 1000), (long long)(send_max_us / 1000),
                      (int)xStreamBufferBytesAvailable(s_mic_queue) / WIRE_BYTES_PER_MS,
                      (int)s_mic_dropped, gated ? "muted" : "open", mic_peak);
+            if (known) {
+                ESP_LOGI(TAG, "net %s tcp_unacked=%u (max %u) tcp_sndbuf=%u tcp_q=%u peer_wnd=%u cwnd=%u nrtx_max=%u rto_ms=%d srtt_ms=%d", wifi,
+                         (unsigned)tcp.unacked, (unsigned)s_tcp_unacked_max, (unsigned)tcp.snd_buf, (unsigned)tcp.queue_len,
+                         (unsigned)tcp.snd_wnd, (unsigned)tcp.cwnd, (unsigned)s_tcp_nrtx_max, tcp.rto_ms, tcp.srtt_ms);
+            } else {
+                ESP_LOGI(TAG, "net %s tcp=?", wifi);
+            }
             stats_at = now;
             s_send_max_us = 0;
             s_mic_dropped = 0;
+            s_tcp_unacked_max = 0;
+            s_tcp_nrtx_max = 0;
             mic_peak = 0;
         }
     }
@@ -565,7 +826,7 @@ static void uplink_task(void *arg)
     if (s_client && esp_websocket_client_is_connected(s_client)) {
         // session.end before session.start is a 4400, so just close.
         if (s_start_sent) {
-            send_text("{\"type\":\"session.end\"}");
+            send_text("{\"type\":\"session.end\"}", 2000);
             ESP_LOGI(TAG, "sent session.end");
             int64_t until = esp_timer_get_time() + 1000000;
             while (s_state == CUE_VOICE_UP && esp_timer_get_time() < until) {
@@ -643,6 +904,10 @@ esp_err_t cue_voice_start(void)
     s_mic_dropped = 0;
     s_send_us = 0;
     s_send_max_us = 0;
+    s_wait_since_us = 0;
+    s_rx_ms_last = 0;
+    s_tcp_unacked_max = 0;
+    s_tcp_nrtx_max = 0;
     playback_clear();
     s_stop = false;
     s_ws_up = false;
@@ -662,8 +927,11 @@ esp_err_t cue_voice_start(void)
         .buffer_size = 4096,
         .task_stack = 6144,
         .task_prio = 5,
+        // Also the write timeout for the websocket task's own PING/PONG. Those aren't gated, but a
+        // failed one is ignored (no abort), and it matches UPLINK_STALL_LIMIT_MS.
         .network_timeout_ms = 10000,
         .ping_interval_sec = 10,
+        // Longer than UPLINK_STALL_LIMIT_MS, so a stall ends with our own logged hangup first.
         .pingpong_timeout_sec = 20,
     };
     if (strncmp(s_uri, "ws://", 5) == 0) {
@@ -676,6 +944,7 @@ esp_err_t cue_voice_start(void)
         return ESP_FAIL;
     }
     ESP_ERROR_CHECK(esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, on_ws, NULL));
+    tcp_remember_existing();
     esp_err_t err = esp_websocket_client_start(s_client);
     if (err != ESP_OK) {
         esp_websocket_client_destroy(s_client);
@@ -684,7 +953,7 @@ esp_err_t cue_voice_start(void)
         return err;
     }
     s_sender_running = true;
-    if (xTaskCreate(sender_task, "sender", 4096, NULL, 6, NULL) != pdPASS) {
+    if (xTaskCreate(sender_task, "sender", 5120, NULL, 6, NULL) != pdPASS) {
         s_sender_running = false;
         s_stop = true;
         esp_websocket_client_stop(s_client);

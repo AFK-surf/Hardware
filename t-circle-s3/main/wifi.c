@@ -28,6 +28,7 @@ static EventGroupHandle_t s_events;
 static esp_netif_t *s_netif;
 static bool s_started;
 static atomic_bool s_up;
+static atomic_uint s_ip_generation;
 static atomic_int s_mode = MODE_NONE;
 static atomic_int s_result = WIFI_RESULT_IDLE;
 static atomic_int s_reason;
@@ -103,10 +104,19 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
             ESP_LOGW(TAG, "disconnected, reason %d", reason);
             on_trial_disconnect(reason);
         }
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        // Logged for every join: ToEverything-IOT has more than one BSSID, and a stuck link may follow
+        // a move between them.
+        const wifi_event_sta_connected_t *event = data;
+        if (event) {
+            ESP_LOGI(TAG, "associated bssid=%02x:%02x:%02x:%02x:%02x:%02x ch=%u", event->bssid[0], event->bssid[1],
+                     event->bssid[2], event->bssid[3], event->bssid[4], event->bssid[5], event->channel);
+        }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = data;
         ESP_LOGI(TAG, "got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_up = true;
+        s_ip_generation++;
         s_result = WIFI_RESULT_UP;
         xEventGroupSetBits(s_events, WIFI_UP_BIT);
     }
@@ -332,6 +342,29 @@ void wifi_set_power_save(bool on)
 bool wifi_is_up(void)
 {
     return s_up;
+}
+
+unsigned wifi_ip_generation(void)
+{
+    return s_ip_generation;
+}
+
+uint32_t wifi_gateway(void)
+{
+    esp_netif_ip_info_t info;
+    if (!s_up || !s_netif || esp_netif_get_ip_info(s_netif, &info) != ESP_OK) {
+        return 0;
+    }
+    return info.gw.addr;
+}
+
+bool wifi_rejoin(void)
+{
+    if (!s_started || s_mode != MODE_KEEP || s_hold || s_scanning) {
+        return false;
+    }
+    // The disconnect event reconnects a MODE_KEEP link on its own.
+    return esp_wifi_disconnect() == ESP_OK;
 }
 
 void wifi_ip_string(char *out, size_t len)

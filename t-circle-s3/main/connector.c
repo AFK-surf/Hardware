@@ -1,4 +1,5 @@
 #include "connector.h"
+#include "net_watchdog.h"
 
 #include "device_config.h"
 #include "lan_http.h"
@@ -704,6 +705,7 @@ static void connector_task(void *arg)
         }
         int64_t lasted_us = run_session(&creds);
         const int http = s_handshake_status;
+        net_watchdog_dial_result(lasted_us > 0, http);
         if (credentials_stale(&creds)) {
             backoff_ms = BACKOFF_MIN_MS;
             continue;  // dial again right away with the new token
