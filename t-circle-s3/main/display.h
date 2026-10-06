@@ -6,15 +6,20 @@
 
 esp_err_t display_init(void);
 
-// Show the logo: still while idle, looping while animating is set. Does not return.
-void display_run_logo(void);
-
-// Animate the logo (during a call) or let it come to rest on its last frame.
-void display_set_animating(bool animating);
+// Draw what was last asked for, and sleep the screen when idle. Does not return.
+void display_run(void);
 
 // Replace the logo with a text card until display_show_logo(). Any part may be NULL.
-// label: small gray line(s) on top. big: digits and spaces only (pairing code, countdown).
-// body: small white text, wrapped to the round glass; '\n' breaks a line.
+// label: small gray line(s) on top. big: digits, spaces and ':' only (pairing code, countdown,
+// call time). body: small white text, wrapped to the round glass; '\n' breaks a line.
+// Both wake the screen. Asking for what is already shown doesn't redraw.
 void display_show_card(const char *label, const char *big, const char *body);
-
 void display_show_logo(void);
+
+// A tap or BOOT press: wake the screen and restart the idle timer.
+void display_wake(void);
+
+// While set, the screen stays on (a call, pairing mode with its passkey, a notice).
+void display_keep_awake(bool on);
+
+bool display_asleep(void);

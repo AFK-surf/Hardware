@@ -27,6 +27,12 @@ static const ui_card_t CARDS[] = {
     {"Resetting", "", "Erasing Wi-Fi and credentials"},
     {"Key rejected", "", "Hold BOOT 3 s and set up again in the app"},
     {"No Wi-Fi", "", "Still trying to connect"},
+    {"Calling", "", "Comma"},
+    {"Comma", "0:42", "Listening"},
+    {"Comma", "12:07", "Speaking"},
+    {"Call ended", "2:03", ""},
+    {"Call dropped", "0:47", "Tap to call again"},
+    {"Call failed", "", "Tap to try again"},
 };
 
 int main(int argc, char **argv)

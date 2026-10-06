@@ -6,7 +6,7 @@ reference/fonts/ is a copy of comma-android's res/font/inter_variable.ttf.
 
 Output:
   main/ui_font.c, main/ui_font.h  two fonts (ui_font_small: printable ASCII,
-                                  ui_font_large: digits and a few symbols)
+                                  ui_font_large: digits, space and colon)
 
 Each glyph is a tight bitmap of 4-bit coverage, two pixels per byte, high nibble left,
 rows padded to whole bytes.
@@ -24,7 +24,7 @@ TTF = ROOT / "reference" / "fonts" / "Inter-Variable.ttf"
 FONTS = [
     # name, px, weight, characters
     ("small", 14, 500, [chr(c) for c in range(32, 127)]),
-    ("large", 36, 600, list(" 0123456789")),
+    ("large", 36, 600, list(" 0123456789:")),
 ]
 
 

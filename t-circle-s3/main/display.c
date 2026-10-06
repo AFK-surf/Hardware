@@ -1,12 +1,14 @@
-// GC9D01 160x160 round panel. Idle screen is the Cue logo animation.
-// Pins match the T-Circle-S3 panel used by the previous logo firmware.
+// GC9D01 160x160 round panel. Idle screen is the Cue logo, still; calls and setup show text cards.
+// The screen redraws only when what it shows changes, and sleeps (backlight off, panel in SLPIN)
+// after DISPLAY_SLEEP_US without activity. Pins match the T-Circle-S3 panel used by the previous
+// logo firmware.
 
 #include "display.h"
 
 #include <stdatomic.h>
 #include <string.h>
 
-#include "cue_logo_frames.h"
+#include "cue_logo.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_heap_caps.h"
@@ -28,24 +30,30 @@
 #define LCD_DC GPIO_NUM_16
 #define LCD_CS GPIO_NUM_13
 #define LCD_BL GPIO_NUM_18
+// The backlight is on when GPIO18 is low.
+#define BL_ON 0
+#define BL_OFF 1
+#define LCD_CMD_SLPIN 0x10
+#define LCD_CMD_SLPOUT 0x11
 
-_Static_assert(CUE_LOGO_SIZE == LCD_W && CUE_LOGO_SIZE == LCD_H, "frame size must match panel");
+#define DISPLAY_SLEEP_US (15LL * 1000000)
+#define POLL_MS 20
 
-extern const uint8_t frames_start[] asm("_binary_cue_logo_frames_bin_start");
-extern const uint8_t frames_end[] asm("_binary_cue_logo_frames_bin_end");
+_Static_assert(CUE_LOGO_SIZE == LCD_W && CUE_LOGO_SIZE == LCD_H, "logo size must match panel");
 
-static const char *TAG = "cue_logo";
+extern const uint8_t logo_start[] asm("_binary_cue_logo_bin_start");
+extern const uint8_t logo_end[] asm("_binary_cue_logo_bin_end");
+
+static const char *TAG = "display";
 
 #define FB_BYTES (LCD_W * LCD_H * sizeof(uint16_t))
-// Two 50 KB framebuffers. They used to be DMA_ATTR statics, which put 100 KB of the chip's internal
-// RAM into .data. They live in PSRAM now and the SPI DMA reads them directly (psram_dma_direct).
-// 64-byte alignment covers the PSRAM DMA and cache-line rules, so the driver never copies a frame
-// into an internal bounce buffer.
-static uint16_t *s_fb[2];
-static SemaphoreHandle_t s_fb_free[2];
-static volatile uint8_t s_inflight[4];
-static volatile uint32_t s_inflight_head, s_inflight_tail;
+// One 50 KB framebuffer in PSRAM; the SPI DMA reads it directly (psram_dma_direct). 64-byte
+// alignment covers the PSRAM DMA and cache-line rules, so the driver never copies it into an
+// internal bounce buffer. Redraws are rare, so drawing just waits for the previous transfer.
+static uint16_t *s_fb;
+static SemaphoreHandle_t s_fb_free;
 static uint16_t s_lut[16];
+static esp_lcd_panel_io_handle_t s_io = NULL;
 static esp_lcd_panel_handle_t s_panel = NULL;
 static bool s_ready = false;
 
@@ -55,9 +63,7 @@ static bool on_color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_d
     (void)edata;
     (void)ctx;
     BaseType_t woken = pdFALSE;
-    if (s_inflight_tail != s_inflight_head) {
-        xSemaphoreGiveFromISR(s_fb_free[s_inflight[s_inflight_tail++ & 3]], &woken);
-    }
+    xSemaphoreGiveFromISR(s_fb_free, &woken);
     return woken == pdTRUE;
 }
 
@@ -70,10 +76,10 @@ static void build_lut(void)
     }
 }
 
-static void expand(const uint8_t *src, uint16_t *dst)
+static void expand_logo(uint16_t *dst)
 {
-    for (int i = 0; i < CUE_LOGO_FRAME_BYTES; ++i) {
-        uint8_t b = src[i];
+    for (int i = 0; i < CUE_LOGO_BYTES; ++i) {
+        uint8_t b = logo_start[i];
         dst[2 * i] = s_lut[b >> 4];
         dst[2 * i + 1] = s_lut[b & 0x0f];
     }
@@ -84,36 +90,30 @@ esp_err_t display_init(void)
     if (s_ready) {
         return ESP_OK;
     }
-    if (frames_end - frames_start != CUE_LOGO_FRAMES * CUE_LOGO_FRAME_BYTES) {
+    if (logo_end - logo_start != CUE_LOGO_BYTES) {
         return ESP_ERR_INVALID_SIZE;
     }
     build_lut();
-    for (int i = 0; i < 2; ++i) {
-        s_fb[i] = heap_caps_aligned_calloc(64, 1, FB_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_fb[i]) {
-            return ESP_ERR_NO_MEM;
-        }
-        s_fb_free[i] = xSemaphoreCreateBinary();
-        if (!s_fb_free[i]) {
-            return ESP_ERR_NO_MEM;
-        }
-        xSemaphoreGive(s_fb_free[i]);
+    s_fb = heap_caps_aligned_calloc(64, 1, FB_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_fb_free = xSemaphoreCreateBinary();
+    if (!s_fb || !s_fb_free) {
+        return ESP_ERR_NO_MEM;
     }
+    xSemaphoreGive(s_fb_free);
 
     gpio_config_t bl = {
         .pin_bit_mask = 1ULL << LCD_BL,
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&bl));
-    gpio_set_level(LCD_BL, 1);
+    gpio_set_level(LCD_BL, BL_OFF);
 
     const spi_bus_config_t bus = GC9D01_PANEL_BUS_SPI_CONFIG(LCD_SCLK, LCD_MOSI, FB_BYTES);
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO));
 
-    esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_io_spi_config_t io_cfg = GC9D01_PANEL_IO_SPI_CONFIG(LCD_CS, LCD_DC, on_color_done, NULL);
     io_cfg.flags.psram_dma_direct = 1;
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &io));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &s_io));
 
     const esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = -1,
@@ -121,109 +121,145 @@ esp_err_t display_init(void)
         .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
         .bits_per_pixel = 16,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(io, &panel_cfg, &s_panel));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(s_io, &panel_cfg, &s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, false));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
     s_ready = true;
-    ESP_LOGI(TAG, "%d frames @ %d fps, hold %d", CUE_LOGO_FRAMES, CUE_LOGO_FPS, CUE_LOGO_HOLD_FRAMES);
     return ESP_OK;
 }
 
-static atomic_bool s_animating;
+// ---- What to show, and when to sleep ----------------------------------------------------------
 
-void display_set_animating(bool animating)
-{
-    s_animating = animating;
-}
-
-// ---- Text cards -------------------------------------------------------------------------------
-
-static portMUX_TYPE s_card_mux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static ui_card_t s_card;
-static bool s_card_on_req;
-static atomic_bool s_card_dirty;
+static bool s_card_on;
+static atomic_bool s_dirty;
+static atomic_bool s_wake_req;
+static atomic_bool s_keep_awake;
+static _Atomic int64_t s_activity_us;
+static atomic_bool s_asleep;
 
-static void set_card(bool on, const char *label, const char *big, const char *body)
+static void set_content(bool card_on, const char *label, const char *big, const char *body)
 {
-    taskENTER_CRITICAL(&s_card_mux);
-    s_card_on_req = on;
-    strlcpy(s_card.label, label ? label : "", sizeof(s_card.label));
-    strlcpy(s_card.big, big ? big : "", sizeof(s_card.big));
-    strlcpy(s_card.body, body ? body : "", sizeof(s_card.body));
-    s_card_dirty = true;
-    taskEXIT_CRITICAL(&s_card_mux);
+    ui_card_t card = {0};
+    if (card_on) {
+        strlcpy(card.label, label ? label : "", sizeof(card.label));
+        strlcpy(card.big, big ? big : "", sizeof(card.big));
+        strlcpy(card.body, body ? body : "", sizeof(card.body));
+    }
+    taskENTER_CRITICAL(&s_mux);
+    // Same content as on screen: no redraw, but it still counts as activity.
+    if (card_on != s_card_on || memcmp(&card, &s_card, sizeof(card)) != 0) {
+        s_card_on = card_on;
+        s_card = card;
+        s_dirty = true;
+    }
+    taskEXIT_CRITICAL(&s_mux);
+    display_wake();
 }
 
 void display_show_card(const char *label, const char *big, const char *body)
 {
-    set_card(true, label, big, body);
+    set_content(true, label, big, body);
 }
 
 void display_show_logo(void)
 {
-    set_card(false, NULL, NULL, NULL);
+    set_content(false, NULL, NULL, NULL);
 }
 
-static void draw_card(const ui_card_t *card, int *buf)
+void display_wake(void)
 {
-    xSemaphoreTake(s_fb_free[*buf], portMAX_DELAY);
-    ui_card_render(card, s_fb[*buf], s_lut);
-    s_inflight[s_inflight_head++ & 3] = (uint8_t)*buf;
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb[*buf]));
-    *buf ^= 1;
+    s_activity_us = esp_timer_get_time();
+    s_wake_req = true;
 }
 
-static void draw_frame(int frame, int *buf)
+void display_keep_awake(bool on)
 {
-    xSemaphoreTake(s_fb_free[*buf], portMAX_DELAY);
-    expand(frames_start + (size_t)frame * CUE_LOGO_FRAME_BYTES, s_fb[*buf]);
-    s_inflight[s_inflight_head++ & 3] = (uint8_t)*buf;
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb[*buf]));
-    *buf ^= 1;
+    if (on && !s_keep_awake) {
+        s_activity_us = esp_timer_get_time();
+    }
+    s_keep_awake = on;
+    if (on) {
+        s_wake_req = true;
+    }
 }
 
-void display_run_logo(void)
+bool display_asleep(void)
 {
-    const TickType_t period = pdMS_TO_TICKS(1000 / CUE_LOGO_FPS);
-    const int steps = CUE_LOGO_FRAMES - 1 + CUE_LOGO_HOLD_FRAMES;
-    TickType_t wake = xTaskGetTickCount();
-    int buf = 0;
+    return s_asleep;
+}
 
-    // Idle: the finished logo, still.
-    draw_frame(CUE_LOGO_FRAMES - 1, &buf);
-    gpio_set_level(LCD_BL, 0);
+static void draw(bool card_on, const ui_card_t *card)
+{
+    xSemaphoreTake(s_fb_free, portMAX_DELAY);
+    if (card_on) {
+        ui_card_render(card, s_fb, s_lut);
+    } else {
+        expand_logo(s_fb);
+    }
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb));
+}
 
-    bool card_on = false;
+static void panel_sleep(void)
+{
+    gpio_set_level(LCD_BL, BL_OFF);
+    // Let a transfer in flight finish before the panel stops listening for pixels.
+    xSemaphoreTake(s_fb_free, portMAX_DELAY);
+    xSemaphoreGive(s_fb_free);
+    esp_lcd_panel_disp_on_off(s_panel, false);
+    esp_lcd_panel_io_tx_param(s_io, LCD_CMD_SLPIN, NULL, 0);
+    s_asleep = true;
+    ESP_LOGI(TAG, "screen off");
+}
+
+// SLPOUT needs 120 ms before the next command. The caller then draws and turns the panel on.
+static void panel_wake(void)
+{
+    esp_lcd_panel_io_tx_param(s_io, LCD_CMD_SLPOUT, NULL, 0);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    s_asleep = false;
+    ESP_LOGI(TAG, "screen on");
+}
+
+void display_run(void)
+{
+    s_activity_us = esp_timer_get_time();
+    bool lit = false;
     for (;;) {
-        if (s_card_dirty) {
+        const bool wake = atomic_exchange(&s_wake_req, false);
+        const bool woke = wake && s_asleep;
+        if (woke) {
+            panel_wake();
+        }
+        if (woke || s_dirty || !lit) {
             ui_card_t card;
-            taskENTER_CRITICAL(&s_card_mux);
+            bool card_on;
+            taskENTER_CRITICAL(&s_mux);
             card = s_card;
-            card_on = s_card_on_req;
-            s_card_dirty = false;
-            taskEXIT_CRITICAL(&s_card_mux);
-            if (card_on) {
-                draw_card(&card, &buf);
+            card_on = s_card_on;
+            s_dirty = false;
+            taskEXIT_CRITICAL(&s_mux);
+            if (!s_asleep) {
+                // Panel RAM survives SLPIN, but a wake redraws anyway: cheap, and it can't show a
+                // stale frame. A change while asleep waits for the wake (s_dirty stays set).
+                draw(card_on, &card);
+                if (woke) {
+                    esp_lcd_panel_disp_on_off(s_panel, true);
+                }
+                if (!lit || woke) {
+                    gpio_set_level(LCD_BL, BL_ON);
+                    lit = true;
+                }
             } else {
-                draw_frame(CUE_LOGO_FRAMES - 1, &buf);
+                s_dirty = true;
             }
         }
-        if (card_on || !s_animating) {
-            vTaskDelay(period);
-            wake = xTaskGetTickCount();
-            continue;
+        if (!s_asleep && !s_keep_awake && esp_timer_get_time() - s_activity_us >= DISPLAY_SLEEP_US) {
+            panel_sleep();
         }
-        // In a call: loop the animation. A pass that is under way when the call ends plays to its
-        // last frame, so the logo always comes to rest whole.
-        for (int step = 0; step < steps && !s_card_dirty; ++step) {
-            if (step < CUE_LOGO_FRAMES) {
-                draw_frame(step, &buf);
-            } else if (!s_animating) {
-                break;
-            }
-            vTaskDelayUntil(&wake, period);
-        }
+        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
     }
 }

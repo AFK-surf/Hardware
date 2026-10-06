@@ -75,6 +75,9 @@
 #define UPLINK_STALL_LIMIT_MS 10000
 // Ceiling for a send that the gate let through (or every send, if the voice socket wasn't found).
 #define SEND_TIMEOUT_MS UPLINK_STALL_LIMIT_MS
+// Bench hook for the dropped-call tone: 1 makes the voice socket look full from 20 s after
+// session.started, so the call ends through the real UPLINK_STALL_LIMIT_MS path. Keep 0.
+#define CUE_VOICE_SIMULATE_DROP 0
 // A wait for room longer than this is logged as a stall, with the Wi-Fi and TCP state.
 #define STALL_LOG_MS 1000
 // What one audio frame costs in the send buffer: 2 websocket fragments (the client's 4096-byte
@@ -103,6 +106,13 @@ static _Atomic int64_t s_idle_us;
 static bool s_start_sent;
 static atomic_int s_rx_ms_last;
 static _Atomic int64_t s_wait_since_us;
+// How the call ends, for the hang-up tone: the caller tapped, the device hung up on silence, or the
+// server ended the session.
+static atomic_bool s_user_hangup;
+static atomic_bool s_idle_hangup;
+static atomic_bool s_session_ended;
+static atomic_int s_last_end = CUE_VOICE_END_NONE;
+static _Atomic int64_t s_started_us;
 
 // The voice socket in lwIP, found by local port when the websocket connects (0: not found, and the
 // sender falls back to plain blocking sends).
@@ -216,6 +226,7 @@ static void handle_text(char *json)
         const cJSON *max_s = cJSON_GetObjectItemCaseSensitive(root, "max_duration_s");
         int64_t now = esp_timer_get_time();
         s_idle_us = now;
+        s_started_us = now;
         s_state = CUE_VOICE_UP;
         ESP_LOGI(TAG, "session.started call_id=%s format=%s max_duration_s=%d",
                  cJSON_IsString(call_id) ? call_id->valuestring : "",
@@ -246,6 +257,7 @@ static void handle_text(char *json)
         ESP_LOGI(TAG, "session.ended reason=%s duration_s=%.3f",
                  cJSON_IsString(reason) ? reason->valuestring : "",
                  cJSON_IsNumber(duration) ? duration->valuedouble : 0.0);
+        s_session_ended = true;
         s_state = CUE_VOICE_ENDED;
     } else if (strcmp(kind, "error") == 0) {
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
@@ -357,6 +369,11 @@ static void dispatch_frame(uint8_t opcode, uint8_t *data, size_t len)
         return;
     }
     if (opcode == WS_OP_BIN && len > 0) {
+        if (s_stop) {
+            // The call is over and the hang-up tone owns the speaker; agent audio still in flight
+            // until the server's session.ended is dropped.
+            return;
+        }
         note_activity();
         push_agent_audio(data, len);
     }
@@ -614,7 +631,7 @@ static void sender_task(void *arg)
     int64_t wait_since = 0;
     while (!s_stop) {
         tcp_probe_t tcp;
-        const bool known = tcp_probe(&tcp);
+        bool known = tcp_probe(&tcp);
         if (!known || tcp_writable(&tcp)) {
             send_played_marks();
             if (known) {
@@ -638,7 +655,14 @@ static void sender_task(void *arg)
             continue;
         }
         int64_t now = esp_timer_get_time();
-        if (known && !tcp_room(&tcp, SEND_CHUNK_BYTES)) {
+        bool room = !known || tcp_room(&tcp, SEND_CHUNK_BYTES);
+#if CUE_VOICE_SIMULATE_DROP
+        if (s_started_us != 0 && now - s_started_us > 20 * 1000000LL) {
+            known = true;
+            room = false;
+        }
+#endif
+        if (!room) {
             if (wait_since == 0) {
                 wait_since = now;
                 s_wait_since_us = now;
@@ -673,6 +697,21 @@ static void sender_task(void *arg)
     }
     s_sender_running = false;
     vTaskDelete(NULL);
+}
+
+// The call is over and the mic is closed: tell the caller how it ended. A clean end is the caller's
+// tap, the device's own idle hangup, or the server ending the session with close 1000 (or none).
+// Anything else (an error close, a send stall, a lost connection, a dial that never connected) is
+// a drop.
+static void play_end_tone(void)
+{
+    const int code = s_close_code;
+    const bool server_clean = (s_session_ended || code == 1000) && (code == 0 || code == 1000);
+    const bool clean = s_user_hangup || s_idle_hangup || server_clean;
+    s_last_end = clean ? CUE_VOICE_END_NORMAL : CUE_VOICE_END_DROPPED;
+    ESP_LOGI(TAG, "call over: %s (tap=%d idle=%d session_ended=%d close=%d)", clean ? "ended" : "dropped",
+             (int)s_user_hangup, (int)s_idle_hangup, (int)s_session_ended, code);
+    playback_tone(clean ? PLAYBACK_TONE_NORMAL : PLAYBACK_TONE_DROPPED);
 }
 
 // The microphone's I2S clock paces the uplink: one 20 ms frame goes out per 480 samples read.
@@ -753,6 +792,7 @@ static void uplink_task(void *arg)
         }
         if (idle != 0 && now - idle >= IDLE_HANGUP_US) {
             ESP_LOGI(TAG, "idle hangup: 60 s without a final caller transcript or agent audio");
+            s_idle_hangup = true;
             s_stop = true;
             break;
         }
@@ -817,7 +857,7 @@ static void uplink_task(void *arg)
     if (recording) {
         board_audio_set_recording(false);
     }
-    playback_ringback(false);
+    play_end_tone();
     // The sender writes to s_client, so it must be gone before the client is destroyed.
     s_stop = true;
     while (s_sender_running) {
@@ -913,6 +953,11 @@ esp_err_t cue_voice_start(void)
     s_ws_up = false;
     s_start_sent = false;
     s_close_code = 0;
+    s_user_hangup = false;
+    s_idle_hangup = false;
+    s_session_ended = false;
+    s_started_us = 0;
+    s_last_end = CUE_VOICE_END_NONE;
     s_idle_us = 0;
     s_assembling = false;
     s_state = CUE_VOICE_CONNECTING;
@@ -989,6 +1034,7 @@ void cue_voice_end(void)
 {
     if (s_state == CUE_VOICE_CONNECTING || s_state == CUE_VOICE_UP) {
         ESP_LOGI(TAG, "hangup requested");
+        s_user_hangup = true;
         s_stop = true;
     }
 }
@@ -1002,6 +1048,17 @@ bool cue_voice_can_start(void)
 cue_voice_state_t cue_voice_state(void)
 {
     return s_state;
+}
+
+bool cue_voice_ending(void)
+{
+    const cue_voice_state_t state = s_state;
+    return s_uplink_running && (s_stop || (state != CUE_VOICE_CONNECTING && state != CUE_VOICE_UP));
+}
+
+cue_voice_end_t cue_voice_last_end(void)
+{
+    return (cue_voice_end_t)s_last_end;
 }
 
 int cue_voice_close_code(void)

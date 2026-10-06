@@ -21,8 +21,20 @@ int playback_take_played(char names[][80], int max_names);
 // Queued audio in bytes and marks not yet played, for diagnostics.
 void playback_stats(int *queued_bytes, int *pending_marks);
 
-// Play the ringback until the agent's first speech arrives, or until turned off.
+// Play the ringback until the agent's first speech arrives, or until turned off. Turning it on
+// cuts a hang-up tone short.
 void playback_ringback(bool on);
+
+bool playback_ringing(void);
+
+typedef enum {
+    PLAYBACK_TONE_NONE = 0,
+    PLAYBACK_TONE_NORMAL,   // one soft 200 ms tone: the call ended cleanly
+    PLAYBACK_TONE_DROPPED,  // three short beeps: the call was lost
+} playback_tone_t;
+
+// Drop queued agent audio and play a hang-up tone once.
+void playback_tone(playback_tone_t tone);
 
 // True while the ringback plays or queued audio that holds speech (not just silence) has yet to reach the speaker.
 bool playback_speaking(void);

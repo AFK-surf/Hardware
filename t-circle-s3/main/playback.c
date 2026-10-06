@@ -30,6 +30,18 @@
 #define RING_CYCLE_SAMPLES (AUDIO_SAMPLE_RATE_HZ * 4)
 #define RING_FADE_SAMPLES (AUDIO_SAMPLE_RATE_HZ / 100)
 #define RING_AMPLITUDE 2500.0f
+// Hang-up tones, quieter than the ringback (two 2500 sines) and the agent's speech.
+// Normal end: one soft 200 ms tone. Dropped: three short, higher beeps, so a drop never sounds
+// like a normal end.
+#define TONE_FADE_SAMPLES (AUDIO_SAMPLE_RATE_HZ / 200)
+#define TONE_NORMAL_HZ 620.0f
+#define TONE_NORMAL_ON (AUDIO_SAMPLE_RATE_HZ / 5)
+#define TONE_NORMAL_AMPLITUDE 1500.0f
+#define TONE_DROP_HZ 950.0f
+#define TONE_DROP_ON (AUDIO_SAMPLE_RATE_HZ * 12 / 100)
+#define TONE_DROP_OFF (AUDIO_SAMPLE_RATE_HZ / 10)
+#define TONE_DROP_BEEPS 3
+#define TONE_DROP_AMPLITUDE 2000.0f
 
 static const char *TAG = "play";
 
@@ -56,6 +68,9 @@ static int64_t s_speech_until;
 static bool s_buffering = true;
 static atomic_bool s_ringing;
 static int s_ring_pos;
+// 0: none, else a playback_tone_t being played from s_tone_pos.
+static atomic_int s_tone;
+static int s_tone_pos;
 static int64_t s_last_push_us;
 static int64_t s_rx_bytes;
 static int s_rx_peak;
@@ -124,6 +139,44 @@ static void fill_ringback(int16_t *out, int samples)
     }
 }
 
+// Fill one chunk of the hang-up tone. Returns false once the tone is over.
+static bool fill_tone(playback_tone_t tone, int16_t *out, int samples)
+{
+    const bool drop = tone == PLAYBACK_TONE_DROPPED;
+    const int on = drop ? TONE_DROP_ON : TONE_NORMAL_ON;
+    const int cycle = drop ? TONE_DROP_ON + TONE_DROP_OFF : TONE_NORMAL_ON;
+    const int total = drop ? cycle * TONE_DROP_BEEPS : on;
+    const float hz = drop ? TONE_DROP_HZ : TONE_NORMAL_HZ;
+    const float amplitude = drop ? TONE_DROP_AMPLITUDE : TONE_NORMAL_AMPLITUDE;
+    if (s_tone_pos >= total) {
+        return false;
+    }
+    for (int i = 0; i < samples; ++i) {
+        const int pos = s_tone_pos++;
+        const int in_beep = pos % cycle;
+        if (pos >= total || in_beep >= on) {
+            out[i] = 0;
+            continue;
+        }
+        float fade = 1.0f;
+        if (in_beep < TONE_FADE_SAMPLES) {
+            fade = (float)in_beep / TONE_FADE_SAMPLES;
+        } else if (in_beep > on - TONE_FADE_SAMPLES) {
+            fade = (float)(on - in_beep) / TONE_FADE_SAMPLES;
+        }
+        const float t = (float)in_beep / AUDIO_SAMPLE_RATE_HZ;
+        out[i] = (int16_t)(amplitude * fade * sinf(2.0f * (float)M_PI * hz * t));
+    }
+    return true;
+}
+
+static void note_played_locked(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_last_audio_us = esp_timer_get_time();
+    xSemaphoreGive(s_lock);
+}
+
 static void playback_task(void *arg)
 {
     (void)arg;
@@ -147,7 +200,22 @@ static void playback_task(void *arg)
             if (board_audio_play_pcm16_mono(chunk, 256) != ESP_OK) {
                 ESP_LOGE(TAG, "speaker write failed");
             }
+            // So the amplifier switches off 150 ms after the ringback, as after agent audio.
+            note_played_locked();
             continue;
+        }
+        const playback_tone_t tone = (playback_tone_t)s_tone;
+        if (tone != PLAYBACK_TONE_NONE) {
+            if (fill_tone(tone, chunk, 256)) {
+                if (board_audio_play_pcm16_mono(chunk, 256) != ESP_OK) {
+                    ESP_LOGE(TAG, "speaker write failed");
+                }
+                note_played_locked();
+                continue;
+            }
+            // A new tone (or the ringback) may have replaced this one meanwhile.
+            int expected = tone;
+            atomic_compare_exchange_strong(&s_tone, &expected, PLAYBACK_TONE_NONE);
         }
         if (samples > 0) {
             if (board_audio_play_pcm16_mono(chunk, samples) != ESP_OK) {
@@ -317,7 +385,24 @@ void playback_stats(int *queued_bytes, int *pending_marks)
 void playback_ringback(bool on)
 {
     s_ring_pos = 0;
+    if (on) {
+        s_tone = PLAYBACK_TONE_NONE;
+    }
     s_ringing = on;
+}
+
+void playback_tone(playback_tone_t tone)
+{
+    s_ringing = false;
+    playback_clear();
+    s_tone = PLAYBACK_TONE_NONE;
+    s_tone_pos = 0;
+    s_tone = tone;
+}
+
+bool playback_ringing(void)
+{
+    return s_ringing;
 }
 
 bool playback_speaking(void)

@@ -10,7 +10,7 @@
 
 typedef struct {
     char label[64];
-    char big[16];   // digits and spaces only
+    char big[16];   // digits, spaces and ':' only
     char body[192];
 } ui_card_t;
 
