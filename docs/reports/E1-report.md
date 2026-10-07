@@ -4,9 +4,12 @@
 
 ## Result
 
-Implementation, build and offline checks are complete. **Board and Android acceptance tests are
-pending**: `/dev/cu.usbmodem1101` was absent at the time of testing. No firmware was flashed and
-no factory reset was performed. Flash/reset approval was requested, with no answer yet.
+Implementation, build and offline checks are complete. The user then authorized flashing and
+testing **provisioned pairing mode (`0x01`) only**, explicitly deferring factory reset and the
+unprovisioned check to E2. The board was connected on `/dev/cu.usbmodem1101` and the application
+was flashed successfully with write-hash verification. NVS was preserved; no factory reset was
+performed. **Provisioned pairing mode passed both serial-log and live BLE-scan checks.** Android
+Add device acceptance remains pending.
 
 | Check | Result |
 | --- | --- |
@@ -19,9 +22,9 @@ no factory reset was performed. Flash/reset approval was requested, with no answ
 | Scan client | Prints name, state, short ID, address and RSSI without connecting or pairing |
 | ESP-IDF build | **Passed**, v6.0.2, normal project configuration |
 | Offline scanner tests | **9 passed** |
-| Live macOS scan, 8 seconds | Command succeeded, output `none`; no advertising Comma device observed |
-| Unprovisioned board → `0x00` | **Skipped**; no factory-reset consent and no connected board |
-| Provisioned board in pairing mode → `0x01` | **Pending**; board absent, flash approval pending |
+| Live macOS scan, 8 seconds | **Passed after BOOT hold**: `Comma-5D28`, `provisioned-pairing(0x01)`, short ID `5D28`, RSSI −46 dBm |
+| Unprovisioned board → `0x00` | **Deferred to E2 at the user's request**; no factory reset performed |
+| Provisioned board in pairing mode → `0x01` | **Passed**: serial `FF FF 01 01 01 5D 28`, confirmed by live BLE scan |
 | B2 Android Add device finds and sets up device | **Pending user test**; not claimed from the build or offline tests |
 
 ## Changes
@@ -70,19 +73,18 @@ tools/.venv/bin/python t-circle-s3/tools/ble_provision.py scan --timeout 8
 git diff --check
 ```
 
-All 9 tests passed; the real scan completed with `none`. This checks that the scanner runs on the
-host, not the bytes emitted by the board. `git diff --check` passed. The first sandboxed build was
-blocked by IDF's `psutil`/`sysctl` process query, and sandboxed scanning reported unsupported
-Bluetooth; both succeeded when rerun with approved host access.
+All 9 tests passed. The initial scan before the board was connected completed with `none`;
+the later scan after flashing and entering pairing mode received the expected state (below).
+`git diff --check` passed. The first sandboxed build was blocked by IDF's `psutil`/`sysctl` process
+query, and sandboxed scanning reported unsupported Bluetooth; both succeeded when rerun with
+approved host access.
 
-## Remaining hardware acceptance
+## Board flash and hardware acceptance
 
-The task explicitly requires approval before flashing and separate consent before factory reset.
-Connect the board and confirm its port, then run `lsof /dev/cu.usbmodem1101` immediately before
-flashing. The earlier `lsof` attempt returned “No such file or directory”; that is not evidence
-that a connected serial port is free. Do not stop another session's logger without agreement.
-
-Once approved, use an app-only flash to preserve NVS and the existing partition/model images:
+After the user approved flashing, `lsof /dev/cu.usbmodem1101` found no open handles (exit 1) and
+the app-only flash succeeded. The board identified itself as ESP32-S3 v0.2, Wi-Fi MAC
+`98:a3:16:f5:5d:28`. Only the application at `0x10000` was written; NVS, partition table and model
+images were not flashed. No other session's logger was stopped.
 
 ```sh
 cd t-circle-s3
@@ -90,14 +92,42 @@ cd t-circle-s3
 idf.py -p /dev/cu.usbmodem1101 app-flash
 ```
 
-1. On a provisioned board, hold BOOT for 3 seconds and release before 10 seconds. Run the scan
-   client. For the documented `Comma-5D28` board, expect
-   `state=provisioned-pairing(0x01) short_id=5D28` and serial log payload
-   `FF FF 01 01 01 5D 28`.
-2. **Only with explicit factory-reset consent**, reset the board and scan again. Expect
+Esptool reported **“Hash of data verified”** and reset the board successfully. The flash rebuilt
+app metadata for `51781b7-dirty`; the dirty marker comes from the existing unrelated E3 prompt
+edit. The flashed application remains 2,009,808 bytes. Its SHA-256 is
+`876a43dea778c36c249b377a3e74c4f011c8c1e639949b3fbf111e51babf51f7`.
+Local flash log: `t-circle-s3/build/log/idf_py_stdout_output_73968` (gitignored).
+
+After the user was prompted to hold BOOT for 3 seconds and release, the board entered pairing
+mode. The serial capture at **16:27:25 CST** recorded:
+
+```text
+I (47153) prov: advertising as Comma-5D28, mfg=FF FF 01 01 01 5D 28
+I (47154) prov: provisioning started (pairing mode)
+I (47154) prov: status {"state":"idle","ip":"192.168.5.17","provisioned":true}
+```
+
+Local log: `t-circle-s3/build/e1-pairing-mode.log` (gitignored). The capture closed the serial
+port automatically after receiving the advertising-start log; a subsequent `lsof` found no
+open handles.
+
+The initial 30-second scan completed before pairing mode was observed. An 8-second scan after
+the serial event received:
+
+```text
+Comma-5D28  F07AE8E7-7CEE-C63E-BA16-09C9F9F7D8D7  state=provisioned-pairing(0x01) short_id=5D28  rssi -46
+```
+
+This verifies the name, known format/model, provisioned state and MAC suffix from the received
+scan data, without GATT access or re-provisioning. The UUID-like address is macOS's local device
+identifier, not the stable Wi-Fi MAC. No BLE connection or pairing was initiated by the host.
+
+### Still pending
+
+1. **Deferred to E2; do not factory reset in this run.** Once separately agreed, reset and scan. Expect
    `state=unprovisioned(0x00) short_id=5D28` and `FF FF 01 01 00 5D 28`.
    These are expected values, not observations from this run.
-3. The user runs Android B2 **Add device**, verifies discovery and completes setup. Record the
+2. The user runs Android B2 **Add device**, verifies discovery and completes setup. Record the
    phone result here; neither a scan-only host test nor unchanged GATT code proves this flow passes.
 
 The E1 commit includes the four implementation/doc/test files listed above and this report.
