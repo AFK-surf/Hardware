@@ -1,6 +1,6 @@
 # A5 report: `lan_discover` (LAN discovery) on the T-Circle
 
-2026-10-06 · `t-circle-s3/main/lan_discover.c/.h`, `lan_discover_core.c/.h` (new), `connector.c`, `main/CMakeLists.txt`, `CMakeLists.txt`, `sdkconfig(.defaults)`, `tools/lan_discover_test/` (new) · board on `ToEverything-IOT`, staging; verified 2026-10-07 except the voice-call check
+2026-10-06 · `t-circle-s3/main/lan_discover.c/.h`, `lan_discover_core.c/.h` (new), `connector.c`, `main/CMakeLists.txt`, `CMakeLists.txt`, `sdkconfig(.defaults)`, `tools/lan_discover_test/` (new) · board on `ToEverything-IOT`, staging; verified 2026-10-07
 
 ## Result
 
@@ -17,7 +17,7 @@
 | Build | Clean, no warnings. Static DIRAM 164.4 → **165.3 KB** (+0.9 KB: ARP table 10 → 32 entries and the code); image 1.39 MB. |
 | **On office Wi-Fi: Mac and router listed, within caps** | **Verified 2026-10-07** (see *On the board*). Self-test build: 13–15 hosts, ~8 KB, router with 11 SSDP entries, the Mac with its services, the Mi bedside lamp (`_hap._tcp:80`). |
 | **Through Comma (staging, backend #2619–#2621)** | **Verified.** "用 T-Circle 扫描局域网" from the phone → `lan_discover` reached the board, 16 hosts in 8007 ms, 6161 B; the agent listed them. Read-only gate seen first: self-tests refused until Allow operations was turned on. |
-| **Voice call during discovery (`cue:` stats)** | **Not done.** |
+| **Voice call during discovery (`cue:` stats)** | **Verified 2026-10-07**: discovery doesn't disturb a call (see *Call during discovery*). The call itself went silent after 58 s; the board's logs point at the server, not the scans. |
 
 ## Contract as implemented
 
@@ -89,9 +89,25 @@ Office Wi-Fi (`ToEverything-IOT`), board 192.168.5.17, staging.
 - Internal heap unchanged by a run: idle 152.2 KB, lowest 150.0 KB after an 8 s discovery.
 - Release build flashed afterwards. From the phone (11:47): `request req_ewa_tDHcHKDn5M82 lan_discover` → `16 hosts (arp 13; mdns 59 answers; ssdp 22 answers), 8007 ms, 6161 B` (the agent asked for 8 s). Then the agent tried the lamp over HTTP through the board: `GET 192.168.5.19:80 -> 404, 82 ms`. The lamp speaks miIO (UDP), so that path needs A4 (`udp_request`) and a cloud miIO codec.
 
+## Call during discovery (2026-10-07)
+
+Self-test build (A4's, with the miIO hello added): `lan_discover` every 20 s (3 s each) and a `udp_request` right after. Call `vc_01M4A8GXARVM9ZH66KWNRZKQCK`, 12:04:09–12:06:03, 113.7 s, ended `caller_hangup`, close 1000. Six discoveries (12:04:15, :35, :55, 12:05:15, :35, :55) and six hellos ran during it.
+
+| Over the whole call (112 one-second `cue: stats` lines) | |
+|---|---|
+| Mic frames dropped | 45, **all in 12:04:11–12:04:13**, the first seconds of the call before any scan started (the usual start-up slowness). **0 during or after any scan.** |
+| Worst send | 524 ms, also at 12:04:12. After that: ≤ 197 ms, scans or not. |
+| TCP retransmissions | none (`nrtx_max=0` throughout) |
+| RSSI | −50 … −68 |
+| Internal heap | lowest **112.8 KB** (call + scans; A3's call-only figure was 114.5 KB) |
+
+**The call went silent at 12:05:07 (58 s in), but not because of the scans.** The agent stopped mid-sentence ("A tiny robot got lost in a giant library, and..."). For the 56 s until hang-up, the board kept receiving ~1000 ms/s of downlink audio that was all silence (`rx_peak=0`). The uplink kept working: mic open, `mic_peak` 1500–2700, no drops, sends ≤ 131 ms. No caller transcript came back after that. So the server kept the session open and streaming but stopped transcribing and answering. The nearest scan ended at 12:04:58, 9 s before; the next started at 12:05:15, 8 s after. **For the backend:** call id above, stall from 12:05:07 (+08:00).
+
+Earlier in the same call, "帮我把小米灯关掉" was answered "Okay, I'll turn it off… It's off now" with no request reaching the board, so the agent used the Mac Connector, as expected before A4's backend part.
+
 ## Not done / next
 
-1. **Voice call during discovery.** Not run yet. With the self-test build:
+1. ~~Voice call during discovery~~ done (above). How it was run, for next time:
    ```
    cd t-circle-s3 && . ~/.espressif/tools/activate_idf_v6.0.2.sh
    idf.py -B build-selftest -DCOMMA_LAN_DISCOVER_SELFTEST_S=20 build   # already built

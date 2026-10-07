@@ -3,6 +3,7 @@
 // whatever IP the firmware picked; the IP it asked for is recorded and checked.
 // Run: ./run.sh
 
+#include "../../main/lan_dest.c"
 #include "../../main/lan_http.c"
 
 #include <errno.h>
@@ -238,32 +239,32 @@ static void test_destinations(void)
     const char *allowed[] = {"192.168.5.50", "192.168.5.1", "10.0.0.1",    "172.16.0.1",
                              "172.31.255.1", "169.254.1.1", "192.168.1.1", "10.255.255.254"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(*allowed); ++i) {
-        CHECK(lan_destination(ip(allowed[i]), err), "%s should be allowed: %s", allowed[i], err);
+        CHECK(lan_dest_check(ip(allowed[i]), err), "%s should be allowed: %s", allowed[i], err);
     }
     const char *refused[] = {"127.0.0.1",    "127.8.8.8",     "192.168.5.17",   "8.8.8.8",       "172.32.0.1",
                              "172.15.255.1", "0.0.0.0",       "224.0.0.251",    "239.255.255.250", "255.255.255.255",
                              "192.168.5.255", "192.168.5.0",  "100.64.0.1",     "1.1.1.1"};
     for (size_t i = 0; i < sizeof(refused) / sizeof(*refused); ++i) {
         err[0] = 0;
-        CHECK(!lan_destination(ip(refused[i]), err) && err[0], "%s should be refused", refused[i]);
+        CHECK(!lan_dest_check(ip(refused[i]), err) && err[0], "%s should be refused", refused[i]);
     }
-    CHECK(!lan_destination(ip("8.8.8.8"), err) && strstr(err, "public address"), "public wording: %s", err);
-    CHECK(!lan_destination(ip("192.168.5.17"), err) && strstr(err, "T-Circle itself"), "self wording: %s", err);
-    CHECK(!lan_destination(ip("127.0.0.1"), err) && strstr(err, "loopback"), "loopback wording: %s", err);
+    CHECK(!lan_dest_check(ip("8.8.8.8"), err) && strstr(err, "public address"), "public wording: %s", err);
+    CHECK(!lan_dest_check(ip("192.168.5.17"), err) && strstr(err, "T-Circle itself"), "self wording: %s", err);
+    CHECK(!lan_dest_check(ip("127.0.0.1"), err) && strstr(err, "loopback"), "loopback wording: %s", err);
 
     // A LAN on non-private space (carrier-grade NAT here): its own subnet counts, the rest doesn't.
     set_net("100.64.3.5", "255.255.252.0");
-    CHECK(lan_destination(ip("100.64.1.9"), err), "own /22 subnet should be allowed: %s", err);
-    CHECK(!lan_destination(ip("100.64.9.9"), err), "outside own subnet should be refused");
+    CHECK(lan_dest_check(ip("100.64.1.9"), err), "own /22 subnet should be allowed: %s", err);
+    CHECK(!lan_dest_check(ip("100.64.9.9"), err), "outside own subnet should be refused");
     // A huge "subnet" is not trusted as LAN.
     set_net("11.1.1.1", "255.0.0.0");
-    CHECK(!lan_destination(ip("11.2.2.2"), err), "public /8 subnet should be refused");
+    CHECK(!lan_dest_check(ip("11.2.2.2"), err), "public /8 subnet should be refused");
     // /31 and /32 have no network/broadcast addresses.
     set_net("192.168.9.0", "255.255.255.254");
-    CHECK(lan_destination(ip("192.168.9.1"), err), "/31 peer should be allowed: %s", err);
+    CHECK(lan_dest_check(ip("192.168.9.1"), err), "/31 peer should be allowed: %s", err);
 
     g_wifi_up = false;
-    CHECK(!lan_destination(ip("192.168.5.50"), err) && strstr(err, "not on a network"), "wifi down: %s", err);
+    CHECK(!lan_dest_check(ip("192.168.5.50"), err) && strstr(err, "not on a network"), "wifi down: %s", err);
     g_wifi_up = true;
     set_net("192.168.5.17", "255.255.255.0");
 

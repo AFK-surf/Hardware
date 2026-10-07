@@ -4,6 +4,7 @@
 #include "device_config.h"
 #include "lan_discover.h"
 #include "lan_http.h"
+#include "lan_udp.h"
 #include "provisioning.h"
 #include "wifi.h"
 
@@ -49,7 +50,7 @@
 // Below the voice tasks (websocket 5, sender 6, uplink 5): the Connector only ever waits.
 #define CONNECTOR_TASK_PRIO 2
 #define CONNECTOR_WS_PRIO 3
-// LAN requests (http_request, lan_discover) run one at a time on their own task so the Connector
+// LAN requests (http_request, udp_request, lan_discover) run one at a time on their own task so the Connector
 // task keeps answering heartbeats. A few more wait in line; past that the device answers "busy".
 #define LAN_WORKER_PRIO 2
 #define LAN_WORKER_STACK 8192
@@ -86,6 +87,7 @@ typedef struct {
 
 typedef enum {
     LAN_HTTP_REQUEST,
+    LAN_UDP_REQUEST,
     LAN_DISCOVER,
 } lan_method_t;
 
@@ -356,7 +358,7 @@ static void send_metadata(void)
                      "\"persistent_processes\":false,\"computer_use_tool\":false,\"host_access_required\":false,"
                      "\"runtime_probe\":false,\"meeting_runtime\":false,"
                      // Not part of salix-connect's set: tells the backend (C2) what this gateway does.
-                     "\"lan_gateway\":{\"methods\":[\"http_request\",\"lan_discover\"],\"max_bytes\":%d,"
+                     "\"lan_gateway\":{\"methods\":[\"http_request\",\"udp_request\",\"lan_discover\"],\"max_bytes\":%d,"
                      "\"max_timeout_seconds\":%d},"
                      "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
@@ -418,7 +420,7 @@ static void handle_device_access(const char *id, const cJSON *params)
 
 static const char *lan_method_name(lan_method_t method)
 {
-    return method == LAN_DISCOVER ? "lan_discover" : "http_request";
+    return method == LAN_DISCOVER ? "lan_discover" : method == LAN_UDP_REQUEST ? "udp_request" : "http_request";
 }
 
 // The read-only wording matches salix-connect, so the agent sees the same refusal.
@@ -484,6 +486,8 @@ static void lan_worker(void *arg)
             cJSON_Delete(obj);
         } else if (job.method == LAN_DISCOVER) {
             frame = lan_discover_run(job.id, job.params);
+        } else if (job.method == LAN_UDP_REQUEST) {
+            frame = lan_udp_run(job.id, job.params);
         } else {
             frame = lan_http_run(job.id, job.params);
         }
@@ -519,6 +523,17 @@ static void selftest_task(void *arg)
         if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
             ESP_LOGW(TAG, "%s: LAN worker busy", job.id);
         }
+#ifdef COMMA_UDP_SELFTEST_HOST
+        // A miIO hello (0x21 0x31 0x00 0x20, then 28 x 0xFF): a Mi device answers with 32 bytes.
+        lan_job_t udp = {.session = SELFTEST_SESSION, .method = LAN_UDP_REQUEST};
+        snprintf(udp.id, sizeof(udp.id), "selftest_udp_%u", n);
+        udp.params = cJSON_Parse("{\"host\":\"" COMMA_UDP_SELFTEST_HOST "\",\"port\":54321,"
+                                 "\"payload_b64\":\"ITEAIP////////////////////////////////////8=\",\"timeout_ms\":2000}");
+        if (xQueueSend(s_lan_jobs, &udp, 0) != pdTRUE) {
+            cJSON_Delete(udp.params);
+            ESP_LOGW(TAG, "%s: LAN worker busy", udp.id);
+        }
+#endif
     }
 }
 #endif
@@ -531,6 +546,8 @@ static void handle_request(const char *id, const char *method, cJSON *root)
         handle_device_access(id, params);
     } else if (strcmp(method, "http_request") == 0) {
         handle_lan_request(id, LAN_HTTP_REQUEST, root);
+    } else if (strcmp(method, "udp_request") == 0) {
+        handle_lan_request(id, LAN_UDP_REQUEST, root);
     } else if (strcmp(method, "lan_discover") == 0) {
         handle_lan_request(id, LAN_DISCOVER, root);
     } else {
@@ -816,7 +833,7 @@ void connector_start(void)
     s_lan_ready = xTaskCreateWithCaps(lan_worker, "lan", LAN_WORKER_STACK, NULL, LAN_WORKER_PRIO, NULL,
                                       MALLOC_CAP_SPIRAM) == pdPASS;
     if (!s_lan_ready) {
-        ESP_LOGE(TAG, "LAN worker create failed, http_request and lan_discover off");
+        ESP_LOGE(TAG, "LAN worker create failed, http_request, udp_request and lan_discover off");
     }
 #if COMMA_LAN_DISCOVER_SELFTEST_S > 0
     ESP_LOGW(TAG, "lan_discover self-test every %d s (dev build)", COMMA_LAN_DISCOVER_SELFTEST_S);
