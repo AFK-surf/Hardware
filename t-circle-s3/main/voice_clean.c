@@ -121,7 +121,7 @@ static esp_err_t create_afe(void)
     }
     cfg->aec_init = false;  // the echo gate in cue_voice handles the speaker for now
     cfg->se_init = false;   // one mic
-    cfg->ns_init = true;
+    cfg->ns_init = !COMMA_VOICE_NS_OFF;
     cfg->vad_init = true;
     cfg->vad_min_speech_ms = VAD_MIN_SPEECH_MS;
     cfg->vad_min_noise_ms = VAD_MIN_NOISE_MS;

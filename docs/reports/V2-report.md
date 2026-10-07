@@ -1,6 +1,6 @@
 # V2 report: noise suppression + VAD on the T-Circle mic
 
-2026-10-07 · `t-circle-s3/main/voice_clean.c/.h/.lf` (new), `cue_voice.c`, `board_audio.c/.h`, `main.c`, `main/CMakeLists.txt`, `main/idf_component.yml`, `partitions.csv`, `sdkconfig(.defaults)`, `dependencies.lock` · board on office Wi-Fi, staging · IDF 6.0.2
+2026-10-07 · **Default is now VAD only (no nsnet2), see *Follow-up: VAD only*.** · `t-circle-s3/main/voice_clean.c/.h/.lf` (new), `cue_voice.c`, `board_audio.c/.h`, `main.c`, `main/CMakeLists.txt`, `main/idf_component.yml`, `partitions.csv`, `sdkconfig(.defaults)`, `dependencies.lock` · board on office Wi-Fi, staging · IDF 6.0.2
 
 ## Result
 
@@ -14,11 +14,11 @@
 | Echo gate | **Kept** as before (mute while agent audio plays + 300 ms). AEC: see *Later: AEC and barge-in*. |
 | V2 off with one flag | **Done.** `idf.py -B build-v2off -DCOMMA_VOICE_CLEAN_OFF=1 build`: raw 24 kHz mic exactly as before V2; esp-sr isn't even linked (1.33 MB image). |
 | Internal heap ≥ 40 KB during a call | **Met.** Lowest internal free: **95.5 KB** (call 1) and **87.4 KB** (call 2). Idle 130 KB (was ~152 KB before V2). See *Memory*. |
-| CPU per core during a call | **Measured: high.** AFE ~790 ms of CPU per second of audio in a call (median; 605–895). Core 1 median **89 %** (max 98 %), core 0 median 35 %. No mic frames were lost to CPU. See *CPU*. |
+| CPU per core during a call | **VAD only (now the default): AFE ~260 ms/s, core 1 median 47 %.** With nsnet2: AFE ~790 ms of CPU per second of audio in a call (median; 605–895). Core 1 median **89 %** (max 98 %), core 0 median 35 %. No mic frames were lost to CPU. See *CPU*. |
 | Chip temperature after 2 min | **67 °C** in both calls (56→67 and 59→67 °C), same as D1's 67–68 °C. |
 | Long story finishes; 10 s silence; answer | **Not met in one call, and not because of noise.** See *Calls*: in call 2 the agent stopped after a paragraph while the uplink was pure zeros, and answered at once when spoken to. |
 | Soft speech at arm's length, first/last words | **Passed once** (「今天的天气怎么样？告诉我，谢谢」 whole). One possible lost first word: 「你讲个长故事」 came back as 「我讲一个长故事」. |
-| 3 calls ≥ 2 min, no drops/stuck silences | **2 calls** (124 s ended by tap; 198 s dropped by a server reset on bad Wi-Fi). The user stopped testing there. |
+| 3 calls ≥ 2 min, no drops/stuck silences | **3 calls**: 124 s (tap), 198 s (dropped by a server reset on bad Wi-Fi), 159 s VAD-only (tap, no stuck silences). |
 | Comparison with V2 off | **Not done.** The V2-off build was flashed, but the user stopped testing before that call. The board runs the V2 build again. |
 
 ## Measurements
@@ -104,3 +104,27 @@ Feasible with the same AFE (`aec_init`, input format `"MR"`: mic + playback refe
 - CPU headroom (see *CPU*): consider vadnet-only.
 - A/B the PSRAM `.bss` move on bad Wi-Fi.
 - Dev-only bench kept: `idf.py -B build-bench -DCOMMA_VOICE_CLEAN_BENCH=1 build` times AFE variants at boot.
+
+## Follow-up: VAD only (2026-10-07 afternoon)
+
+nsnet2 was the CPU hog, so the next build dropped it: vadnet runs on the **raw** 16 kHz mic, and the wire carries that raw audio in speech and zeros otherwise. Pre-roll 300 ms, hangover 500 ms and the debt rule are unchanged. Switch: `COMMA_VOICE_NS_OFF`, **1 by default** (VAD only). `idf.py -B build-ns -DCOMMA_VOICE_NS_OFF=0 build` puts nsnet2 back. Only `ns_init` changes, and the AFE's output is then the raw input. In the stats, `ns_rms` is the AFE output, so with NS off it equals `mic_rms`.
+
+**Call 4, VAD only, office** (`vc_01M4AN8HQ648DGSS5EZQF4BE0V`, 159 s, ended by tap; RSSI −52…−57). Plan: 30 s of silence, then normal back-and-forth.
+
+| | nsnet2 + vadnet (calls 1–2) | **vadnet only (call 4)** |
+|---|---|---|
+| AFE ms per s of audio | 790 median (605–895) | **261** median (206–322) |
+| Core 1 / core 0 | 89 % / 35 % median (max 98 %) | **47 % / 36 %** median (max 56 %) |
+| Lowest internal free | 95.5 / 87.4 KB | **90.6 KB** |
+| Idle internal free | 130 KB | 147 KB |
+| Chip after ~2.5 min | 67 °C | 67 °C (57→67) |
+| VAD in office silence | ~0: call 2's 20 s silence had `vad_ms=0` throughout | **1.0 s of 35 s** (2.9 %) |
+| Audio sent in office silence | 0 | **3.4 s of 35 s** (9.7 %; each trigger opens pre-roll + hangover) |
+
+- **CPU is fixed.** Core 1 went from ~89 % to ~47 %. The 206–322 ms/s is about 2.4× the boot bench's 109, the same in-call contention as before.
+- **Temperature isn't the AFE.** It reaches 67 °C either way, so the heat comes from Wi-Fi, CPU clock and the speaker, as D1 found.
+- **False triggers are more frequent but small.** During the 35 s of silence (156–190 s), raw-mic vadnet fired three times (360, 200, 400 ms), and each sent ~1 s of raw office audio (pre-roll + trigger + hangover). Right after the greeting (149–155 s) it fired for 2.3 s and sent 4.9 s with no caller transcript. That was either office speech or something the caller said that ASR ignored; it can't be told apart from the log. None of these produced a caller transcript, an agent reply or a stuck turn. Before V2, all 35 s went to the server.
+- **Caller speech**: every utterance came back complete: 「你好」, 「小米灯关掉」, 「我明天有会议吗」, 「你帮我确认一下」. First and last characters were all there; one-word 「你好」 survived the 128 ms VAD minimum thanks to the pre-roll. A deliberately soft-voice test wasn't separately confirmed: no sentence in the transcript is clearly the soft one.
+- **Network/uplink**: `mic_dropped` non-zero in 2 seconds (1 and 9 frames), sends ≤ 495 ms, no stalls. The agent did not stop mid-answer in this call.
+
+**Recommendation:** keep VAD only as the default. It halves the CPU on core 1 and still keeps ~90 % of office noise off the wire. nsnet2 is one flag away if false triggers turn out to matter. A cheaper middle ground worth trying later is a slightly stricter VAD on the raw mic: `set_vadnet_threshold` above its default, or `vad_min_speech_ms` 160–200, at the cost of more start-of-word risk that the 300 ms pre-roll has to cover.

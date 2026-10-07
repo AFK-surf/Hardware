@@ -12,3 +12,4 @@ tools/.mini-device-access.json*
 build-v2/
 build-v2off/
 build-bench/
+build-ns/

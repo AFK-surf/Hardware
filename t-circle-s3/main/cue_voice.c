@@ -59,12 +59,12 @@
 #define WIRE_DECIMATION (AUDIO_SAMPLE_RATE_HZ / WIRE_RATE_HZ)
 #define WIRE_FRAME_BYTES (AUDIO_FRAME_SAMPLES / WIRE_DECIMATION * WIRE_SAMPLE_BYTES)
 #define WIRE_BYTES_PER_MS (WIRE_RATE_HZ * WIRE_SAMPLE_BYTES / 1000)
-// V2 (voice_clean.h): the wire carries denoised mic audio only while the VAD hears speech, from
-// PREROLL_MS before it fired (it needs 128 ms of speech to decide, and word starts are quiet) until
-// HANGOVER_MS after it stopped (soft word ends). Otherwise zeros, still paced by the mic clock, so the
+// V2 (voice_clean.h): the wire carries mic audio (denoised if nsnet2 is on) only while the VAD hears
+// speech, from PREROLL_MS before it fired (it needs 128 ms of speech to decide, and word starts are
+// quiet) until HANGOVER_MS after it stopped (soft word ends). Otherwise zeros, still paced by the mic clock, so the
 // server keeps its continuous real-time stream. The pre-roll goes out at once when speech starts, so
 // the stream runs that much ahead; the next zero frames are skipped to pay it back (preroll debt).
-// The AFE runs nsnet2 and vadnet on this task's stack. A 16 KB stack peaked at 2.2 KB used
+// The AFE runs vadnet (and nsnet2, if on) on this task's stack. A 16 KB stack peaked at 2.2 KB used
 // (2026-10-07). Internal RAM: a PSRAM stack was no faster and can't run during flash writes.
 #define UPLINK_STACK (COMMA_VOICE_CLEAN ? 8192 : 6144)
 #define PREROLL_MS 300
@@ -756,7 +756,7 @@ typedef struct {
     int echo_samples;
     int vad_frames;    // V2: frames the VAD called speech
     int sent_frames;   // V2: frames that carried audio, not zeros
-    int64_t ns_sq;     // V2: denoised audio, open frames
+    int64_t ns_sq;     // V2: AFE output (denoised if nsnet2 is on), open frames
     int ns_samples;
 } mic_stats_t;
 

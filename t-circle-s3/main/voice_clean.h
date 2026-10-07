@@ -3,9 +3,10 @@
 // V2: noise suppression and voice activity detection on the mic, so the uplink carries speech, not
 // room noise (GPT-Live's server-side turn detection kept hearing office noise as "still talking").
 //
-// ESP-SR AFE (voice-communication type, one mic): nsnet2 noise suppression + vadnet1 VAD, models in
-// the "model" partition. The mic runs at 16 kHz, the AFE's rate; the denoised audio is upsampled
-// 2:3 to the wire's 24 kHz. cue_voice decides what reaches the wire (pre-roll, hangover, zeros).
+// ESP-SR AFE (voice-communication type, one mic): vadnet1 VAD, optionally after nsnet2 noise
+// suppression (COMMA_VOICE_NS_OFF), models in the "model" partition. The mic runs at 16 kHz, the
+// AFE's rate; its output (raw, or denoised) is upsampled 2:3 to the wire's 24 kHz. cue_voice decides
+// what reaches the wire (pre-roll, hangover, zeros).
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -17,6 +18,13 @@
 // the CMake cache keeps the value).
 #ifndef COMMA_VOICE_CLEAN
 #define COMMA_VOICE_CLEAN 1
+#endif
+
+// 1 (default): VAD only. vadnet runs on the raw 16 kHz mic and the wire carries that raw audio in
+// speech, zeros otherwise; nsnet2 cost ~0.8 s of CPU per second in a call (V2 report). 0: nsnet2
+// denoises first, and the wire carries the denoised audio. `-DCOMMA_VOICE_NS_OFF=0` at configure time.
+#ifndef COMMA_VOICE_NS_OFF
+#define COMMA_VOICE_NS_OFF 1
 #endif
 
 #define VOICE_CLEAN_RATE_HZ 16000
@@ -31,7 +39,7 @@ void voice_clean_reset(void);
 // Feed one 20 ms mic frame (320 samples at 16 kHz).
 void voice_clean_feed(const int16_t *mic16k);
 
-// Take the next denoised 20 ms frame, at 24 kHz (480 samples), with the VAD's verdict for it.
+// Take the next 20 ms frame of AFE output (denoised only with nsnet2 on), at 24 kHz (480 samples), with the VAD's verdict for it.
 // The AFE works in 32 ms chunks, so a feed yields zero, one or two frames: call until false.
 bool voice_clean_pop(int16_t *out24k, bool *speech);
 

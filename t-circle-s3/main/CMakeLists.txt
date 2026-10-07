@@ -24,6 +24,11 @@ endif()
 if(COMMA_VOICE_CLEAN_OFF)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_VOICE_CLEAN=0)
 endif()
+# nsnet2 before the VAD (V2 as first shipped): `idf.py -B build-ns -DCOMMA_VOICE_NS_OFF=0 build`. The default
+# is VAD only (voice_clean.h).
+if(DEFINED COMMA_VOICE_NS_OFF)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_VOICE_NS_OFF=${COMMA_VOICE_NS_OFF})
+endif()
 # Dev only: `idf.py -B build-bench -DCOMMA_VOICE_CLEAN_BENCH=1 build` times AFE variants at boot.
 if(COMMA_VOICE_CLEAN_BENCH)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE VOICE_CLEAN_BENCH=1)
