@@ -1,6 +1,6 @@
 # A5 report: `lan_discover` (LAN discovery) on the T-Circle
 
-2026-10-06 · `t-circle-s3/main/lan_discover.c/.h`, `lan_discover_core.c/.h` (new), `connector.c`, `main/CMakeLists.txt`, `CMakeLists.txt`, `sdkconfig(.defaults)`, `tools/lan_discover_test/` (new) · **not yet on the board** (see *Not done*)
+2026-10-06 · `t-circle-s3/main/lan_discover.c/.h`, `lan_discover_core.c/.h` (new), `connector.c`, `main/CMakeLists.txt`, `CMakeLists.txt`, `sdkconfig(.defaults)`, `tools/lan_discover_test/` (new) · board on `ToEverything-IOT`, staging; verified 2026-10-07 except the voice-call check
 
 ## Result
 
