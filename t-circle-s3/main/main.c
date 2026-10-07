@@ -2,6 +2,7 @@
 #include "board_touch.h"
 #include "connector.h"
 #include "cue_voice.h"
+#include "voice_clean.h"
 #include "device_config.h"
 #include "display.h"
 #include "net_watchdog.h"
@@ -311,6 +312,16 @@ void app_main(void)
     if (audio != ESP_OK) {
         ESP_LOGE(TAG, "audio init failed: %s", esp_err_to_name(audio));
     }
+#if COMMA_VOICE_CLEAN
+    // Before the display and Wi-Fi take their share of internal RAM; the AFE goes in PSRAM anyway.
+    const esp_err_t clean = voice_clean_init();
+    if (clean != ESP_OK) {
+        ESP_LOGE(TAG, "noise suppression unavailable: %s; calls send the raw mic", esp_err_to_name(clean));
+    }
+#ifdef VOICE_CLEAN_BENCH
+    voice_clean_bench();
+#endif
+#endif
     board_touch_init();
     temp_init();
     playback_init();

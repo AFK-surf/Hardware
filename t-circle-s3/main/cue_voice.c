@@ -4,7 +4,9 @@
 #include "board_touch.h"
 #include "device_config.h"
 #include "playback.h"
+#include "voice_clean.h"
 
+#include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,12 +59,30 @@
 #define WIRE_DECIMATION (AUDIO_SAMPLE_RATE_HZ / WIRE_RATE_HZ)
 #define WIRE_FRAME_BYTES (AUDIO_FRAME_SAMPLES / WIRE_DECIMATION * WIRE_SAMPLE_BYTES)
 #define WIRE_BYTES_PER_MS (WIRE_RATE_HZ * WIRE_SAMPLE_BYTES / 1000)
+// V2 (voice_clean.h): the wire carries denoised mic audio only while the VAD hears speech, from
+// PREROLL_MS before it fired (it needs 128 ms of speech to decide, and word starts are quiet) until
+// HANGOVER_MS after it stopped (soft word ends). Otherwise zeros, still paced by the mic clock, so the
+// server keeps its continuous real-time stream. The pre-roll goes out at once when speech starts, so
+// the stream runs that much ahead; the next zero frames are skipped to pay it back (preroll debt).
+// The AFE runs nsnet2 and vadnet on this task's stack. A 16 KB stack peaked at 2.2 KB used
+// (2026-10-07). Internal RAM: a PSRAM stack was no faster and can't run during flash writes.
+#define UPLINK_STACK (COMMA_VOICE_CLEAN ? 8192 : 6144)
+#define PREROLL_MS 300
+#define HANGOVER_MS 500
+#define PREROLL_FRAMES (PREROLL_MS / AUDIO_FRAME_MS)
+#define HANGOVER_FRAMES (HANGOVER_MS / AUDIO_FRAME_MS)
 // Mic audio waits here for the sender, which batches it into 100 ms frames.
 #define MIC_QUEUE_BYTES (WIRE_BYTES_PER_MS * 1000)
 // The server closes with 4400 when caller audio arrives faster than 1.25x real time over 5 s, i.e.
 // more than 1.25 s ahead. After a network stall, the audio stuck in the TCP send buffer arrives in
 // one burst, so the sender keeps at most this much backlog and drops the oldest audio beyond it.
+// With V2 a pre-roll lands in the queue all at once, so the cap leaves room for it on top; at most
+// ~1 s is then ahead after a stall, still inside the server's 1.25 s.
+#if COMMA_VOICE_CLEAN
+#define MIC_BACKLOG_MAX_BYTES (WIRE_BYTES_PER_MS * (300 + PREROLL_MS))
+#else
 #define MIC_BACKLOG_MAX_BYTES (WIRE_BYTES_PER_MS * 300)
+#endif
 #define SEND_CHUNK_BYTES (WIRE_FRAME_BYTES * 5)
 // Any esp_websocket_client send that times out tears the connection down, and a send that blocks
 // holds the TX lock, which the websocket task needs for PONG: if it can't get it within 2 s
@@ -718,19 +738,152 @@ static void play_end_tone(void)
     playback_tone(clean ? PLAYBACK_TONE_NORMAL : PLAYBACK_TONE_DROPPED);
 }
 
-// The microphone's I2S clock paces the uplink: one 20 ms frame goes out per 480 samples read.
+static void enqueue_frame(const int16_t *frame)
+{
+    uint8_t wire[WIRE_FRAME_BYTES];
+    encode_mic_frame(frame, wire);
+    if (xStreamBufferSend(s_mic_queue, wire, sizeof(wire), 0) != sizeof(wire)) {
+        s_mic_dropped++;
+    }
+}
+
+// Per-second mic figures for the stats line.
+typedef struct {
+    int peak;          // raw mic, open frames
+    int64_t sum_sq;    // raw mic, open frames
+    int open_samples;
+    int64_t echo_sq;   // raw mic while muted for agent speech: the speaker's echo
+    int echo_samples;
+    int vad_frames;    // V2: frames the VAD called speech
+    int sent_frames;   // V2: frames that carried audio, not zeros
+    int64_t ns_sq;     // V2: denoised audio, open frames
+    int ns_samples;
+} mic_stats_t;
+
+static int rms_of(int64_t sum_sq, int samples)
+{
+    return samples > 0 ? (int)sqrtf((float)sum_sq / (float)samples) : 0;
+}
+
+static int64_t sum_squares(const int16_t *pcm, int samples)
+{
+    int64_t sum = 0;
+    for (int i = 0; i < samples; ++i) {
+        sum += (int32_t)pcm[i] * pcm[i];
+    }
+    return sum;
+}
+
+#if COMMA_VOICE_CLEAN
+// What V2 has kept back: up to PREROLL_FRAMES denoised frames that went out as zeros, the frames of
+// hangover left, and how many frames the stream is ahead of real time after a pre-roll.
+static int16_t (*s_preroll)[AUDIO_FRAME_SAMPLES];
+static int s_preroll_head;
+static int s_preroll_count;
+static bool s_talking;
+static int s_hangover_left;
+static int s_preroll_debt;
+
+static void clean_gate_reset(void)
+{
+    s_preroll_head = 0;
+    s_preroll_count = 0;
+    s_talking = false;
+    s_hangover_left = 0;
+    s_preroll_debt = 0;
+}
+
+// One denoised 20 ms frame: decide what goes on the wire for it.
+static void clean_gate_frame(int16_t *frame, bool speech, bool gated, mic_stats_t *st)
+{
+    static const int16_t zeros[AUDIO_FRAME_SAMPLES];
+    if (gated) {
+        // Agent speech or its tail: zeros as before, and nothing from here may become pre-roll.
+        s_talking = false;
+        s_hangover_left = 0;
+        s_preroll_count = 0;
+        speech = false;
+    } else {
+        st->ns_sq += sum_squares(frame, AUDIO_FRAME_SAMPLES);
+        st->ns_samples += AUDIO_FRAME_SAMPLES;
+        if (speech) {
+            st->vad_frames++;
+        }
+    }
+    if (speech) {
+        if (!s_talking) {
+            s_talking = true;
+            int start = (s_preroll_head - s_preroll_count + PREROLL_FRAMES) % PREROLL_FRAMES;
+            for (int i = 0; i < s_preroll_count; ++i) {
+                enqueue_frame(s_preroll[(start + i) % PREROLL_FRAMES]);
+            }
+            st->sent_frames += s_preroll_count;
+            s_preroll_debt += s_preroll_count;
+            s_preroll_count = 0;
+        }
+        s_hangover_left = HANGOVER_FRAMES;
+        enqueue_frame(frame);
+        st->sent_frames++;
+        return;
+    }
+    if (s_talking && s_hangover_left > 0) {
+        if (--s_hangover_left == 0) {
+            s_talking = false;
+        }
+        enqueue_frame(frame);
+        st->sent_frames++;
+        return;
+    }
+    if (!gated) {
+        memcpy(s_preroll[s_preroll_head], frame, sizeof(s_preroll[0]));
+        s_preroll_head = (s_preroll_head + 1) % PREROLL_FRAMES;
+        if (s_preroll_count < PREROLL_FRAMES) {
+            s_preroll_count++;
+        }
+    }
+    if (s_preroll_debt > 0) {
+        s_preroll_debt--;
+        return;
+    }
+    enqueue_frame(zeros);
+}
+#endif
+
+// CPU load per core over the last stats second, from the idle tasks' run time.
+static void cpu_load(int out[2])
+{
+    static uint32_t last_idle[2];
+    static int64_t last_at;
+    const int64_t now = esp_timer_get_time();
+    for (int core = 0; core < 2; ++core) {
+        const uint32_t idle = ulTaskGetIdleRunTimeCounterForCore(core);
+        const int64_t span = now - last_at;
+        out[core] = last_at == 0 || span <= 0 ? -1 : 100 - (int)((int64_t)(idle - last_idle[core]) * 100 / span);
+        last_idle[core] = idle;
+    }
+    last_at = now;
+}
+
+// The microphone's I2S clock paces the uplink: one 20 ms frame goes out per 20 ms of mic audio.
 // The mic is open for the whole call, except that frames are zeros while agent audio plays.
 static void uplink_task(void *arg)
 {
     (void)arg;
+    static int16_t mic[MIC_FRAME_SAMPLES];
+#if COMMA_VOICE_CLEAN
     static int16_t frame[AUDIO_FRAME_SAMPLES];
+#endif
+    mic_stats_t st = {0};
     int filled = 0;
     bool recording = false;
     bool was_gated = false;
     int64_t speaker_quiet_since = 0;
     int64_t stats_at = 0;
     int stall_logged_at = 0;
-    int mic_peak = 0;
+#if COMMA_VOICE_CLEAN
+    clean_gate_reset();
+    voice_clean_reset();
+#endif
     while (!s_stop) {
         if (!s_start_sent && s_ws_up) {
             const char *start =
@@ -757,14 +910,14 @@ static void uplink_task(void *arg)
             recording = true;
             filled = 0;
         }
-        int got = board_audio_read_mono(frame + filled, AUDIO_FRAME_SAMPLES - filled);
+        int got = board_audio_read_mono(mic + filled, MIC_FRAME_SAMPLES - filled);
         if (got < 0) {
             ESP_LOGE(TAG, "microphone read failed");
             s_stop = true;
             break;
         }
         filled += got;
-        if (filled < AUDIO_FRAME_SAMPLES) {
+        if (filled < MIC_FRAME_SAMPLES) {
             continue;
         }
         filled = 0;
@@ -791,14 +944,17 @@ static void uplink_task(void *arg)
             was_gated = gated;
         }
         if (!gated) {
-            for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
-                int magnitude = frame[i] < 0 ? -(int)frame[i] : frame[i];
-                if (magnitude > mic_peak) {
-                    mic_peak = magnitude;
+            for (int i = 0; i < MIC_FRAME_SAMPLES; i++) {
+                int magnitude = mic[i] < 0 ? -(int)mic[i] : mic[i];
+                if (magnitude > st.peak) {
+                    st.peak = magnitude;
                 }
             }
+            st.sum_sq += sum_squares(mic, MIC_FRAME_SAMPLES);
+            st.open_samples += MIC_FRAME_SAMPLES;
         } else {
-            memset(frame, 0, sizeof(frame));
+            st.echo_sq += sum_squares(mic, MIC_FRAME_SAMPLES);
+            st.echo_samples += MIC_FRAME_SAMPLES;
         }
         if (idle != 0 && now - idle >= IDLE_HANGUP_US) {
             ESP_LOGI(TAG, "idle hangup: 60 s without a final caller transcript or agent audio");
@@ -806,11 +962,19 @@ static void uplink_task(void *arg)
             s_stop = true;
             break;
         }
-        uint8_t wire[WIRE_FRAME_BYTES];
-        encode_mic_frame(frame, wire);
-        if (xStreamBufferSend(s_mic_queue, wire, sizeof(wire), 0) != sizeof(wire)) {
-            s_mic_dropped++;
+#if COMMA_VOICE_CLEAN
+        // The AFE also hears the mic while it's muted, so its noise estimate never goes stale.
+        voice_clean_feed(mic);
+        bool speech = false;
+        while (voice_clean_pop(frame, &speech)) {
+            clean_gate_frame(frame, speech, gated, &st);
         }
+#else
+        if (gated) {
+            memset(mic, 0, sizeof(mic));
+        }
+        enqueue_frame(mic);
+#endif
         // Stall lines come from here, not the sender, which may itself be stuck inside a send.
         int64_t waiting_since = s_wait_since_us;
         if (waiting_since != 0 && now - waiting_since >= (stall_logged_at + 1) * STALL_LOG_MS * 1000LL &&
@@ -848,7 +1012,22 @@ static void uplink_task(void *arg)
                      queued_bytes / (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 1000), pending_marks,
                      (long long)(s_send_us / 1000), (long long)(send_max_us / 1000),
                      (int)xStreamBufferBytesAvailable(s_mic_queue) / WIRE_BYTES_PER_MS,
-                     (int)s_mic_dropped, gated ? "muted" : "open", mic_peak);
+                     (int)s_mic_dropped, gated ? "muted" : "open", st.peak);
+            // mic_rms: raw mic while open; echo_rms: raw mic while muted for agent speech.
+            int cpu[2];
+            cpu_load(cpu);
+#if COMMA_VOICE_CLEAN
+            ESP_LOGI(TAG,
+                     "voice mic_rms=%d echo_rms=%d ns_rms=%d vad_ms=%d sent_ms=%d preroll_debt_ms=%d afe_ms=%d cpu0=%d cpu1=%d "
+                     "stack_free=%u",
+                     rms_of(st.sum_sq, st.open_samples), rms_of(st.echo_sq, st.echo_samples),
+                     rms_of(st.ns_sq, st.ns_samples), st.vad_frames * AUDIO_FRAME_MS, st.sent_frames * AUDIO_FRAME_MS,
+                     s_preroll_debt * AUDIO_FRAME_MS, (int)(voice_clean_take_busy_us() / 1000), cpu[0], cpu[1],
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
+#else
+            ESP_LOGI(TAG, "voice mic_rms=%d echo_rms=%d cpu0=%d cpu1=%d", rms_of(st.sum_sq, st.open_samples),
+                     rms_of(st.echo_sq, st.echo_samples), cpu[0], cpu[1]);
+#endif
             if (known) {
                 ESP_LOGI(TAG, "net %s tcp_unacked=%u (max %u) tcp_sndbuf=%u tcp_q=%u peer_wnd=%u cwnd=%u nrtx_max=%u rto_ms=%d srtt_ms=%d", wifi,
                          (unsigned)tcp.unacked, (unsigned)s_tcp_unacked_max, (unsigned)tcp.snd_buf, (unsigned)tcp.queue_len,
@@ -861,7 +1040,7 @@ static void uplink_task(void *arg)
             s_mic_dropped = 0;
             s_tcp_unacked_max = 0;
             s_tcp_nrtx_max = 0;
-            mic_peak = 0;
+            st = (mic_stats_t){0};
         }
     }
     if (recording) {
@@ -949,6 +1128,14 @@ esp_err_t cue_voice_start(void)
         }
         s_mic_queue = xStreamBufferCreateStatic(MIC_QUEUE_BYTES, 1, s_mic_queue_storage, &s_mic_queue_struct);
     }
+#if COMMA_VOICE_CLEAN
+    if (!s_preroll) {
+        s_preroll = heap_caps_malloc(PREROLL_FRAMES * sizeof(s_preroll[0]), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_preroll) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+#endif
     xStreamBufferReset(s_mic_queue);
     s_down_last = 0;
     s_mic_dropped = 0;
@@ -1018,7 +1205,7 @@ esp_err_t cue_voice_start(void)
         return ESP_ERR_NO_MEM;
     }
     s_uplink_running = true;
-    if (xTaskCreate(uplink_task, "uplink", 6144, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(uplink_task, "uplink", UPLINK_STACK, NULL, 5, NULL) != pdPASS) {
         s_uplink_running = false;
         s_stop = true;
         while (s_sender_running) {

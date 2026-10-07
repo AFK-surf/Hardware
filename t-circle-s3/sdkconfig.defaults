@@ -81,3 +81,12 @@ CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 # GATT writes are parsed on the host task (a 513-byte buffer plus cJSON).
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# V2 (voice_clean.c): ESP-SR AFE with neural noise suppression and VAD, models in the "model" partition.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_NSN_NSNET2=y
+CONFIG_SR_VADN_VADNET1_MEDIUM=y
+# Lets voice_clean.lf put nsnet3's unused 19 KB .bss in PSRAM.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# CPU load per core in the call stats (idle tasks' run time).
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

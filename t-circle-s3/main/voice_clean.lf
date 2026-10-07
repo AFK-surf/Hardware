@@ -1,0 +1,6 @@
+# V2: ESP-SR links nsnet3 (GTCRN) even when nsnet2 is the model in use, and nsnet3 keeps a 19 KB
+# weight buffer in .bss. It is never touched with nsnet2, so it lives in PSRAM instead of internal RAM.
+[mapping:voice_clean_nsnet3]
+archive: libnsnet3.a
+entries:
+    * (extram_bss)

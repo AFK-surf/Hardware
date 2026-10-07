@@ -1,6 +1,7 @@
 // LilyGO T-Circle-S3 V1.1. PDM mic on I2S0, MAX98357A on I2S1.
-// Sample rate is 24 kHz for comma.voice.v1 pcm16_24k.
-// Filter corners match the 16 kHz T-Circle driver:
+// The speaker runs at 24 kHz for comma.voice.v1 pcm16_24k. The mic runs at MIC_SAMPLE_RATE_HZ:
+// 16 kHz with V2's noise suppressor (it upsamples to 24 kHz after), else 24 kHz.
+// Filter corners match the 16 kHz T-Circle driver at either rate:
 // mic DC block 12.8 Hz, mic low-pass 4.83 kHz, speaker DC block 120 Hz.
 // The speaker fade-in stays 6 ms.
 
@@ -26,8 +27,13 @@
 #define T_CIRCLE_SPEAKER_SD   GPIO_NUM_45
 
 #define T_CIRCLE_AUDIO_CHUNK_FRAMES 256
+#if MIC_SAMPLE_RATE_HZ == 16000
+#define T_CIRCLE_MIC_DC_BLOCK_Q15 32603
+#define T_CIRCLE_MIC_LOWPASS_Q15 27850
+#else
 #define T_CIRCLE_MIC_DC_BLOCK_Q15 32659
 #define T_CIRCLE_MIC_LOWPASS_Q15 23517
+#endif
 #define T_CIRCLE_MIC_LIMIT_START 24576
 #define T_CIRCLE_MIC_GAIN_NUMERATOR 5
 #define T_CIRCLE_MIC_GAIN_DENOMINATOR 2
@@ -44,7 +50,7 @@ static i2s_chan_handle_t s_speaker_tx = NULL;
 static bool s_microphone_enabled = false;
 static bool s_speaker_enabled = false;
 static int16_t s_stereo_output[T_CIRCLE_AUDIO_CHUNK_FRAMES * 2];
-static int16_t s_prime_buffer[AUDIO_FRAME_SAMPLES];
+static int16_t s_prime_buffer[MIC_FRAME_SAMPLES];
 static int32_t s_mic_previous_input = 0;
 static int32_t s_mic_highpass_state = 0;
 static int32_t s_mic_lowpass_state = 0;
@@ -115,11 +121,11 @@ static esp_err_t init_microphone(void)
 {
     i2s_chan_config_t channel_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     channel_cfg.dma_desc_num = 8;
-    channel_cfg.dma_frame_num = AUDIO_FRAME_SAMPLES;
+    channel_cfg.dma_frame_num = MIC_FRAME_SAMPLES;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&channel_cfg, NULL, &s_microphone_rx), TAG, "new PDM microphone channel");
 
     i2s_pdm_rx_config_t microphone_cfg = {
-        .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE_HZ),
+        .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE_HZ),
         .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .dins = {
@@ -143,8 +149,8 @@ esp_err_t board_audio_init(void)
     ESP_RETURN_ON_ERROR(init_microphone(), TAG, "PDM microphone");
     s_microphone_enabled = false;
     s_speaker_enabled = false;
-    ESP_LOGI(TAG, "T-Circle audio ready: PDM RX I2S0, MAX98357A TX I2S1, PCM16 %d Hz, speaker gain 3.75",
-             AUDIO_SAMPLE_RATE_HZ);
+    ESP_LOGI(TAG, "T-Circle audio ready: PDM RX I2S0 at %d Hz, MAX98357A TX I2S1 at %d Hz, speaker gain 3.75",
+             MIC_SAMPLE_RATE_HZ, AUDIO_SAMPLE_RATE_HZ);
     return ESP_OK;
 }
 
@@ -207,7 +213,7 @@ esp_err_t board_audio_set_recording(bool enabled)
 
 int board_audio_read_mono(int16_t *mono_buf, int samples)
 {
-    if (!s_microphone_rx || !s_microphone_enabled || !mono_buf || samples <= 0 || samples > AUDIO_FRAME_SAMPLES) {
+    if (!s_microphone_rx || !s_microphone_enabled || !mono_buf || samples <= 0 || samples > MIC_FRAME_SAMPLES) {
         return -1;
     }
 

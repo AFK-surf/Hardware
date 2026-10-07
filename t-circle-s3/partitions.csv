@@ -2,3 +2,5 @@
 nvs,      data, nvs,     0x9000,  0x6000
 phy_init, data, phy,     0xf000,  0x1000
 factory,  app,  factory, 0x10000, 4M
+# ESP-SR models for V2 (nsnet2 + vadnet1, ~0.6 MB), mapped from flash by esp_srmodel_init("model").
+model,    data, spiffs,  0x410000, 1M
