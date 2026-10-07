@@ -15,8 +15,9 @@
 | Real-world answers parse | **Verified on the Mac**, not the board. The firmware's own mDNS questions, sent from the Pro, got real answers from macOS; replayed through the firmware's parser they give the expected host (hostname, AirPlay/RAOP/companion-link with ports and TXT). See *Checked against real answers*. |
 | Host tests | `tools/lan_discover_test/run.sh`: **1221 checks, all pass** (ASan + UBSan). `lan_http_test` still 99/99. |
 | Build | Clean, no warnings. Static DIRAM 164.4 → **165.3 KB** (+0.9 KB: ARP table 10 → 32 entries and the code); image 1.39 MB. |
-| **On office Wi-Fi: Mac and router listed, within caps** | **Not done.** The board isn't connected to this Mac and the Mac isn't on `ToEverything-IOT` right now (192.168.64.0/20). |
-| **Voice call during discovery (`cue:` stats)** | **Not done**, same reason. |
+| **On office Wi-Fi: Mac and router listed, within caps** | **Verified 2026-10-07** (see *On the board*). Self-test build: 13–15 hosts, ~8 KB, router with 11 SSDP entries, the Mac with its services, the Mi bedside lamp (`_hap._tcp:80`). |
+| **Through Comma (staging, backend #2619–#2621)** | **Verified.** "用 T-Circle 扫描局域网" from the phone → `lan_discover` reached the board, 16 hosts in 8007 ms, 6161 B; the agent listed them. Read-only gate seen first: self-tests refused until Allow operations was turned on. |
+| **Voice call during discovery (`cue:` stats)** | **Not done.** |
 
 ## Contract as implemented
 
@@ -79,9 +80,18 @@ The AirPlay name comes out as `" mafuzhens MacBook Pro"`: the label really start
 
 A first attempt ran the firmware's `lan_discover.c` itself on the Mac against BSD sockets. macOS gave that freshly built binary no LAN traffic and not even the ARP table (Local Network privacy, presumably), while Python had both, so that harness was dropped for capture + replay.
 
+## On the board (2026-10-07)
+
+Office Wi-Fi (`ToEverything-IOT`), board 192.168.5.17, staging.
+
+- Self-test build (`COMMA_LAN_DISCOVER_SELFTEST_S=20`): every run refused (`selftest_N refused: read-only`) until the user turned on Allow operations at 11:43:06 (`device_access` → `access: operations allowed` → metadata `scope=""`). The next run: `15 hosts (arp 13 of 253 swept, 0 failed; mdns 41 answers; ssdp 22 answers), 3007 ms, 7935 B`.
+- Hosts found: router 192.168.5.1 (ARP + 11 SSDP STs: rootdevice, InternetGatewayDevice, WANDevice, WANIPConnection, …), the Pro 192.168.5.13 (`mafuzhens-MacBook-Pro.local`, AirPlay/RAOP/companion-link), other Macs/iPhones/a Chromebook with hostnames, the Mi bedside lamp 192.168.5.19 (`MiBedsideLamp2-28A1.local`, `_hap._tcp:80`), and a few ARP-only hosts. `truncated: true` (AirPlay TXT > 16 keys).
+- Internal heap unchanged by a run: idle 152.2 KB, lowest 150.0 KB after an 8 s discovery.
+- Release build flashed afterwards. From the phone (11:47): `request req_ewa_tDHcHKDn5M82 lan_discover` → `16 hosts (arp 13; mdns 59 answers; ssdp 22 answers), 8007 ms, 6161 B` (the agent asked for 8 s). Then the agent tried the lamp over HTTP through the board: `GET 192.168.5.19:80 -> 404, 82 ms`. The lamp speaks miIO (UDP), so that path needs A4 (`udp_request`) and a cloud miIO codec.
+
 ## Not done / next
 
-1. **On the board, office Wi-Fi.** Needs the board on the Pro's USB and both on `ToEverything-IOT`. I haven't flashed anything (the plan says ask first). Steps:
+1. **Voice call during discovery.** Not run yet. With the self-test build:
    ```
    cd t-circle-s3 && . ~/.espressif/tools/activate_idf_v6.0.2.sh
    idf.py -B build-selftest -DCOMMA_LAN_DISCOVER_SELFTEST_S=20 build   # already built
@@ -94,7 +104,7 @@ A first attempt ran the firmware's `lan_discover.c` itself on the Mac against BS
    - a voice call during the runs: `cue:` stats show no `mic_dropped` / `send_max_ms` spikes that line up with discovery; lowest internal heap stays ≥ 40 KB.
 
    Then flash the normal build (`idf.py -p … flash`). The self-test is off unless that CMake variable is set, and `build-selftest/` is gitignored.
-2. **Through the backend.** When `device.lan_discover` reaches staging, run it from a chat with access off (expect the refusal) and on.
+2. **Through the backend with access off.** The refusal was seen on the self-test path only, not from a chat.
 3. **Not tried at all:** a Yeelight bulb, a WLED/Tasmota device (the user is buying one), a subnet larger than /24, more than ~30 hosts answering ARP.
 4. **`capture.py` / `replay.sh`** stay as the way to turn a field report ("it didn't find my X") into a host test case.
 
