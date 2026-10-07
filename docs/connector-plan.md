@@ -102,3 +102,13 @@ B1 ─▶ B2 ─▶ B3（并行，B3 等 A2）
 
 点击通话/挂断、发送独立锁、积压 ≤300 ms、TCP 发送缓冲 24 KB、SACK、200 ms 抖动缓冲、拨号音、logo 只在通话时动。
 剩余断线（4410/4400）根因是办公室 Wi-Fi 下行卡 2–4 s，由 C1 解决。`pcmu_8k` 已实现但关闭：staging 用该格式时模型完全无回应（C1 prompt 的 C 项在查）。
+
+## 待办（固件，2026-10-07 记）
+
+| 项 | 说明 | 状态 |
+|---|---|---|
+| **安全加固** | flash 加密 + 安全启动（Secure Boot v2）；NVS 加密（connector token、voice key、Wi-Fi 密码现为明文，拿到板子即可读出）；关闭或锁定量产板的 USB/JTAG 调试；`secrets.h` 开发覆盖在量产构建里禁掉 | 待办，对外发货前必须完成 |
+| BLE 公司 ID | E1 扫描回包用的是测试 ID `0xFFFF`，量产前向 Bluetooth SIG 申请正式 ID 并替换（固件 + 安卓解析同时改） | 待办，量产前 |
+| 配对码改「点一下确认」 | 现在是设备显示 6 位码、手机输入；T-Circle 有触摸屏，可改 Numeric Comparison（两边显示同一数字，点确认） | 随 E4 做 |
+| OTA 远程升级 | 双 app 分区 + 签名校验，由后端下发 | 暂不做（用户 10-07 定） |
+| 通话中打断（AEC） | ESP-SR AFE AEC，播放信号作参考；评估见 `reports/V2-report.md` → *Later: AEC and barge-in* | 靠后 |
