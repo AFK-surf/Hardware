@@ -39,6 +39,7 @@ WIFI_CREDENTIALS = uuid(3)
 CREDENTIALS = uuid(4)
 STATUS = uuid(5)
 INFO = uuid(6)
+SETUP_COMPANY_ID = 0xFFFF  # Testing only; replace before production.
 
 FINAL_STATES = {"saved", "wifi_failed"}
 
@@ -60,18 +61,38 @@ def log(msg):
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
+def setup_summary(data):
+    # Bleak removes the two company-ID bytes and uses them as the manufacturer_data key.
+    unknown = "state=unknown short_id=unknown"
+    if data is None:
+        return f"{unknown} (no setup data)"
+    if len(data) < 5:
+        return f"{unknown} (truncated setup data)"
+    if data[0] != 0x01:
+        return f"{unknown} (unsupported version 0x{data[0]:02X})"
+    if data[1] != 0x01:
+        return f"{unknown} (unsupported model 0x{data[1]:02X})"
+    states = {0x00: "unprovisioned", 0x01: "provisioned-pairing"}
+    state = states.get(data[2], "unknown")
+    return f"state={state}(0x{data[2]:02X}) short_id={data[3:5].hex().upper()}"
+
+
 async def cmd_scan(args):
     seen = {}
 
     def on_adv(d, adv):
-        # The name is in the scan response, so the first report of a device may lack it.
-        if SERVICE in [u.lower() for u in adv.service_uuids]:
-            seen[d.address] = (adv.local_name or d.name or seen.get(d.address, (None,))[0], adv.rssi)
+        # Name and setup data arrive in the scan response, sometimes after the UUID report.
+        if SERVICE not in [u.lower() for u in adv.service_uuids] and d.address not in seen:
+            return
+        previous_name, _, data = seen.get(d.address, (None, None, None))
+        if SETUP_COMPANY_ID in adv.manufacturer_data:
+            data = adv.manufacturer_data[SETUP_COMPANY_ID]
+        seen[d.address] = (adv.local_name or previous_name or d.name, adv.rssi, data)
 
-    async with BleakScanner(on_adv):
+    async with BleakScanner(on_adv, service_uuids=[SERVICE], scanning_mode="active"):
         await asyncio.sleep(args.timeout)
-    for address, (name, rssi) in seen.items():
-        print(f"{name}  {address}  rssi {rssi}")
+    for address, (name, rssi, data) in seen.items():
+        print(f"{name or '(name pending)'}  {address}  {setup_summary(data)}  rssi {rssi}")
     if not seen:
         print("none")
 

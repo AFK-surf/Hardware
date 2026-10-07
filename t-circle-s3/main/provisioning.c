@@ -96,6 +96,7 @@ static atomic_bool s_active;
 static atomic_bool s_task_running;
 static char s_name[16];   // Comma-XXXX
 static char s_mac[18];
+static uint8_t s_short_id[2];  // Wi-Fi MAC suffix, in the same order as XXXX
 static uint8_t s_own_addr_type;
 
 // Owned by the host task (connection bookkeeping) and read elsewhere.
@@ -368,10 +369,21 @@ static void advertise(void)
         ESP_LOGE(TAG, "adv fields: %d", rc);
         return;
     }
+    // Test company ID (little-endian), format v1, T-Circle-S3, setup state, Wi-Fi MAC suffix.
+    const uint8_t mfg_data[] = {
+        0xff, 0xff, 0x01, 0x01, device_config_provisioned() ? 0x01 : 0x00,
+        s_short_id[0], s_short_id[1],
+    };
+    // Each AD structure adds a length byte and a type byte: (10 + 2) + (7 + 2) = 21 bytes.
+    // Check even the longest name our buffer could hold against the legacy 31-byte limit.
+    _Static_assert(sizeof(s_name) - 1 + 2 + sizeof(mfg_data) + 2 <= BLE_HS_ADV_MAX_SZ,
+                   "name and setup data must fit in the scan response");
     struct ble_hs_adv_fields rsp = {0};
     rsp.name = (const uint8_t *)s_name;
     rsp.name_len = strlen(s_name);
     rsp.name_is_complete = 1;
+    rsp.mfg_data = mfg_data;
+    rsp.mfg_data_len = sizeof(mfg_data);
     rc = ble_gap_adv_rsp_set_fields(&rsp);
     if (rc != 0) {
         ESP_LOGE(TAG, "scan response fields: %d", rc);
@@ -386,7 +398,11 @@ static void advertise(void)
         ESP_LOGE(TAG, "adv start: %d", rc);
         return;
     }
-    ESP_LOGI(TAG, "advertising as %s", s_name);
+    if (rc == 0) {
+        ESP_LOGI(TAG, "advertising as %s, mfg=%02X %02X %02X %02X %02X %02X %02X",
+                 s_name, mfg_data[0], mfg_data[1], mfg_data[2], mfg_data[3],
+                 mfg_data[4], mfg_data[5], mfg_data[6]);
+    }
 }
 
 static int on_gap(struct ble_gap_event *event, void *arg)
@@ -1020,6 +1036,7 @@ esp_err_t provisioning_start(void)
     xQueueReset(s_events);
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    memcpy(s_short_id, &mac[4], sizeof(s_short_id));
     snprintf(s_name, sizeof(s_name), "Comma-%02X%02X", mac[4], mac[5]);
     snprintf(s_mac, sizeof(s_mac), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 

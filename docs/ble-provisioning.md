@@ -19,12 +19,42 @@ still down when the device restarts, it is ignored until let go, so holding on e
 ## Advertising
 
 - Advertising data: flags + the complete 128-bit service UUID `f2d20001-eb8e-4a64-9ec7-ab0cbb8107c8`.
-- Scan response: complete local name `Comma-XXXX`, where `XXXX` is the last two bytes of the Wi-Fi
+- Scan response: complete local name `Comma-XXXX` plus manufacturer-specific setup data (below).
+  `XXXX` is the last two bytes of the Wi-Fi
   MAC in upper-case hex (board `98:a3:16:f5:5d:28` → `Comma-5D28`). Filter scans by the service UUID,
   not by name.
 - Address: a **new random static address each pairing session** (each boot into pairing). Don't
   remember the BLE address across sessions; use `info.mac` as the stable identity.
 - Connectable, one connection at a time.
+
+The manufacturer-specific AD structure (type `0xFF`) contains these **7 payload bytes**; offsets
+exclude the AD length and type bytes:
+
+| Byte | Field | Value |
+| --- | --- | --- |
+| 0–1 | Company ID, little endian | `0xFFFF` (`FF FF`), reserved for testing |
+| 2 | Format version | `0x01` |
+| 3 | Model | `0x01` = T-Circle-S3 |
+| 4 | State | `0x00` = unprovisioned; `0x01` = provisioned, pairing mode |
+| 5–6 | Short ID | Last two Wi-Fi MAC bytes, in name order: `Comma-5D28` → `5D 28` |
+
+`0xFFFF` is a **test-only company ID**; replace it with an assigned Bluetooth SIG company ID
+before production. Ignore unknown format versions; later versions may append fields. A missing
+or unsupported payload does not mean unprovisioned. The short ID is a display hint, not a unique
+identity or proof of ownership; `info.mac` remains the stable identity after pairing.
+
+Both legacy packets fit in 31 bytes: advertising is **21 bytes** (flags `1 + 2`, UUID `16 + 2`);
+scan response is **21 bytes** (name `10 + 2`, manufacturer data `7 + 2`), leaving 10 bytes free.
+The `+ 2` is the length and type byte for each AD structure. For `Comma-5D28`, manufacturer data
+is `FF FF 01 01 00 5D 28` when unprovisioned, or `FF FF 01 01 01 5D 28` in provisioned pairing
+mode. The firmware logs these bytes once on each successful advertising start.
+
+Without connecting or pairing, run `python tools/ble_provision.py scan --timeout 8` from
+`t-circle-s3/` (requires `bleak`). It actively scans by service UUID and prints name, state,
+short ID and RSSI; for example `Comma-5D28 ... state=unprovisioned(0x00) short_id=5D28 ...`.
+Name and manufacturer data may arrive after the first advertisement; the tool merges those
+reports. Bleak exposes company ID `0xFFFF` as the `manufacturer_data` key and the remaining five
+bytes as its value.
 
 ## Security
 
