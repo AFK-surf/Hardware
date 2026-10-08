@@ -50,6 +50,9 @@ class FakeBoard:
         while b"\r\n\r\n" not in head:
             head += self.sock.recv(1)
         assert head.startswith(b"HTTP/1.1 101"), head
+        # RFC 6455 §4.2.2, as esp_transport_ws checks it.
+        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+        assert b"Sec-WebSocket-Accept: " + accept + b"\r\n" in head, head
         self.buf = b""
         self.send(
             {

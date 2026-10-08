@@ -176,7 +176,7 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 | Pending requests per socket | 256; T-Circle can handle them one at a time but must answer each |
 | Max frame | 16 MiB server side. T-Circle: cap `http_request` bodies at e.g. 32 KiB and report `truncated` (the MCP path asks for `max_bytes` = 10 MiB) |
 | T-Circle `http_request` caps | Text mode: 64 KiB body, 30 s. Chunk mode: 4 MiB in all, 110 s for the whole transfer |
-| T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified. At most 64 KiB/s during a voice call |
+| T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified. During a voice call: 4 KiB frames, at most 32 KiB/s (transfers during calls still hurt them, see reports/G1-report.md) |
 | Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |
 
 ## 7. Reconnect

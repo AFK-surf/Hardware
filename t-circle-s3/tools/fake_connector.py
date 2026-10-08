@@ -43,7 +43,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
-WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC11B76"
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OP_CONT, OP_TEXT, OP_BIN, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 HEARTBEAT_S = 15
 MAX_FRAME = 16 * 1024 * 1024
@@ -80,6 +80,7 @@ def make_files(directory):
 
 def serve_files(directory, port):
     handler = functools.partial(QuietHandler, directory=directory)
+    socketserver.ThreadingTCPServer.allow_reuse_address = True  # restart right after a run
     httpd = socketserver.ThreadingTCPServer(("0.0.0.0", port), handler)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

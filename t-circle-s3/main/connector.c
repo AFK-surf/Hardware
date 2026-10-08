@@ -69,8 +69,10 @@
 #define CHUNK_GATED_BYTES (8 * 1024)
 // No room for a frame for this long: give up with an error frame (V1's no-progress limit).
 #define CHUNK_STALL_LIMIT_MS 10000
-// During a voice call, chunks are paced to this many raw bytes per second.
-#define CHUNK_CALL_BUDGET_BPS (64 * 1024)
+// During a voice call: smaller frames, paced to this many raw bytes per second, so Wi-Fi airtime
+// goes to voice first. At 64 KB/s in 8 KB frames the call's uplink dropped 5-15 mic frames a second.
+#define CHUNK_CALL_FRAME_BYTES (4 * 1024)
+#define CHUNK_CALL_BUDGET_BPS (32 * 1024)
 
 // Dev builds only (main/CMakeLists.txt): run lan_discover every N seconds through the LAN worker and
 // its access gate, and log the reply, for testing on the board before the backend can ask for it.
@@ -551,6 +553,9 @@ static bool call_active(void)
 static size_t chunk_frame_bytes(void *arg)
 {
     (void)arg;
+    if (call_active()) {
+        return CHUNK_CALL_FRAME_BYTES;
+    }
     // Unidentified socket: no gate, so fewer, bigger frames; each write may block (up to the limit).
     return s_conn_fd >= 0 ? CHUNK_GATED_BYTES : LAN_HTTP_CHUNK_BYTES;
 }
