@@ -30,6 +30,9 @@ The firmware is adding a **chunked binary response mode** (G1). The contract is 
 
    `seq` starts at 0 and frames arrive in order.
 
+   Frames may carry fewer bytes than `chunk_bytes`: the T-Circle sends 8 KB per frame (≈100 frames for 800 KB) so a frame always fits its socket buffer. Count frames; don't assume size.
+
+   The device allows a chunked transfer up to **110 s** in total (it paces sends during a voice call, ~64 KB/s), so the server's wait for the final frame must allow that, with a per-chunk idle limit rather than a short overall timeout.
 2. Then one final frame:
 
    ```json
