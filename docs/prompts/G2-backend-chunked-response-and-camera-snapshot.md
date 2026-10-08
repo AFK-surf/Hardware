@@ -43,6 +43,8 @@ The firmware is adding a **chunked binary response mode** (G1). The contract is 
 
 3. Or an `error` frame with the same `id`. Discard the partial body.
 
+**Busy during a voice call.** The T-Circle refuses chunk mode while a voice call is dialling or connected: it answers `error` with `"busy: voice call active"`, without touching the network. If a call starts during a transfer, the transfer ends with the same error after the next frame. Treat it as a **temporary** error, not a failure: the agent tells the user "you're on a call, I'll look once you hang up", and it may retry after the call ends. Text-mode `http_request` keeps working during calls.
+
 ## Do
 
 1. **Connector side.**
