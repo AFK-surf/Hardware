@@ -728,6 +728,13 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
     } else if (jr && !cJSON_IsNull(jr)) {
         return error_frame(id, "unsupported response_mode (this device supports \"chunks\")");
     }
+    if (chunk_mode && sink->refuse) {
+        const char *busy = sink->refuse(sink->ctx);
+        if (busy) {
+            ESP_LOGW(TAG, "%s refused: %s", id, busy);
+            return error_frame(id, busy);
+        }
+    }
     const int timeout_max_s = chunk_mode ? LAN_HTTP_CHUNK_TIMEOUT_MAX_S : LAN_HTTP_TIMEOUT_MAX_S;
     const size_t limit_max = chunk_mode ? LAN_HTTP_CHUNK_MAX_TOTAL : LAN_HTTP_MAX_BYTES;
 

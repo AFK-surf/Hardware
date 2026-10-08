@@ -25,8 +25,11 @@
 // waits at most 120 s for the final frame.
 #define LAN_HTTP_CHUNK_TIMEOUT_MAX_S 110
 
-// Where chunk frames go. Both calls are made from inside lan_http_run, in order.
+// Where chunk frames go. All calls are made from inside lan_http_run, in order.
 typedef struct {
+    // Non-NULL: refuse this chunk-mode request with that message, before anything touches the
+    // network (e.g. "busy: voice call active"). NULL (or no callback): go ahead.
+    const char *(*refuse)(void *ctx);
     // Raw body bytes the next frame should carry: 1..LAN_HTTP_CHUNK_BYTES.
     size_t (*frame_bytes)(void *ctx);
     // Sends one whole frame (JSON text, len bytes) carrying raw_bytes of the body, blocking until it

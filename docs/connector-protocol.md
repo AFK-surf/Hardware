@@ -146,7 +146,7 @@ For bodies that are binary or bigger than the text cap, e.g. a camera snapshot (
    - An empty body: no chunk frames, `chunks: 0`, sha256 of nothing (`e3b0c442…b855`).
 3. On failure part-way (LAN server closed early, the device's link to the server stalled for 10 s, access turned off mid-transfer), one `error` frame with the same `id` instead of the final frame. Discard the chunks received so far.
 
-Same gates as text mode: access (read-only → `error`, no network), LAN destinations only, no redirects. `timeout_seconds` is capped at 110 s in chunk mode (30 s in text mode) and covers the whole transfer.
+Same gates as text mode: access (read-only → `error`, no network), LAN destinations only, no redirects. **While a voice call is active, T-Circle refuses chunk mode** with `error` `busy: voice call active` without touching the network, and a call that starts mid-transfer ends the transfer with that `error`; text mode is unaffected. `timeout_seconds` is capped at 110 s in chunk mode (30 s in text mode) and covers the whole transfer.
 
 ### `device_access`
 Params `{"allow_operations": bool}`. Anything else → `error` `allow_operations must be a boolean`.
@@ -176,7 +176,8 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 | Pending requests per socket | 256; T-Circle can handle them one at a time but must answer each |
 | Max frame | 16 MiB server side. T-Circle: cap `http_request` bodies at e.g. 32 KiB and report `truncated` (the MCP path asks for `max_bytes` = 10 MiB) |
 | T-Circle `http_request` caps | Text mode: 64 KiB body, 30 s. Chunk mode: 4 MiB in all, 110 s for the whole transfer |
-| T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified. During a voice call: 4 KiB frames, at most 32 KiB/s (transfers during calls still hurt them, see reports/G1-report.md) |
+| T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified |
+| Chunk mode during a voice call | Refused: `error` `busy: voice call active`, before any network use. A call that starts mid-transfer ends it with the same `error`. Retry after the call (G1 report: a transfer alongside a call froze the board's Wi-Fi) |
 | Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |
 
 ## 7. Reconnect

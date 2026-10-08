@@ -141,6 +141,20 @@ Reading it:
 - **Call 1's freeze matches Wi-Fi RX buffer exhaustion.** Paced reads leave the LAN socket's data unread. With zero-copy RX, every unread packet holds a Wi-Fi buffer (internal RAM: −42 KB). When they run out, the radio drops everything, ACKs included. The IDF help text for `LWIP_L2_TO_L3_COPY` describes exactly this. With the copy setting the freeze was gone.
 - **Call 4's clipping mic is not explained.** It showed up only on builds with the copy setting, but two calls aren't enough to blame it. CPU0 averaged 63 % in that call vs 36 % in the baseline (base64, sha256 and copies alongside voice).
 
+### Protection added afterwards (no call needed to test)
+
+The firmware now refuses chunk mode during a call:
+- **A request that arrives while a voice call is connecting or up** gets `error` `busy: voice call active` before anything touches the network: no DNS, no connect, no frames. This goes through a new `refuse()` hook on the sink, which `connector.c` answers from `cue_voice_state()`.
+- **A call that starts mid-transfer** fails the next frame's send with the same message, so the transfer ends with that `error`.
+- **Text mode** is unaffected.
+- **The call pacing (4 KB / 32 KB/s) is removed**: it can no longer happen.
+- **Host tests: 251 passed.** The four new checks all fail with the check disabled:
+  - the busy error during a call, with no connect and no frames;
+  - busy is checked before DNS;
+  - text mode carries on during a call;
+  - a call mid-transfer ends after 3 frames with the busy error.
+- Concurrent transfer + call stays a later optimisation (*Next* 1–3).
+
 ### Left on the board tonight
 
 - **Normal build, flashed 22:30**: the G1 code with 4 KB / 32 KB/s pacing during calls, **without** the copy setting (`sdkconfig` reverted to what calls were proven on). It dialed `wss://salix-staging.comma.surf` with the saved token, device `dev_jueVjQgP8FlzV8H0NpJVRg`, and metadata advertises `response_chunks`.

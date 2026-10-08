@@ -69,10 +69,10 @@
 #define CHUNK_GATED_BYTES (8 * 1024)
 // No room for a frame for this long: give up with an error frame (V1's no-progress limit).
 #define CHUNK_STALL_LIMIT_MS 10000
-// During a voice call: smaller frames, paced to this many raw bytes per second, so Wi-Fi airtime
-// goes to voice first. At 64 KB/s in 8 KB frames the call's uplink dropped 5-15 mic frames a second.
-#define CHUNK_CALL_FRAME_BYTES (4 * 1024)
-#define CHUNK_CALL_BUDGET_BPS (32 * 1024)
+// No chunk transfers during a voice call, for now: on the board a transfer alongside a call froze
+// the whole Wi-Fi link (docs/reports/G1-report.md). A request that arrives during a call is refused
+// before any network use; a call that starts mid-transfer ends the transfer with the same error.
+#define CALL_BUSY_MESSAGE "busy: voice call active"
 
 // Dev builds only (main/CMakeLists.txt): run lan_discover every N seconds through the LAN worker and
 // its access gate, and log the reply, for testing on the board before the backend can ask for it.
@@ -534,14 +534,12 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root)
 
 typedef struct {
     unsigned session;  // the socket the request came in on; chunks never go out on another
-    int64_t next_us;   // call pacing: earliest time the next frame may go
     unsigned frames;
     size_t wire_bytes;
     int64_t send_max_us;  // longest gate wait + write for one frame
     int64_t started_us;
     size_t internal_min;  // lowest internal free seen during the transfer
     bool gated;           // every frame passed the writable gate
-    bool paced;           // a call was up for at least one frame
 } chunk_ctx_t;
 
 static bool call_active(void)
@@ -550,12 +548,15 @@ static bool call_active(void)
     return state == CUE_VOICE_UP || state == CUE_VOICE_CONNECTING;
 }
 
+static const char *chunk_refuse(void *arg)
+{
+    (void)arg;
+    return call_active() ? CALL_BUSY_MESSAGE : NULL;
+}
+
 static size_t chunk_frame_bytes(void *arg)
 {
     (void)arg;
-    if (call_active()) {
-        return CHUNK_CALL_FRAME_BYTES;
-    }
     // Unidentified socket: no gate, so fewer, bigger frames; each write may block (up to the limit).
     return s_conn_fd >= 0 ? CHUNK_GATED_BYTES : LAN_HTTP_CHUNK_BYTES;
 }
@@ -613,23 +614,16 @@ static bool chunk_wait_room(chunk_ctx_t *c, char *err, size_t err_size)
 static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_bytes, char *err, size_t err_size)
 {
     chunk_ctx_t *c = arg;
+    (void)raw_bytes;
     if (!s_allow_operations) {
         snprintf(err, err_size, "method \"http_request\" is not permitted for a local_file_read connector");
         return false;
     }
-    // During a call: at most CHUNK_CALL_BUDGET_BPS, so the voice uplink and downlink keep their share.
-    int64_t now = esp_timer_get_time();
     if (call_active()) {
-        c->paced = true;
-        if (c->next_us > now) {
-            vTaskDelay(pdMS_TO_TICKS((c->next_us - now + 999) / 1000));
-            now = esp_timer_get_time();
-        }
-        c->next_us = now + (int64_t)raw_bytes * 1000000 / CHUNK_CALL_BUDGET_BPS;
-    } else {
-        c->next_us = 0;
+        snprintf(err, err_size, "%s", CALL_BUSY_MESSAGE);
+        return false;
     }
-    const int64_t start = now;
+    const int64_t start = esp_timer_get_time();
     if (!chunk_wait_room(c, err, err_size)) {
         return false;
     }
@@ -665,14 +659,15 @@ static char *run_http_request(const lan_job_t *job)
         .gated = s_conn_fd >= 0,
     };
     const size_t internal_before = ctx.internal_min;
-    const lan_http_sink_t sink = {.frame_bytes = chunk_frame_bytes, .send = chunk_send, .ctx = &ctx};
+    const lan_http_sink_t sink = {
+        .refuse = chunk_refuse, .frame_bytes = chunk_frame_bytes, .send = chunk_send, .ctx = &ctx};
     char *frame = lan_http_run(job->id, job->params, &sink);
     if (ctx.frames > 0) {
-        ESP_LOGI(TAG, "%s chunks: %u frames, %u B on the wire, %lld ms, send_max_ms=%lld, gated=%s, paced=%s, "
+        ESP_LOGI(TAG, "%s chunks: %u frames, %u B on the wire, %lld ms, send_max_ms=%lld, gated=%s, "
                       "internal before %u min %u (lowest since boot %u)",
                  job->id, ctx.frames, (unsigned)ctx.wire_bytes,
                  (long long)((esp_timer_get_time() - ctx.started_us) / 1000), (long long)(ctx.send_max_us / 1000),
-                 ctx.gated ? "yes" : "no", ctx.paced ? "yes" : "no", (unsigned)internal_before,
+                 ctx.gated ? "yes" : "no", (unsigned)internal_before,
                  (unsigned)ctx.internal_min, (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     }
     return frame;

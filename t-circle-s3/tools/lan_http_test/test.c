@@ -156,6 +156,9 @@ static char g_frame[300000];
 // ---- Chunk sink ----------------------------------------------------------------------------------
 
 typedef struct {
+    const char *busy;        // what refuse() answers (NULL = go ahead)
+    unsigned refuse_calls;
+    const char *fail_msg;    // send()'s error at fail_at (default: socket closed)
     size_t frame_bytes;      // what frame_bytes() answers; 0 = alternate 1000 and 5000
     int fail_at;             // send() fails on this frame (1-based); 0 = never
     unsigned calls;          // frame_bytes() calls
@@ -169,6 +172,13 @@ typedef struct {
 } sink_state_t;
 
 static sink_state_t g_sink;
+
+static const char *sink_refuse(void *ctx)
+{
+    sink_state_t *st = ctx;
+    st->refuse_calls++;
+    return st->busy;
+}
 
 static size_t sink_frame_bytes(void *ctx)
 {
@@ -216,7 +226,7 @@ static bool sink_send(void *ctx, const char *frame, size_t len, size_t raw_bytes
 {
     sink_state_t *st = ctx;
     if (st->fail_at && (int)st->frames + 1 == st->fail_at) {
-        snprintf(err, err_size, "the Connector socket closed during the transfer");
+        snprintf(err, err_size, "%s", st->fail_msg ? st->fail_msg : "the Connector socket closed during the transfer");
         return false;
     }
     if (strlen(frame) != len) {
@@ -253,7 +263,8 @@ static bool sink_send(void *ctx, const char *frame, size_t len, size_t raw_bytes
     return true;
 }
 
-static const lan_http_sink_t SINK = {.frame_bytes = sink_frame_bytes, .send = sink_send, .ctx = &g_sink};
+static const lan_http_sink_t SINK = {
+    .refuse = sink_refuse, .frame_bytes = sink_frame_bytes, .send = sink_send, .ctx = &g_sink};
 static const lan_http_sink_t *g_use_sink = &SINK;
 
 static void sink_reset(size_t frame_bytes, int fail_at)
@@ -719,6 +730,35 @@ static void test_chunks(void)
     CHECK(num(result(f), "body_bytes") == LAN_HTTP_MAX_BYTES && cJSON_IsTrue(cJSON_GetObjectItem(result(f), "truncated")) &&
               g_sink.calls == 0 && g_sink.frames == 0 && cJSON_GetObjectItem(result(f), "body_encoding") == NULL,
           "text mode unchanged: %.200s", g_frame);
+    cJSON_Delete(f);
+
+    // A voice call is active: chunk mode is refused with the busy message before any network use
+    // (no DNS, no connect, no frames); text mode carries on as usual.
+    sink_reset(8192, 0);
+    g_sink.busy = "busy: voice call active";
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
+            g_port);
+    CHECK(is_error(f, "busy: voice call active") && strcmp(str(f, "error"), "busy: voice call active") == 0,
+          "busy: %s", g_frame);
+    CHECK(g_connect_host[0] == 0 && g_sink.frames == 0 && g_sink.calls == 0, "busy touched the network: %s, %u frames",
+          g_connect_host, g_sink.frames);
+    cJSON_Delete(f);
+    f = run("{\"url\":\"http://no-such-host.invalid/\",\"response_mode\":\"chunks\"}");
+    CHECK(is_error(f, "busy: voice call active"), "busy before DNS: %s", g_frame);
+    cJSON_Delete(f);
+    const unsigned asked = g_sink.refuse_calls;
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/cl\"}", g_port);
+    CHECK(strcmp(str(result(f), "body"), "hello") == 0 && g_sink.refuse_calls == asked, "text mode during a call: %s",
+          g_frame);
+    cJSON_Delete(f);
+    // A call that starts mid-transfer: refuse() let it start, the 4th send fails with the busy
+    // message (as connector.c does), and the transfer ends with that error after 3 frames.
+    sink_reset(8192, 4);
+    g_sink.fail_msg = "busy: voice call active";
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
+            g_port);
+    CHECK(strcmp(str(f, "error"), "busy: voice call active") == 0 && g_sink.frames == 3 && g_sink.refuse_calls == 1,
+          "call mid-transfer: %u frames, %s", g_sink.frames, g_frame);
     cJSON_Delete(f);
 
     // base64 of the encoder itself, the RFC 4648 §10 vectors.
