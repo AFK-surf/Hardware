@@ -1,6 +1,7 @@
 #include "connector.h"
 #include "net_watchdog.h"
 
+#include "cue_voice.h"
 #include "device_config.h"
 #include "lan_discover.h"
 #include "lan_http.h"
@@ -25,7 +26,9 @@
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 #include "nvs.h"
 
 #define WS_OP_TEXT 0x1
@@ -57,12 +60,31 @@
 #define LAN_WORKER_STACK 8192
 #define LAN_QUEUE_LEN 4
 
+// Chunked http_request replies (G1) go out from the LAN worker as they are read, never through the
+// event queue, so a body is never held whole. Like the voice sender (V1), a frame is written only
+// when the Connector socket passes lwIP's select() writable test, which guarantees more than
+// TCP_SNDLOWAT (12 KB of the 24 KB send buffer) free. A frame of 8 KB raw is ~11 KB of JSON, so the
+// write neither waits in poll_write nor blocks in the socket while holding the client's TX lock, and
+// the websocket task's PING/PONG never times out on that lock behind it.
+#define CHUNK_GATED_BYTES (8 * 1024)
+// No room for a frame for this long: give up with an error frame (V1's no-progress limit).
+#define CHUNK_STALL_LIMIT_MS 10000
+// During a voice call, chunks are paced to this many raw bytes per second.
+#define CHUNK_CALL_BUDGET_BPS (64 * 1024)
+
 // Dev builds only (main/CMakeLists.txt): run lan_discover every N seconds through the LAN worker and
 // its access gate, and log the reply, for testing on the board before the backend can ask for it.
 #ifndef COMMA_LAN_DISCOVER_SELFTEST_S
 #define COMMA_LAN_DISCOVER_SELFTEST_S 0
 #endif
 #define SELFTEST_SESSION UINT_MAX
+
+// Dev builds only (main/CMakeLists.txt): dial this URL instead of the provisioned one, e.g.
+// ws://<mac-ip>:8765/v1/connect for tools/fake_connector.py. The saved credentials are neither
+// changed nor sent: the dial carries a dummy token.
+#ifdef COMMA_CONNECT_URL_OVERRIDE
+#define DEV_OVERRIDE_TOKEN "salix_conn_dev_override"
+#endif
 
 #define SCOPE_READ_ONLY "local_file_read"
 #define SCOPE_OPERATIONS ""
@@ -109,6 +131,14 @@ typedef struct {
 
 static QueueHandle_t s_events;
 static esp_websocket_client_handle_t s_client;
+// Held by the LAN worker while it sends a chunk on s_client, and by the Connector task while it
+// replaces or destroys s_client.
+static SemaphoreHandle_t s_client_mutex;
+// The Connector's socket, for the chunk writable gate; -1 when it couldn't be identified.
+static atomic_int s_conn_fd = -1;
+static struct sockaddr_in s_conn_peer;  // what s_conn_fd was connected to, to notice reuse
+// Before each dial: which lwIP sockets were connected, and to what.
+static struct sockaddr_in s_fd_before[CONFIG_LWIP_MAX_SOCKETS];
 static atomic_bool s_up;
 static atomic_int s_close_code;
 static atomic_int s_handshake_status;
@@ -161,6 +191,12 @@ static bool connector_credentials(credentials_t *out)
         *c = (char)tolower((unsigned char)*c);
     }
     free(cfg);
+#ifdef COMMA_CONNECT_URL_OVERRIDE
+    (void)provisioned;
+    strlcpy(out->url, COMMA_CONNECT_URL_OVERRIDE, sizeof(out->url));
+    strlcpy(out->token, DEV_OVERRIDE_TOKEN, sizeof(out->token));
+    return true;
+#endif
     return provisioned && strncmp(out->url, "ws", 2) == 0 && strncmp(out->token, "salix_conn_", 11) == 0;
 }
 
@@ -386,12 +422,14 @@ static void send_metadata(void)
                      "\"runtime_probe\":false,\"meeting_runtime\":false,"
                      // Not part of salix-connect's set: tells the backend (C2) what this gateway does.
                      "\"lan_gateway\":{\"methods\":[\"http_request\",\"udp_request\",\"lan_discover\"],\"max_bytes\":%d,"
-                     "\"max_timeout_seconds\":%d},"
+                     "\"max_timeout_seconds\":%d,"
+                     "\"response_chunks\":{\"max_total_bytes\":%d,\"chunk_bytes\":%d}},"
                      "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
                      "\"system_info\":{\"client_source\":\"t-circle\",\"hostname\":%s,\"os_type\":\"esp-idf\","
                      "\"arch\":\"xtensa\"%s}}",
-                     current_scope(), LAN_HTTP_MAX_BYTES, LAN_HTTP_TIMEOUT_MAX_S, hostname, collected_at);
+                     current_scope(), LAN_HTTP_MAX_BYTES, LAN_HTTP_TIMEOUT_MAX_S, LAN_HTTP_CHUNK_MAX_TOTAL,
+                     LAN_HTTP_CHUNK_BYTES, hostname, collected_at);
     cJSON_free(hostname);
     if (n <= 0 || (size_t)n >= sizeof(json)) {
         ESP_LOGE(TAG, "metadata does not fit");
@@ -490,6 +528,151 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root)
     }
 }
 
+// ---- Chunked replies (http_request response_mode "chunks") --------------------------------------
+
+typedef struct {
+    unsigned session;  // the socket the request came in on; chunks never go out on another
+    int64_t next_us;   // call pacing: earliest time the next frame may go
+    unsigned frames;
+    size_t wire_bytes;
+    int64_t send_max_us;  // longest gate wait + write for one frame
+    int64_t started_us;
+    size_t internal_min;  // lowest internal free seen during the transfer
+    bool gated;           // every frame passed the writable gate
+    bool paced;           // a call was up for at least one frame
+} chunk_ctx_t;
+
+static bool call_active(void)
+{
+    const cue_voice_state_t state = cue_voice_state();
+    return state == CUE_VOICE_UP || state == CUE_VOICE_CONNECTING;
+}
+
+static size_t chunk_frame_bytes(void *arg)
+{
+    (void)arg;
+    // Unidentified socket: no gate, so fewer, bigger frames; each write may block (up to the limit).
+    return s_conn_fd >= 0 ? CHUNK_GATED_BYTES : LAN_HTTP_CHUNK_BYTES;
+}
+
+// The socket's peer, or false when fd is not a connected socket.
+static bool fd_peer(int fd, struct sockaddr_in *peer)
+{
+    socklen_t len = sizeof(*peer);
+    memset(peer, 0, sizeof(*peer));
+    return getpeername(fd, (struct sockaddr *)peer, &len) == 0 && peer->sin_family == AF_INET;
+}
+
+static bool same_peer(const struct sockaddr_in *a, const struct sockaddr_in *b)
+{
+    return a->sin_port == b->sin_port && a->sin_addr.s_addr == b->sin_addr.s_addr;
+}
+
+// Waits until the Connector socket has room for a gated frame. False after CHUNK_STALL_LIMIT_MS
+// without room, or when the socket is gone.
+static bool chunk_wait_room(chunk_ctx_t *c, char *err, size_t err_size)
+{
+    const int64_t since = esp_timer_get_time();
+    for (;;) {
+        if (c->session != s_session || !s_up) {
+            snprintf(err, err_size, "the Connector socket closed during the transfer");
+            return false;
+        }
+        const int fd = s_conn_fd;
+        struct sockaddr_in peer;
+        if (fd < 0 || !fd_peer(fd, &peer) || !same_peer(&peer, &s_conn_peer)) {
+            c->gated = false;
+            return true;  // can't tell: the write below blocks, up to the same limit
+        }
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(fd, &writable);
+        struct timeval tv = {.tv_sec = 0, .tv_usec = 100 * 1000};
+        const int n = select(fd + 1, NULL, &writable, NULL, &tv);
+        if (n > 0) {
+            return true;
+        }
+        if (n < 0) {
+            c->gated = false;
+            return true;
+        }
+        if (esp_timer_get_time() - since >= CHUNK_STALL_LIMIT_MS * 1000LL) {
+            ESP_LOGW(TAG, "chunk: no room on the Connector socket for %d s, giving up", CHUNK_STALL_LIMIT_MS / 1000);
+            snprintf(err, err_size, "the T-Circle's link to the server made no progress for %d s",
+                     CHUNK_STALL_LIMIT_MS / 1000);
+            return false;
+        }
+    }
+}
+
+static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_bytes, char *err, size_t err_size)
+{
+    chunk_ctx_t *c = arg;
+    if (!s_allow_operations) {
+        snprintf(err, err_size, "method \"http_request\" is not permitted for a local_file_read connector");
+        return false;
+    }
+    // During a call: at most CHUNK_CALL_BUDGET_BPS, so the voice uplink and downlink keep their share.
+    int64_t now = esp_timer_get_time();
+    if (call_active()) {
+        c->paced = true;
+        if (c->next_us > now) {
+            vTaskDelay(pdMS_TO_TICKS((c->next_us - now + 999) / 1000));
+            now = esp_timer_get_time();
+        }
+        c->next_us = now + (int64_t)raw_bytes * 1000000 / CHUNK_CALL_BUDGET_BPS;
+    } else {
+        c->next_us = 0;
+    }
+    const int64_t start = now;
+    if (!chunk_wait_room(c, err, err_size)) {
+        return false;
+    }
+    bool ok = false;
+    if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) == pdTRUE) {
+        ok = c->session == s_session && s_client && esp_websocket_client_is_connected(s_client) &&
+             esp_websocket_client_send_text(s_client, frame, (int)len, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) >= 0;
+        xSemaphoreGive(s_client_mutex);
+    }
+    if (!ok) {
+        snprintf(err, err_size, "sending to the server failed during the transfer");
+        return false;
+    }
+    const int64_t took = esp_timer_get_time() - start;
+    if (took > c->send_max_us) {
+        c->send_max_us = took;
+    }
+    c->frames++;
+    c->wire_bytes += len;
+    const size_t internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (internal < c->internal_min) {
+        c->internal_min = internal;
+    }
+    return true;
+}
+
+static char *run_http_request(const lan_job_t *job)
+{
+    chunk_ctx_t ctx = {
+        .session = job->session,
+        .started_us = esp_timer_get_time(),
+        .internal_min = heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        .gated = s_conn_fd >= 0,
+    };
+    const size_t internal_before = ctx.internal_min;
+    const lan_http_sink_t sink = {.frame_bytes = chunk_frame_bytes, .send = chunk_send, .ctx = &ctx};
+    char *frame = lan_http_run(job->id, job->params, &sink);
+    if (ctx.frames > 0) {
+        ESP_LOGI(TAG, "%s chunks: %u frames, %u B on the wire, %lld ms, send_max_ms=%lld, gated=%s, paced=%s, "
+                      "internal before %u min %u (lowest since boot %u)",
+                 job->id, ctx.frames, (unsigned)ctx.wire_bytes,
+                 (long long)((esp_timer_get_time() - ctx.started_us) / 1000), (long long)(ctx.send_max_us / 1000),
+                 ctx.gated ? "yes" : "no", ctx.paced ? "yes" : "no", (unsigned)internal_before,
+                 (unsigned)ctx.internal_min, (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    }
+    return frame;
+}
+
 static void lan_worker(void *arg)
 {
     (void)arg;
@@ -517,7 +700,7 @@ static void lan_worker(void *arg)
         } else if (job.method == LAN_UDP_REQUEST) {
             frame = lan_udp_run(job.id, job.params);
         } else {
-            frame = lan_http_run(job.id, job.params);
+            frame = run_http_request(&job);
         }
         cJSON_Delete(job.params);
         if (frame && selftest) {
@@ -704,6 +887,54 @@ static bool build_dial(const credentials_t *creds)
     return n > 0 && (size_t)n < sizeof(s_headers);
 }
 
+// The port a dial to s_uri connects to.
+static int dial_port(void)
+{
+    const char *sep = strstr(s_uri, "://");
+    const char *host = sep ? sep + 3 : s_uri;
+    const size_t host_len = strcspn(host, "/?#");
+    const char *colon = memchr(host, ':', host_len);
+    if (colon) {
+        return atoi(colon + 1);
+    }
+    return strncmp(s_uri, "wss://", 6) == 0 ? 443 : 80;
+}
+
+// Before dialing: remember which lwIP sockets are connected, and to what.
+static void conn_fd_snapshot(void)
+{
+    for (int i = 0; i < CONFIG_LWIP_MAX_SOCKETS; ++i) {
+        fd_peer(LWIP_SOCKET_OFFSET + i, &s_fd_before[i]);
+    }
+}
+
+// On open: the Connector socket is the one connection to the dial's port that is new since the
+// snapshot. If the voice call dialed the same port in the same window it's ambiguous, and chunks go
+// out ungated.
+static void conn_fd_find(void)
+{
+    const int port = dial_port();
+    int found = -1;
+    int count = 0;
+    struct sockaddr_in peer;
+    for (int i = 0; i < CONFIG_LWIP_MAX_SOCKETS; ++i) {
+        const int fd = LWIP_SOCKET_OFFSET + i;
+        if (!fd_peer(fd, &peer) || ntohs(peer.sin_port) != port || same_peer(&peer, &s_fd_before[i])) {
+            continue;
+        }
+        count++;
+        found = fd;
+        s_conn_peer = peer;
+    }
+    s_conn_fd = count == 1 ? found : -1;
+    if (count == 1) {
+        ESP_LOGI(TAG, "Connector socket: fd %d", found);
+    } else {
+        ESP_LOGW(TAG, "Connector socket not identified (%d new connections to port %d): chunks go out ungated", count,
+                 port);
+    }
+}
+
 // One connection, from dial to close. Returns how long the socket was open, in microseconds.
 static int64_t run_session(const credentials_t *creds)
 {
@@ -738,8 +969,11 @@ static int64_t run_session(const credentials_t *creds)
     // put in internal RAM. Right after BLE provisioning that has ~12 KB left, too little for them
     // plus the task stack, so steer this one init to PSRAM. Connector traffic is light.
     heap_caps_malloc_extmem_enable(0);
-    s_client = esp_websocket_client_init(&cfg);
+    esp_websocket_client_handle_t client = esp_websocket_client_init(&cfg);
     heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
+    s_client = client;
+    xSemaphoreGive(s_client_mutex);
     if (!s_client) {
         ESP_LOGE(TAG, "websocket client init failed");
         return 0;
@@ -749,6 +983,8 @@ static int64_t run_session(const credentials_t *creds)
     provisioning_set_connector_state("connector_connecting", NULL);
     int64_t opened_us = 0;
     int64_t last_rx_us = esp_timer_get_time();
+    s_conn_fd = -1;
+    conn_fd_snapshot();
     if (esp_websocket_client_start(s_client) != ESP_OK) {
         ESP_LOGE(TAG, "websocket client start failed (heap_internal=%u, largest %u)",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -776,6 +1012,7 @@ static int64_t run_session(const credentials_t *creds)
                 opened_us = last_rx_us;
                 s_heartbeat_us = 0;
                 ESP_LOGI(TAG, "socket open");
+                conn_fd_find();
                 send_metadata();
             } else if (ev.kind == EV_TEXT) {
                 handle_text(ev.data);
@@ -792,8 +1029,11 @@ static int64_t run_session(const credentials_t *creds)
         }
     }
     s_up = false;
-    esp_websocket_client_handle_t client = s_client;
+    s_conn_fd = -1;
+    // Waits for a chunk send in progress (bounded by its own timeout) to finish with the client.
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
     s_client = NULL;
+    xSemaphoreGive(s_client_mutex);
     esp_websocket_client_stop(client);
     esp_websocket_client_destroy(client);
     drain_events();
@@ -883,8 +1123,9 @@ void connector_start(void)
     started = true;
     s_events = xQueueCreate(16, sizeof(event_t));
     s_lan_jobs = xQueueCreate(LAN_QUEUE_LEN, sizeof(lan_job_t));
+    s_client_mutex = xSemaphoreCreateMutex();
     s_rx = heap_caps_malloc(RX_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_events || !s_lan_jobs || !s_rx) {
+    if (!s_events || !s_lan_jobs || !s_client_mutex || !s_rx) {
         ESP_LOGE(TAG, "out of memory, Connector off");
         return;
     }
@@ -894,6 +1135,10 @@ void connector_start(void)
     if (!s_lan_ready) {
         ESP_LOGE(TAG, "LAN worker create failed, http_request, udp_request and lan_discover off");
     }
+#ifdef COMMA_CONNECT_URL_OVERRIDE
+    ESP_LOGW(TAG, "dev build: Connector dials %s with a dummy token, not the saved credentials",
+             COMMA_CONNECT_URL_OVERRIDE);
+#endif
 #if COMMA_LAN_DISCOVER_SELFTEST_S > 0
     ESP_LOGW(TAG, "lan_discover self-test every %d s (dev build)", COMMA_LAN_DISCOVER_SELFTEST_S);
     if (s_lan_ready) {

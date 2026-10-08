@@ -13,3 +13,5 @@ build-v2/
 build-v2off/
 build-bench/
 build-ns/
+build-fake/
+fake_connector_out/

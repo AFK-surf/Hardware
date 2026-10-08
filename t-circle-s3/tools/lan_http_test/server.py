@@ -23,6 +23,11 @@ def read_request(conn):
     return method, path, headers, rest
 
 
+def pattern(n):
+    """Every byte value, in a sequence that doesn't repeat every 256 bytes. test.c builds the same."""
+    return bytes((i ^ (i >> 8) ^ (i >> 16)) & 0xFF for i in range(n))
+
+
 def handle(conn):
     req = read_request(conn)
     if not req:
@@ -56,6 +61,23 @@ def handle(conn):
         send(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nonly ten b")
     elif path == "/garbage":
         send(b"SSH-2.0-OpenSSH\r\n\r\n")
+    elif path.startswith("/pattern/"):  # binary, Content-Length
+        data = pattern(int(path.split("/")[2]))
+        send(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n" % len(data))
+        send(data)
+    elif path.startswith("/pattern-chunked/"):  # binary, Transfer-Encoding: chunked, uneven chunks
+        data = pattern(int(path.split("/")[2]))
+        send(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+        at, step = 0, 1
+        while at < len(data):
+            piece = data[at:at + step]
+            send(b"%x\r\n" % len(piece) + piece + b"\r\n")
+            at += len(piece)
+            step = step * 3 + 1 if step < 20000 else 777
+        send(b"0\r\n\r\n")
+    elif path.startswith("/pattern-close/"):  # binary, HTTP/1.0, ends at close
+        data = pattern(int(path.split("/")[2]))
+        send(b"HTTP/1.0 200 OK\r\nContent-Type: image/jpeg\r\n\r\n" + data)
     elif path == "/status500":
         send(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\n\r\noops")
     else:  # /echo and anything else: what arrived

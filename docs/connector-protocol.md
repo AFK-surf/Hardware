@@ -98,6 +98,11 @@ The server may send **any** method name. Capabilities don't declare methods, so 
            "truncated":false,"final_url":"http://192.168.5.19:8765/mcp","method":"POST","body_bytes":118}}
 ```
 
+**response_chunk** (G1): one piece of a binary `http_request` body, only for a request that asked for `"response_mode":"chunks"`. Echo `id`; `seq` counts from 0 per request. See §4.
+```json
+{"id":"req_7GSGEDzFTz13NEO9","type":"response_chunk","seq":0,"data_b64":"/9j/4AAQSkZJRgABAQ…"}
+```
+
 **error**: echo `id`. The `error` string reaches the agent verbatim.
 ```json
 {"id":"req_eR4BgPf5e2AK4xTo","type":"error","error":"method \"http_request\" is not permitted for a local_file_read connector"}
@@ -114,6 +119,34 @@ Params: `method` (GET/POST/PUT/PATCH/DELETE; default **POST**), `url` (absolute 
 - `body` in the result: UTF-8 text (replace invalid bytes).
 - Errors (bad URL, unsupported method, connect failure, timeout): send an `error` frame with a short message.
 - **Gate:** while access is read-only, reply `error` without touching the network (§5).
+
+#### Chunk mode: binary bodies (G1)
+
+For bodies that are binary or bigger than the text cap, e.g. a camera snapshot (~800 KB JPEG). Shared with the backend task G2.
+
+**Capability.** The gateway advertises it in `metadata`; the server uses chunk mode only on gateways that do:
+```json
+"capabilities":{…,"lan_gateway":{…,"response_chunks":{"max_total_bytes":4194304,"chunk_bytes":32768}}}
+```
+
+**Request.** `http_request` params gain `"response_mode":"chunks"`. Without it (or `null`), behaviour is exactly the text mode above. Any other value → `error`.
+
+**Device → server:**
+1. Zero or more `response_chunk` frames, in order, `seq` from 0. Each carries 1 to `chunk_bytes` raw body bytes, standard base64 with padding. **Frames may be smaller than `chunk_bytes`**, and their sizes may vary: T-Circle sends 8 KB frames (§6). Count the frames; don't compute the count from `chunk_bytes`.
+2. Then exactly one final frame:
+   ```json
+   {"id":"req_…","type":"response","result":{
+     "status":200,"headers":{"Content-Type":["image/jpeg"]},
+     "body_encoding":"chunks","chunks":100,"body_bytes":812662,
+     "sha256":"<lowercase hex of all raw body bytes>","truncated":false,
+     "final_url":"http://…","method":"GET"}}
+   ```
+   - No `body` field. `chunks` = number of chunk frames sent, `body_bytes` = their raw bytes together.
+   - `truncated: true` when the body was longer than `min(max_bytes, max_total_bytes)`. The device stops reading there; `sha256` covers what it sent.
+   - An empty body: no chunk frames, `chunks: 0`, sha256 of nothing (`e3b0c442…b855`).
+3. On failure part-way (LAN server closed early, the device's link to the server stalled for 10 s, access turned off mid-transfer), one `error` frame with the same `id` instead of the final frame. Discard the chunks received so far.
+
+Same gates as text mode: access (read-only → `error`, no network), LAN destinations only, no redirects. `timeout_seconds` is capped at 110 s in chunk mode (30 s in text mode) and covers the whole transfer.
 
 ### `device_access`
 Params `{"allow_operations": bool}`. Anything else → `error` `allow_operations must be a boolean`.
@@ -142,6 +175,9 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 | Late reply (after the server timed out) | Silently dropped |
 | Pending requests per socket | 256; T-Circle can handle them one at a time but must answer each |
 | Max frame | 16 MiB server side. T-Circle: cap `http_request` bodies at e.g. 32 KiB and report `truncated` (the MCP path asks for `max_bytes` = 10 MiB) |
+| T-Circle `http_request` caps | Text mode: 64 KiB body, 30 s. Chunk mode: 4 MiB in all, 110 s for the whole transfer |
+| T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified. At most 64 KiB/s during a voice call |
+| Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |
 
 ## 7. Reconnect
 

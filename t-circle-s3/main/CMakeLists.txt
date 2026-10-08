@@ -5,7 +5,7 @@ idf_component_register(SRCS "main.c" "display.c" "board_audio.c" "board_touch.c"
                        PRIV_REQUIRES esp_lcd esp_lcd_gc9d01 esp_driver_spi esp_driver_gpio
                                     esp_driver_i2s esp_driver_i2c esp_driver_tsens esp_timer heap freertos
                                     esp_wifi esp_event esp_netif nvs_flash bt esp_app_format
-                                    esp_websocket_client esp-tls cjson tcp_transport http_parser lwip esp-sr
+                                    esp_websocket_client esp-tls mbedtls cjson tcp_transport http_parser lwip esp-sr
                        EMBED_FILES "cue_logo.bin"
                        LDFRAGMENTS "voice_clean.lf")
 
@@ -18,6 +18,12 @@ endif()
 # each round (udp_request).
 if(COMMA_LAN_DISCOVER_SELFTEST_S AND COMMA_UDP_SELFTEST_HOST)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_UDP_SELFTEST_HOST="${COMMA_UDP_SELFTEST_HOST}")
+endif()
+# Dev only: `idf.py -B build-fake -DCOMMA_CONNECT_URL_OVERRIDE=ws://<mac-ip>:8765/v1/connect build` dials
+# tools/fake_connector.py instead of the provisioned Connector, with a dummy token; the saved
+# credentials are left alone (connector.c). Use a separate build directory: the cache keeps the value.
+if(COMMA_CONNECT_URL_OVERRIDE)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_CONNECT_URL_OVERRIDE="${COMMA_CONNECT_URL_OVERRIDE}")
 endif()
 # V2 off (one flag): `idf.py -B build-v2off -DCOMMA_VOICE_CLEAN_OFF=1 build` keeps the raw 24 kHz mic on
 # the wire, as before V2, for comparison (voice_clean.h).

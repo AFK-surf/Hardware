@@ -23,6 +23,7 @@
 #include "http_parser.h"
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
+#include "psa/crypto.h"
 
 #define HOST_MAX 253
 #define READ_CHUNK 2048
@@ -253,6 +254,131 @@ static bool parse_url(const char *url, url_t *u, char *err)
     return true;
 }
 
+// ---- Chunk mode ---------------------------------------------------------------------------------
+
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// Standard base64 with padding (RFC 4648 §4), not NUL-terminated. Returns the length,
+// 4 * ceil(n / 3).
+static size_t b64_encode(const uint8_t *in, size_t n, char *out)
+{
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        const uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? in[i + 2] : 0);
+        out[o++] = B64[(v >> 18) & 63];
+        out[o++] = B64[(v >> 12) & 63];
+        out[o++] = i + 1 < n ? B64[(v >> 6) & 63] : '=';
+        out[o++] = i + 2 < n ? B64[v & 63] : '=';
+    }
+    return o;
+}
+
+#define B64_LEN(n) (((n) + 2) / 3 * 4)
+
+// One transfer's state: the pending raw bytes of the next frame, and the frame buffer they are
+// encoded into. Both are allocated once per transfer (PSRAM) and reused for every frame.
+typedef struct {
+    const lan_http_sink_t *sink;
+    uint8_t *raw;
+    size_t raw_len;
+    size_t want;     // raw bytes for the frame being filled
+    char *frame;     // starts with the fixed prefix {"id":"…","type":"response_chunk","seq":
+    size_t prefix_len;
+    unsigned seq;    // frames sent
+    psa_hash_operation_t sha;
+    bool failed;
+    char err[ERR_MAX];
+} chunks_t;
+
+static size_t chunk_want(const chunks_t *c)
+{
+    const size_t n = c->sink->frame_bytes(c->sink->ctx);
+    return n == 0 ? 1 : n > LAN_HTTP_CHUNK_BYTES ? LAN_HTTP_CHUNK_BYTES : n;
+}
+
+static bool chunks_init(chunks_t *c, const lan_http_sink_t *sink, const char *id)
+{
+    memset(c, 0, sizeof(*c));
+    c->sink = sink;
+    sb_t prefix = {0};
+    sb_str(&prefix, "{\"id\":");
+    sb_json(&prefix, id, strlen(id));
+    sb_str(&prefix, ",\"type\":\"response_chunk\",\"seq\":");
+    c->raw = heap_caps_malloc(LAN_HTTP_CHUNK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // prefix, seq, the data_b64 key, the base64 text, the closing "} and a NUL
+    c->frame = heap_caps_malloc(prefix.len + 16 + 16 + B64_LEN(LAN_HTTP_CHUNK_BYTES) + 4,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    c->sha = psa_hash_operation_init();
+    const bool ok = !prefix.oom && c->raw && c->frame && psa_hash_setup(&c->sha, PSA_ALG_SHA_256) == PSA_SUCCESS;
+    if (ok) {
+        memcpy(c->frame, prefix.p, prefix.len);
+        c->prefix_len = prefix.len;
+        c->want = chunk_want(c);
+    }
+    sb_free(&prefix);
+    return ok;
+}
+
+static void chunks_free(chunks_t *c)
+{
+    psa_hash_abort(&c->sha);
+    free(c->raw);
+    free(c->frame);
+    c->raw = NULL;
+    c->frame = NULL;
+}
+
+// Sends the pending bytes as the next frame. False once sending has failed.
+static bool chunks_flush(chunks_t *c)
+{
+    if (c->failed) {
+        return false;
+    }
+    if (c->raw_len == 0) {
+        return true;
+    }
+    if (psa_hash_update(&c->sha, c->raw, c->raw_len) != PSA_SUCCESS) {
+        snprintf(c->err, sizeof(c->err), "hashing the response failed");
+        c->failed = true;
+        return false;
+    }
+    size_t n = c->prefix_len;
+    n += (size_t)sprintf(c->frame + n, "%u,\"data_b64\":\"", c->seq);
+    n += b64_encode(c->raw, c->raw_len, c->frame + n);
+    memcpy(c->frame + n, "\"}", 3);
+    n += 2;
+    if (!c->sink->send(c->sink->ctx, c->frame, n, c->raw_len, c->err, sizeof(c->err))) {
+        if (!c->err[0]) {
+            snprintf(c->err, sizeof(c->err), "sending the response to the server failed");
+        }
+        c->failed = true;
+        return false;
+    }
+    c->seq++;
+    c->raw_len = 0;
+    c->want = chunk_want(c);
+    return true;
+}
+
+// Body bytes in chunk mode: fill the frame buffer, send it whenever it holds `want` bytes.
+static bool chunks_add(chunks_t *c, const char *at, size_t len)
+{
+    while (len > 0) {
+        size_t take = c->want - c->raw_len;
+        if (take > len) {
+            take = len;
+        }
+        memcpy(c->raw + c->raw_len, at, take);
+        c->raw_len += take;
+        at += take;
+        len -= take;
+        if (c->raw_len >= c->want && !chunks_flush(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // ---- Response parsing --------------------------------------------------------------------------
 
 typedef struct {
@@ -266,7 +392,9 @@ typedef struct {
     bool headers_done;
     bool complete;
     sb_t body;
-    size_t limit;  // keep at most limit bytes; one more means truncated
+    chunks_t *chunks;   // chunk mode: the body streams out here instead of into body
+    size_t body_bytes;  // body bytes taken (kept or sent)
+    size_t limit;       // take at most limit bytes; one more means truncated
     bool truncated;
     bool oom;
 } resp_t;
@@ -354,16 +482,26 @@ static int on_headers_complete(http_parser *p)
 static int on_body(http_parser *p, const char *at, size_t len)
 {
     resp_t *r = p->data;
-    const size_t room = r->limit - r->body.len;
-    if (len > room) {
-        sb_add(&r->body, at, room);
+    const size_t room = r->limit - r->body_bytes;
+    const bool over = len > room;
+    if (over) {
+        len = room;
+    }
+    if (r->chunks) {
+        if (!chunks_add(r->chunks, at, len)) {
+            return 1;
+        }
+    } else {
+        sb_add(&r->body, at, len);
+        if (r->body.oom) {
+            r->oom = true;
+            return 1;
+        }
+    }
+    r->body_bytes += len;
+    if (over) {
         r->truncated = true;
         return 1;  // enough: stop reading
-    }
-    sb_add(&r->body, at, len);
-    if (r->body.oom) {
-        r->oom = true;
-        return 1;
     }
     return 0;
 }
@@ -495,7 +633,8 @@ static bool write_all(esp_transport_handle_t t, const char *p, size_t n, int64_t
     return true;
 }
 
-static char *response_frame(const char *id, int status, const resp_t *r, const char *url, const char *method)
+static char *response_frame(const char *id, int status, const resp_t *r, const char *url, const char *method,
+                            const char *sha256_hex)
 {
     char *headers = cJSON_PrintUnformatted(r->headers);
     sb_t b = {0};
@@ -505,14 +644,21 @@ static char *response_frame(const char *id, int status, const resp_t *r, const c
     snprintf(num, sizeof(num), ",\"type\":\"response\",\"result\":{\"status\":%d,\"headers\":", status);
     sb_str(&b, num);
     sb_str(&b, headers ? headers : "{}");
-    sb_str(&b, ",\"body\":");
-    sb_json(&b, r->body.p ? r->body.p : "", r->body.len);
+    if (r->chunks) {
+        snprintf(num, sizeof(num), ",\"body_encoding\":\"chunks\",\"chunks\":%u,\"sha256\":\"", r->chunks->seq);
+        sb_str(&b, num);
+        sb_str(&b, sha256_hex);
+        sb_str(&b, "\"");
+    } else {
+        sb_str(&b, ",\"body\":");
+        sb_json(&b, r->body.p ? r->body.p : "", r->body.len);
+    }
     sb_str(&b, r->truncated ? ",\"truncated\":true" : ",\"truncated\":false");
     sb_str(&b, ",\"final_url\":");
     sb_json(&b, url, strlen(url));
     sb_str(&b, ",\"method\":");
     sb_json(&b, method, strlen(method));
-    snprintf(num, sizeof(num), ",\"body_bytes\":%u}}", (unsigned)r->body.len);
+    snprintf(num, sizeof(num), ",\"body_bytes\":%u}}", (unsigned)r->body_bytes);
     sb_str(&b, num);
     cJSON_free(headers);
     if (b.oom || !headers) {
@@ -521,7 +667,25 @@ static char *response_frame(const char *id, int status, const resp_t *r, const c
     return b.p;
 }
 
-char *lan_http_run(const char *id, const cJSON *params)
+// The chunk transfer's end: the last frame, then the digest as lowercase hex (65 bytes).
+static bool chunks_finish(chunks_t *c, char *hex)
+{
+    if (!chunks_flush(c)) {
+        return false;
+    }
+    uint8_t digest[32];
+    size_t digest_len = 0;
+    if (psa_hash_finish(&c->sha, digest, sizeof(digest), &digest_len) != PSA_SUCCESS || digest_len != 32) {
+        snprintf(c->err, sizeof(c->err), "hashing the response failed");
+        return false;
+    }
+    for (size_t i = 0; i < 32; ++i) {
+        sprintf(hex + 2 * i, "%02x", digest[i]);
+    }
+    return true;
+}
+
+char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *sink)
 {
     char err[ERR_MAX] = "";
     const int64_t started_us = esp_timer_get_time();
@@ -553,15 +717,29 @@ char *lan_http_run(const char *id, const cJSON *params)
         return error_frame(id, err);
     }
 
+    // Chunk mode only when asked for; anything else stays exactly the text mode it always was.
+    const cJSON *jr = cJSON_GetObjectItemCaseSensitive(params, "response_mode");
+    bool chunk_mode = false;
+    if (cJSON_IsString(jr) && strcmp(jr->valuestring, "chunks") == 0) {
+        if (!sink) {
+            return error_frame(id, "response_mode \"chunks\" is not available here");
+        }
+        chunk_mode = true;
+    } else if (jr && !cJSON_IsNull(jr)) {
+        return error_frame(id, "unsupported response_mode (this device supports \"chunks\")");
+    }
+    const int timeout_max_s = chunk_mode ? LAN_HTTP_CHUNK_TIMEOUT_MAX_S : LAN_HTTP_TIMEOUT_MAX_S;
+    const size_t limit_max = chunk_mode ? LAN_HTTP_CHUNK_MAX_TOTAL : LAN_HTTP_MAX_BYTES;
+
     const cJSON *jt = cJSON_GetObjectItemCaseSensitive(params, "timeout_seconds");
     // salix-connect's default (120 s) is over the device cap, so no value or a bad one means the cap.
-    int timeout_s = LAN_HTTP_TIMEOUT_MAX_S;
-    if (cJSON_IsNumber(jt) && jt->valuedouble >= 1 && jt->valuedouble < LAN_HTTP_TIMEOUT_MAX_S) {
+    int timeout_s = timeout_max_s;
+    if (cJSON_IsNumber(jt) && jt->valuedouble >= 1 && jt->valuedouble < timeout_max_s) {
         timeout_s = (int)jt->valuedouble;
     }
     const cJSON *jx = cJSON_GetObjectItemCaseSensitive(params, "max_bytes");
     double max_bytes = cJSON_IsNumber(jx) ? jx->valuedouble : 0;
-    const size_t limit = (max_bytes <= 0 || max_bytes > LAN_HTTP_MAX_BYTES) ? LAN_HTTP_MAX_BYTES : (size_t)max_bytes;
+    const size_t limit = (max_bytes <= 0 || max_bytes > limit_max) ? limit_max : (size_t)max_bytes;
 
     const cJSON *jb = cJSON_GetObjectItemCaseSensitive(params, "body");
     const char *body = cJSON_IsString(jb) ? jb->valuestring : "";
@@ -587,7 +765,13 @@ char *lan_http_run(const char *id, const cJSON *params)
     char *buf = heap_caps_malloc(READ_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     char *frame = NULL;
     int status = 0;
-    if (!t || !r.headers || !buf) {
+    chunks_t chunks;
+    bool chunks_ready = false;
+    if (chunk_mode) {
+        chunks_ready = chunks_init(&chunks, sink, id);
+        r.chunks = &chunks;
+    }
+    if (!t || !r.headers || !buf || (chunk_mode && !chunks_ready)) {
         snprintf(err, sizeof(err), "out of memory");
         goto done;
     }
@@ -598,8 +782,8 @@ char *lan_http_run(const char *id, const cJSON *params)
         esp_transport_ssl_set_common_name(t, url.host);
     }
 
-    ESP_LOGI(TAG, "%s %s %s:%d%s (timeout %d s, max %u B)", id, method, url.host, url.port, url.https ? " tls" : "",
-             timeout_s, (unsigned)limit);
+    ESP_LOGI(TAG, "%s %s %s:%d%s (timeout %d s, max %u B%s)", id, method, url.host, url.port, url.https ? " tls" : "",
+             timeout_s, (unsigned)limit, chunk_mode ? ", chunks" : "");
     if (esp_transport_connect(t, ip_text, url.port, remaining_ms(deadline_us)) < 0) {
         const int e = esp_transport_get_errno(t);
         if (remaining_ms(deadline_us) == 0) {
@@ -650,6 +834,10 @@ char *lan_http_run(const char *id, const cJSON *params)
             break;
         }
         const size_t used = http_parser_execute(&parser, &settings, buf, (size_t)n);
+        if (chunk_mode && chunks.failed) {
+            strlcpy(err, chunks.err, sizeof(err));
+            goto done;
+        }
         if (r.oom) {
             snprintf(err, sizeof(err), "out of memory reading the response");
             goto done;
@@ -662,14 +850,27 @@ char *lan_http_run(const char *id, const cJSON *params)
         }
     }
     status = parser.status_code;
-    frame = response_frame(id, status, &r, url_text, method);
+    char sha256_hex[65] = "";
+    if (chunk_mode && !chunks_finish(&chunks, sha256_hex)) {
+        strlcpy(err, chunks.err, sizeof(err));
+        goto done;
+    }
+    frame = response_frame(id, status, &r, url_text, method, sha256_hex);
     if (!frame) {
         snprintf(err, sizeof(err), "out of memory building the response");
     }
 
-done:
-    ESP_LOGI(TAG, "%s -> %s%d, %u B%s, %lld ms", id, frame ? "" : "error ", frame ? status : 0, (unsigned)r.body.len,
-             r.truncated ? " (truncated)" : "", (long long)((esp_timer_get_time() - started_us) / 1000));
+done:;
+    const int64_t took_ms = (esp_timer_get_time() - started_us) / 1000;
+    if (chunk_mode) {
+        ESP_LOGI(TAG, "%s -> %s%d, %u B in %u chunks%s, %lld ms (%lld KB/s)", id, frame ? "" : "error ",
+                 frame ? status : 0, (unsigned)r.body_bytes, chunks_ready ? chunks.seq : 0,
+                 r.truncated ? " (truncated)" : "", (long long)took_ms,
+                 (long long)(took_ms > 0 ? (int64_t)r.body_bytes * 1000 / 1024 / took_ms : 0));
+    } else {
+        ESP_LOGI(TAG, "%s -> %s%d, %u B%s, %lld ms", id, frame ? "" : "error ", frame ? status : 0,
+                 (unsigned)r.body_bytes, r.truncated ? " (truncated)" : "", (long long)took_ms);
+    }
     if (!frame) {
         ESP_LOGW(TAG, "%s failed: %s", id, err);
         frame = error_frame(id, err);
@@ -679,6 +880,9 @@ done:
         esp_transport_destroy(t);
     }
     free(buf);
+    if (chunk_mode) {
+        chunks_free(&chunks);
+    }
     sb_free(&req);
     sb_free(&r.value);
     sb_free(&r.body);
