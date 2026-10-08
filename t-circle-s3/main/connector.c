@@ -8,6 +8,7 @@
 #include "provisioning.h"
 #include "wifi.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -101,6 +102,8 @@ typedef struct {
 typedef struct {
     char url[160];
     char token[160];
+    char name[64];        // the name saved at setup, or Comma-XXXX
+    char alias[16];       // comma-xxxx: stable across renames, ends in the short id the backend matches
     unsigned generation;  // device_config_generation() these were read at
 } credentials_t;
 
@@ -116,8 +119,11 @@ static bool s_lan_ready;
 // already failed requests from a closed one.
 static atomic_uint s_session;
 static char s_instance_id[37];
-static char s_uri[384];
+// Room for a 159-byte connect_url plus a 63-byte name fully percent-encoded.
+static char s_uri[512];
 static char s_headers[512];
+// The name of the current dial, for metadata's hostname. Connector task only.
+static char s_name[64];
 
 static uint8_t *s_rx;
 static size_t s_frame_got;
@@ -141,7 +147,19 @@ static bool connector_credentials(credentials_t *out)
     const bool provisioned = device_config_get(cfg);
     strlcpy(out->url, cfg->connect_url, sizeof(out->url));
     strlcpy(out->token, cfg->connector_token, sizeof(out->token));
+    strlcpy(out->name, cfg->device_name, sizeof(out->name));
     memset(cfg, 0, sizeof(*cfg));
+    // The Android app sends device_name at setup and mints the token with it. An older or empty
+    // provisioning falls back to the BLE name, never a model name the backend cannot match.
+    char ble_name[16];
+    provisioning_ble_name(ble_name, sizeof(ble_name));
+    if (out->name[strspn(out->name, " ")] == '\0') {
+        strlcpy(out->name, ble_name, sizeof(out->name));
+    }
+    strlcpy(out->alias, ble_name, sizeof(out->alias));
+    for (char *c = out->alias; *c; ++c) {
+        *c = (char)tolower((unsigned char)*c);
+    }
     free(cfg);
     return provisioned && strncmp(out->url, "ws", 2) == 0 && strncmp(out->token, "salix_conn_", 11) == 0;
 }
@@ -351,7 +369,16 @@ static void send_metadata(void)
     if (now > 1700000000) {
         snprintf(collected_at, sizeof(collected_at), ",\"collected_at\":%lld", (long long)now);
     }
-    char json[768];
+    // hostname is what Settings › Devices shows (until the user renames it there).
+    cJSON *hostname_str = cJSON_CreateString(s_name);
+    char *hostname = hostname_str ? cJSON_PrintUnformatted(hostname_str) : NULL;
+    cJSON_Delete(hostname_str);
+    if (!hostname) {
+        ESP_LOGE(TAG, "metadata: out of memory");
+        return;
+    }
+    // Connector task only, so static keeps it off the task stack.
+    static char json[1024];
     int n = snprintf(json, sizeof(json),
                      "{\"type\":\"metadata\","
                      "\"capabilities\":{\"scope\":\"%s\",\"device_access\":true,\"execution_boundary\":\"lan-gateway\","
@@ -362,9 +389,10 @@ static void send_metadata(void)
                      "\"max_timeout_seconds\":%d},"
                      "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
-                     "\"system_info\":{\"client_source\":\"t-circle\",\"hostname\":\"T-Circle\",\"os_type\":\"esp-idf\","
+                     "\"system_info\":{\"client_source\":\"t-circle\",\"hostname\":%s,\"os_type\":\"esp-idf\","
                      "\"arch\":\"xtensa\"%s}}",
-                     current_scope(), LAN_HTTP_MAX_BYTES, LAN_HTTP_TIMEOUT_MAX_S, collected_at);
+                     current_scope(), LAN_HTTP_MAX_BYTES, LAN_HTTP_TIMEOUT_MAX_S, hostname, collected_at);
+    cJSON_free(hostname);
     if (n <= 0 || (size_t)n >= sizeof(json)) {
         ESP_LOGE(TAG, "metadata does not fit");
         return;
@@ -632,11 +660,42 @@ static void drain_events(void)
     }
 }
 
+// Percent-encode src (UTF-8 bytes) for a query value: RFC 3986 unreserved characters pass through.
+// Returns false when it does not fit.
+static bool url_encode(char *dst, size_t size, const char *src)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)src; *p; ++p) {
+        if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '~') {
+            if (n + 1 >= size) {
+                return false;
+            }
+            dst[n++] = (char)*p;
+        } else {
+            if (n + 3 >= size) {
+                return false;
+            }
+            dst[n++] = '%';
+            dst[n++] = HEX[*p >> 4];
+            dst[n++] = HEX[*p & 0xF];
+        }
+    }
+    dst[n] = '\0';
+    return true;
+}
+
 static bool build_dial(const credentials_t *creds)
 {
+    char name[3 * sizeof(creds->name)];
+    char alias[3 * sizeof(creds->alias)];
+    if (!url_encode(name, sizeof(name), creds->name) || !url_encode(alias, sizeof(alias), creds->alias)) {
+        return false;
+    }
+    strlcpy(s_name, creds->name, sizeof(s_name));
     // scope goes on every dial, or a reconnect leaves the device with no command environment.
-    int n = snprintf(s_uri, sizeof(s_uri), "%s?name=T-Circle&alias=tcircle&os=esp-idf&arch=xtensa&scope=%s",
-                     creds->url, current_scope());
+    int n = snprintf(s_uri, sizeof(s_uri), "%s?name=%s&alias=%s&os=esp-idf&arch=xtensa&scope=%s", creds->url,
+                     name, alias, current_scope());
     if (n <= 0 || (size_t)n >= sizeof(s_uri)) {
         return false;
     }

@@ -1022,6 +1022,13 @@ static void prov_task(void *arg)
 
 // ---- API ----------------------------------------------------------------------------------------
 
+void provisioning_ble_name(char *out, size_t size)
+{
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(out, size, "Comma-%02X%02X", mac[4], mac[5]);
+}
+
 esp_err_t provisioning_start(void)
 {
     if (s_active || s_task_running) {
@@ -1037,7 +1044,7 @@ esp_err_t provisioning_start(void)
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     memcpy(s_short_id, &mac[4], sizeof(s_short_id));
-    snprintf(s_name, sizeof(s_name), "Comma-%02X%02X", mac[4], mac[5]);
+    provisioning_ble_name(s_name, sizeof(s_name));
     snprintf(s_mac, sizeof(s_mac), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     s_active = true;

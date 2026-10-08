@@ -9,7 +9,7 @@ A connector token (`salix_conn_…`) is minted per device:
 
 ```
 POST /v1/comma/workspaces/:ws/connector-token      (user session, full workspace session)
-{"name": "T-Circle", "alias": "tcircle"}
+{"name": "Comma-5D28"}      (the Android app: the device_name it then writes over BLE)
 → 201 {"token": "salix_conn_…", "device_id": "dev_…", "connector_id": "conn_…",
         "connect_url": "wss://<salix-host>/v1/connect", "server": "wss://<salix-host>",
         "credential_generation": 1, "expires_at": null, …}
@@ -22,7 +22,7 @@ POST /v1/comma/workspaces/:ws/connector-token      (user session, full workspace
 ## 2. Dial
 
 ```
-GET {connect_url}?name=T-Circle&alias=tcircle&os=esp-idf&arch=xtensa&scope=<scope>
+GET {connect_url}?name=Comma-5D28&alias=comma-5d28&os=esp-idf&arch=xtensa&scope=<scope>
 Authorization: Bearer salix_conn_…
 X-Salix-Connector-Instance-ID: <random UUID per boot>
 (normal WebSocket upgrade, no permessage-deflate)
@@ -32,8 +32,8 @@ X-Salix-Connector-Instance-ID: <random UUID per boot>
 |---|---|---|
 | `Authorization` | **yes** | Header only. `Bearer ` prefix optional; a token in the query string is rejected (401). |
 | `scope` | **yes, in practice** | `""` (operations allowed) or `local_file_read` (read-only). Any other value is rejected with 400. Send it on every dial (see §5). |
-| `name` | no | Defaults to the token's name. |
-| `alias` | no | Defaults to the token's alias. |
+| `name` | no | Defaults to the token's name, but a dial's `name` wins. T-Circle sends its saved `device_name` (BLE setup), or `Comma-XXXX` if none, percent-encoded (UTF-8). |
+| `alias` | no | Defaults to the token's alias, else `name`. No format check. T-Circle sends the lower-case BLE name, `comma-xxxx`: it survives renames and ends in `-<short id>`, which nearby-device setup offers match on (case-insensitive, along with `name` and `hostname`). |
 | `os`, `arch` | no | Shown in Settings. |
 | `X-Salix-Connector-Instance-ID` | no | ≤128 bytes. Keep it stable across reconnects within one boot; generate a new one each boot. |
 | `group_id` | **never** | 400 `group_id is not accepted with connector credential auth`. |
@@ -81,11 +81,11 @@ The server may send **any** method name. Capabilities don't declare methods, so 
                  "runtime_probe":false,"meeting_runtime":false,
                  "component_versions":{"t-circle":"0.1.0"}},
  "skills":[],
- "system_info":{"client_source":"t-circle","hostname":"T-Circle","os_type":"esp-idf","arch":"xtensa",
+ "system_info":{"client_source":"t-circle","hostname":"Comma-5D28","os_type":"esp-idf","arch":"xtensa",
                 "collected_at":1791187838}}
 ```
 - `capabilities.scope` must match the current access state (`""` or `"local_file_read"`).
-- `system_info.hostname` becomes the name shown in Settings › Devices.
+- `system_info.hostname` becomes the name shown in Settings › Devices (after a rename there, which wins over it). T-Circle sends the same name as the dial's `name`.
 - `skills` is optional. The server stores it but no agent reads it, so `[]` or omitting it has no effect.
 - Unknown keys are allowed and stored (the public projection drops them). Do **not** send `agent_runtimes`.
 

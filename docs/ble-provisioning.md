@@ -134,6 +134,11 @@ start with `https://` (or `http://` for a local dev backend), `connect_url` with
 `ws://`), `connector_token` with `salix_conn_`, `voice_key` with `salix_vk_`. The whole JSON must
 fit in 512 bytes.
 
+`device_name` is the device's name in Comma (the app sends the BLE name, e.g. `Comma-5D28`). The
+Connector dials with it as `name` and reports it as `system_info.hostname`, so Settings › Devices shows
+it; `alias` is always the lower-case BLE name (`comma-5d28`). See `docs/connector-protocol.md` §2. A
+device whose stored `device_name` is empty uses the BLE name instead.
+
 Order: write `wifi_credentials`, wait for `wifi_up`, mint the two credentials, write `credentials`.
 Minting after `wifi_up` means a wrong Wi-Fi password never leaves orphan tokens. The device also
 accepts `credentials` first and holds them in RAM until Wi-Fi is up.

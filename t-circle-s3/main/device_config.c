@@ -70,7 +70,7 @@ static void load_dev_override(void)
 #ifdef CUE_WORKSPACE_ID
     copy(s_cfg.workspace_id, sizeof(s_cfg.workspace_id), CUE_WORKSPACE_ID);
 #endif
-    copy(s_cfg.device_name, sizeof(s_cfg.device_name), "T-Circle (dev)");
+    // No device_name: the Connector dials with the BLE name, Comma-XXXX.
     s_provisioned = true;
     ESP_LOGW(TAG, "using secrets.h (COMMA_DEV_SECRETS), NVS credentials ignored");
 }

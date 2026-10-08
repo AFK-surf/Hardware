@@ -7,8 +7,13 @@
 // BOOT hold). It is shut down completely otherwise, and a call never starts while it runs.
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "esp_err.h"
+
+// The name the device advertises as: "Comma-XXXX", the last two bytes of the Wi-Fi MAC.
+// Works without BLE, so the Connector can fall back to it.
+void provisioning_ble_name(char *out, size_t size);
 
 // Start advertising as Comma-XXXX. Needs wifi_init() and display_init() first.
 esp_err_t provisioning_start(void);
