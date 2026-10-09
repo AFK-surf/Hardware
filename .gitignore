@@ -1,4 +1,5 @@
 build/
+build-*/
 build-preview/
 build-selftest/
 build.log
@@ -15,3 +16,12 @@ build-bench/
 build-ns/
 build-fake/
 fake_connector_out/
+
+# Local environments, caches, and history backups (may contain old credentials).
+.local-backups/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
