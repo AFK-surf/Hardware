@@ -148,6 +148,36 @@ For bodies that are binary or bigger than the text cap, e.g. a camera snapshot (
 
 Same gates as text mode: access (read-only → `error`, no network), LAN destinations only, no redirects. **While a voice call is active, T-Circle refuses chunk mode** with `error` `busy: voice call active` without touching the network, and a call that starts mid-transfer ends the transfer with that `error`; text mode is unaffected. `timeout_seconds` is capped at 110 s in chunk mode (30 s in text mode) and covers the whole transfer.
 
+### `lan_tcp_dial` (G3)
+
+A raw TCP tunnel from the gateway to a LAN host, the same protocol as salix-connect (`systems/connector/salix-connect/lan_tunnel.go`) and station (`systems/station/src/connector/lan-tunnel.ts`). The backend uses it for SSH through a gateway, and G3 for RTSP to the camera. Advertised as `"lan_tcp_dial"` in `capabilities.lan_gateway.methods`.
+
+**Request:**
+```json
+{"id":"tun_…","type":"request","method":"lan_tcp_dial","params":{"host":"192.168.5.33","port":554,"timeout_seconds":15}}
+```
+- `host` (required): dotted quad or a name (resolved once, IPv4). `port` (required): 1–65535. `timeout_seconds`: dial timeout; missing, ≤ 0 or > 15 means 15. The server waits 20 s for the answer.
+
+**Answer**, once the TCP connection is up:
+```json
+{"id":"tun_…","type":"response","result":{"status":"connected","remote_address":"192.168.5.33:554","window":131072,"max_frame":8192}}
+```
+Or an `error` frame: `connect to 192.168.5.33:8800 refused: nothing is listening on that port`, `connect to … timed out after 15 s`, `tunnel capacity exhausted`, `tunnel already exists`, `'host' is required`, `'port' must be between 1 and 65535`, a LAN-destination refusal, the read-only refusal, or `busy: voice call active`.
+
+**Then `stream` frames under the same `id`, both ways:**
+```json
+{"id":"tun_…","type":"stream","stream":{"channel":"tcp","data":"<base64>"}}
+{"id":"tun_…","type":"stream","stream":{"channel":"tcp","eof":true}}
+{"id":"tun_…","type":"stream","error":"…","stream":{"channel":"tcp","eof":true}}
+{"id":"tun_…","type":"stream","stream":{"channel":"tcp_ack","seq":<n>}}
+```
+- `data`: standard base64 with padding. The device sends at most `max_frame` (8 KiB) raw per frame. **The server sends up to 32 KiB per frame regardless of `max_frame`** (DeviceRelay's own `@max_frame`); the device accepts that.
+- `tcp_ack`: "I have written `seq` bytes in total", sent by whichever side receives data, after it writes it.
+- Each sender keeps at most `window` bytes unacknowledged. The server reads `window` from the answer (if ≥ 32 KiB, else it assumes 512 KiB). The device ends the tunnel with `tunnel window exceeded` if the server overruns it, or `invalid tunnel frame` for bad base64 or a frame over 32 KiB.
+- `eof` from the device: the LAN host closed (no `error`), or a failure (`error`: `192.168.5.33:554 reset the connection`, `tunnel idle for 60 s`, the read-only refusal, `busy: voice call active`). After an `eof` from the server the device writes what it still holds (≤ 2 s), closes the LAN socket and sends nothing more.
+
+**Gates:** access (read-only → `error`, no network; turned read-only mid-tunnel → `eof` with the refusal), LAN destinations only (same rule as `http_request`), at most 2 tunnels. **Refused during a voice call** (`busy: voice call active`), and a call that starts ends every open tunnel with `eof` + that error. A tunnel with no data either way for 60 s ends. A Connector socket that closes ends its tunnels silently.
+
 ### `device_access`
 Params `{"allow_operations": bool}`. Anything else → `error` `allow_operations must be a boolean`.
 1. Save the new access state to NVS (`true` → `""`, `false` → `local_file_read`).
@@ -179,6 +209,8 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 | T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified |
 | Chunk mode during a voice call | Refused: `error` `busy: voice call active`, before any network use. A call that starts mid-transfer ends it with the same `error`. Retry after the call (G1 report: a transfer alongside a call froze the board's Wi-Fi) |
 | Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |
+| Server wait on `lan_tcp_dial` | 20 s for the answer (`SalixEnv.Protocol`) |
+| T-Circle `lan_tcp_dial` | 2 tunnels; `window` 128 KiB, `max_frame` 8 KiB toward the server; accepts 32 KiB frames from it; dial ≤ 15 s; 60 s idle; LAN socket receive window cut to 16 KiB |
 
 ## 7. Reconnect
 

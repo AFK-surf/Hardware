@@ -5,6 +5,7 @@
 #include "device_config.h"
 #include "lan_discover.h"
 #include "lan_http.h"
+#include "lan_tunnel.h"
 #include "lan_udp.h"
 #include "provisioning.h"
 #include "wifi.h"
@@ -423,7 +424,7 @@ static void send_metadata(void)
                      "\"persistent_processes\":false,\"computer_use_tool\":false,\"host_access_required\":false,"
                      "\"runtime_probe\":false,\"meeting_runtime\":false,"
                      // Not part of salix-connect's set: tells the backend (C2) what this gateway does.
-                     "\"lan_gateway\":{\"methods\":[\"http_request\",\"udp_request\",\"lan_discover\"],\"max_bytes\":%d,"
+                     "\"lan_gateway\":{\"methods\":[\"http_request\",\"udp_request\",\"lan_discover\",\"lan_tcp_dial\"],\"max_bytes\":%d,"
                      "\"max_timeout_seconds\":%d,"
                      "\"response_chunks\":{\"max_total_bytes\":%d,\"chunk_bytes\":%d}},"
                      "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
@@ -611,6 +612,18 @@ static bool chunk_wait_room(chunk_ctx_t *c, char *err, size_t err_size)
     }
 }
 
+// Writes one frame on socket `session` from a task other than the Connector's (after its gate).
+static bool send_on_session(unsigned session, const char *frame, size_t len)
+{
+    bool ok = false;
+    if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) == pdTRUE) {
+        ok = session == s_session && s_client && esp_websocket_client_is_connected(s_client) &&
+             esp_websocket_client_send_text(s_client, frame, (int)len, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) >= 0;
+        xSemaphoreGive(s_client_mutex);
+    }
+    return ok;
+}
+
 static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_bytes, char *err, size_t err_size)
 {
     chunk_ctx_t *c = arg;
@@ -627,13 +640,7 @@ static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_byte
     if (!chunk_wait_room(c, err, err_size)) {
         return false;
     }
-    bool ok = false;
-    if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) == pdTRUE) {
-        ok = c->session == s_session && s_client && esp_websocket_client_is_connected(s_client) &&
-             esp_websocket_client_send_text(s_client, frame, (int)len, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) >= 0;
-        xSemaphoreGive(s_client_mutex);
-    }
-    if (!ok) {
+    if (!send_on_session(c->session, frame, len)) {
         snprintf(err, err_size, "sending to the server failed during the transfer");
         return false;
     }
@@ -648,6 +655,61 @@ static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_byte
         c->internal_min = internal;
     }
     return true;
+}
+
+// ---- TCP tunnels (lan_tcp_dial, G3) -----------------------------------------------------------------
+
+// Tunnel frames are at most LAN_TUNNEL_MAX_FRAME (8 KB) raw, so they pass the same writable gate as
+// chunks and never block holding the client's TX lock.
+static bool tunnel_send(void *arg, unsigned session, const char *frame, size_t len)
+{
+    (void)arg;
+    chunk_ctx_t c = {.session = session, .gated = true};
+    char err[96];
+    if (!chunk_wait_room(&c, err, sizeof(err))) {
+        ESP_LOGW(TAG, "tunnel frame not sent: %s", err);
+        return false;
+    }
+    return send_on_session(session, frame, len);
+}
+
+static lan_tunnel_verdict_t tunnel_check(void *arg, unsigned session, const char **reason)
+{
+    (void)arg;
+    if (session != s_session || !s_up) {
+        return LAN_TUNNEL_END_SILENT;
+    }
+    if (!s_allow_operations) {
+        *reason = "method \"lan_tcp_dial\" is not permitted for a local_file_read connector";
+        return LAN_TUNNEL_END;
+    }
+    // Like chunk mode (G1): no LAN transfer alongside a call. Checked again on every pass of the
+    // tunnel loop, so a call that starts ends any open tunnel within ~20 ms.
+    if (call_active()) {
+        *reason = CALL_BUSY_MESSAGE;
+        return LAN_TUNNEL_END;
+    }
+    return LAN_TUNNEL_GO;
+}
+
+static bool s_tunnel_ready;
+
+// Same gates as the other LAN methods, answered right here; the tunnel task checks them again.
+static void handle_tcp_dial(const char *id, const cJSON *params)
+{
+    if (!s_allow_operations) {
+        ESP_LOGW(TAG, "%s refused: read-only", id);
+        send_error(id, "method \"lan_tcp_dial\" is not permitted for a local_file_read connector");
+    } else if (!s_tunnel_ready) {
+        send_error(id, "lan_tcp_dial is unavailable: the device could not start its tunnel task");
+    } else if (strlen(id) > ID_MAX) {
+        send_error(id, "request id too long for this device");
+    } else if (call_active()) {
+        ESP_LOGW(TAG, "%s refused: %s", id, CALL_BUSY_MESSAGE);
+        send_error(id, CALL_BUSY_MESSAGE);
+    } else if (!lan_tunnel_dial(id, params, s_session)) {
+        send_error(id, "the T-Circle is busy with other LAN requests; try again shortly");
+    }
 }
 
 static char *run_http_request(const lan_job_t *job)
@@ -761,6 +823,8 @@ static void handle_request(const char *id, const char *method, cJSON *root)
         handle_lan_request(id, LAN_UDP_REQUEST, root);
     } else if (strcmp(method, "lan_discover") == 0) {
         handle_lan_request(id, LAN_DISCOVER, root);
+    } else if (strcmp(method, "lan_tcp_dial") == 0) {
+        handle_tcp_dial(id, params);
     } else {
         char message[128];
         snprintf(message, sizeof(message), "unknown method: %.100s", method);
@@ -791,6 +855,11 @@ static void handle_text(const char *json)
             send_error(id->valuestring, "method must be a string");
         } else {
             handle_request(id->valuestring, method->valuestring, root);
+        }
+    } else if (strcmp(kind, "stream") == 0) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        if (!cJSON_IsString(id) || !lan_tunnel_frame(id->valuestring, root, s_session)) {
+            ESP_LOGI(TAG, "ignored stream frame");
         }
     } else if (strcmp(kind, "connected") == 0) {
         const cJSON *run = cJSON_GetObjectItemCaseSensitive(root, "connector_run_id");
@@ -1135,6 +1204,8 @@ void connector_start(void)
     if (!s_lan_ready) {
         ESP_LOGE(TAG, "LAN worker create failed, http_request, udp_request and lan_discover off");
     }
+    const lan_tunnel_host_t tunnel_host = {.send = tunnel_send, .check = tunnel_check};
+    s_tunnel_ready = lan_tunnel_start(&tunnel_host);
 #ifdef COMMA_CONNECT_URL_OVERRIDE
     ESP_LOGW(TAG, "dev build: Connector dials %s with a dummy token, not the saved credentials",
              COMMA_CONNECT_URL_OVERRIDE);

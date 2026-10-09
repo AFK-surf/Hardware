@@ -22,6 +22,24 @@ Anything on the LAN (the camera's snapshot may answer 401: its auth is the backe
 
     python3 tools/fake_connector.py --fetch 'http://192.168.5.33/...'
 
+TCP tunnels (lan_tcp_dial, G3): echo through a TCP echo server on this Mac (a short line, then
+1 MB), pull 1 MB from a source server on this Mac, and a dial to a closed port (must be refused):
+
+    python3 tools/fake_connector.py --tunnel
+
+Plus an RTSP OPTIONS to the office camera (answers `RTSP/1.0 200 OK`; office LAN only):
+
+    python3 tools/fake_connector.py --tunnel --rtsp 192.168.5.33:554
+
+Call test (one call): the camera tunnel stays open; start a call on the board within 120 s. The board
+must end the tunnel with "busy: voice call active", refuse redials during the call, and accept one
+once the call is over:
+
+    python3 tools/fake_connector.py --rtsp 192.168.5.33:554 --hold 120
+
+The server side behaves like the backend's DeviceRelay: frames of up to 32 KB toward the board, the
+board's advertised window honoured, and a tcp_ack after every data frame it takes.
+
 The board must allow operations (Settings › Devices) or every request comes back read-only.
 --allow-ops sends device_access {"allow_operations": true}, which the board saves to NVS like a
 toggle in Settings.
@@ -207,6 +225,75 @@ class Pending:
         self.done = asyncio.Event()
 
 
+# ---- TCP tunnels (lan_tcp_dial) ------------------------------------------------------------------
+
+SERVER_TUNNEL_FRAME = 32 * 1024  # what the backend's DeviceRelay sends
+
+
+class Tunnel:
+    def __init__(self, tid):
+        self.id = tid
+        self.window = None
+        self.max_frame = None
+        self.sent = 0  # bytes we sent
+        self.acked = 0  # what the board says it wrote
+        self.data = bytearray()  # bytes from the board
+        self.frames = 0
+        self.largest = 0
+        self.eof = None  # the eof frame
+        self.problems = []
+        self.changed = asyncio.Event()
+        self.acks_held_until = 0  # --ack-pause: no acks before this (monotonic)
+
+    def kick(self):
+        self.changed.set()
+        self.changed = asyncio.Event()
+
+
+def start_echo_server(port):
+    """A TCP echo server on this Mac (threaded, stdlib)."""
+
+    class Echo(socketserver.BaseRequestHandler):
+        def handle(self):
+            while True:
+                data = self.request.recv(65536)
+                if not data:
+                    return
+                self.request.sendall(data)
+
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    srv = socketserver.ThreadingTCPServer(("0.0.0.0", port), Echo)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"TCP echo server on :{port}")
+    return srv
+
+
+def start_source_server(port, payload):
+    """Sends `payload` to whoever connects, then closes."""
+
+    class Source(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.sendall(payload)
+
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    srv = socketserver.ThreadingTCPServer(("0.0.0.0", port), Source)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"TCP source server on :{port} ({len(payload)} B per connection)")
+    return srv
+
+
+def closed_port():
+    import socket
+
+    s = socket.socket()
+    s.bind(("0.0.0.0", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 class Session:
     def __init__(self, ws, args, local_ip):
         self.ws = ws
@@ -215,6 +302,7 @@ class Session:
         self.metadata = None
         self.metadata_event = asyncio.Event()
         self.pending = {}
+        self.tunnels = {}
         self.last_device_heartbeat = None
         self.failures = 0
 
@@ -239,6 +327,8 @@ class Session:
                 self.on_metadata(frame)
             elif kind == "response_chunk":
                 self.on_chunk(frame, len(data))
+            elif kind == "stream" and (frame.get("stream") or {}).get("channel") in ("tcp", "tcp_ack"):
+                await self.on_tunnel_frame(frame)
             elif kind in ("response", "error"):
                 p = self.pending.get(frame.get("id"))
                 if not p:
@@ -294,8 +384,8 @@ class Session:
             if self.last_device_heartbeat and time.monotonic() - self.last_device_heartbeat > 45:
                 log("no device heartbeat for 45 s (the real server would close with 1011)")
 
-    async def request(self, method, params, timeout):
-        req_id = "req_fake_" + secrets.token_hex(6)
+    async def request(self, method, params, timeout, req_id=None):
+        req_id = req_id or "req_fake_" + secrets.token_hex(6)
         p = Pending(req_id)
         self.pending[req_id] = p
         await self.ws.send_json({"id": req_id, "type": "request", "method": method, "params": params})
@@ -399,6 +489,265 @@ class Session:
             log(f"  {(p.final or {}).get('error')!r} {p.problems}")
             self.failures += 1
 
+    # ---- tunnels ----
+
+    async def on_tunnel_frame(self, frame):
+        t = self.tunnels.get(frame.get("id"))
+        if not t:
+            log(f"tunnel frame for unknown id {frame.get('id')}")
+            return
+        st = frame["stream"]
+        if st["channel"] == "tcp_ack":
+            seq = st.get("seq")
+            if not isinstance(seq, int) or seq <= t.acked or seq > t.sent:
+                t.problems.append(f"ack seq {seq!r} out of order (acked {t.acked}, sent {t.sent})")
+            else:
+                t.acked = seq
+        elif st.get("eof"):
+            t.eof = frame
+        elif "data" in st:
+            try:
+                raw = base64.b64decode(st["data"], validate=True)
+            except ValueError:
+                t.problems.append("data frame is not valid base64")
+                raw = b""
+            if not raw:
+                t.problems.append("empty data frame")
+            if t.max_frame and len(raw) > t.max_frame:
+                t.problems.append(f"data frame of {len(raw)} B, over max_frame {t.max_frame}")
+            if set(frame) != {"id", "type", "stream"} or set(st) != {"channel", "data"}:
+                t.problems.append(f"data frame keys {sorted(frame)} / {sorted(st)}")
+            t.data += raw
+            t.frames += 1
+            t.largest = max(t.largest, len(raw))
+            # Like DeviceRelay: written at once, acked at once (unless --ack-pause holds acks back).
+            pause = self.args.ack_pause
+            if pause and not t.acks_held_until and len(t.data) >= 256 * 1024:
+                t.acks_held_until = time.monotonic() + pause
+                log(f"  holding acks for {pause} s at {len(t.data)} B (a slow server)")
+                asyncio.get_running_loop().call_later(pause, lambda: asyncio.ensure_future(self.release_acks(t)))
+            if time.monotonic() >= t.acks_held_until:
+                await self.ws.send_json({"id": t.id, "type": "stream", "stream": {"channel": "tcp_ack", "seq": len(t.data)}})
+        t.kick()
+
+    async def release_acks(self, t):
+        log(f"  acks released at {len(t.data)} B")
+        await self.ws.send_json({"id": t.id, "type": "stream", "stream": {"channel": "tcp_ack", "seq": len(t.data)}})
+
+    async def dial(self, host, port, timeout_s=15):
+        tid = "tun_fake_" + secrets.token_hex(6)
+        t = Tunnel(tid)
+        self.tunnels[tid] = t
+        p = await self.request("lan_tcp_dial", {"host": host, "port": port, "timeout_seconds": timeout_s}, timeout_s + 10, tid)
+        if p.final and p.final.get("type") == "response":
+            res = p.final.get("result", {})
+            t.window = res.get("window")
+            t.max_frame = res.get("max_frame")
+            if set(res) != {"status", "remote_address", "window", "max_frame"} or res.get("status") != "connected":
+                t.problems.append(f"answer {res}")
+            if not isinstance(t.window, int) or t.window < SERVER_TUNNEL_FRAME:
+                t.problems.append(f"window {t.window!r}: the backend falls back to 512 KB below 32 KB")
+            log(f"  connected {res.get('remote_address')} window={t.window} max_frame={t.max_frame} "
+                f"({(time.monotonic() - p.sent_at) * 1000:.0f} ms)")
+        return t, p
+
+    async def tunnel_send(self, t, data):
+        """Sends like DeviceRelay: frames of up to 32 KB, never more than the board's window unacked."""
+        off = 0
+        while off < len(data):
+            room = t.window - (t.sent - t.acked)
+            if room <= 0:
+                changed = t.changed
+                try:
+                    await asyncio.wait_for(changed.wait(), self.args.ack_timeout)
+                except asyncio.TimeoutError:
+                    t.problems.append(f"no ack from the board for {self.args.ack_timeout} s (sent {t.sent}, acked {t.acked})")
+                    return False
+                if t.eof:
+                    t.problems.append(f"board closed while sending: {t.eof.get('error')!r}")
+                    return False
+                continue
+            n = min(SERVER_TUNNEL_FRAME, room, len(data) - off)
+            piece = data[off:off + n]
+            await self.ws.send_json({"id": t.id, "type": "stream",
+                                     "stream": {"channel": "tcp", "data": base64.b64encode(piece).decode()}})
+            t.sent += n
+            off += n
+        return True
+
+    async def tunnel_wait(self, t, until, timeout):
+        """Waits until until(t) or eof or timeout."""
+        deadline = time.monotonic() + timeout
+        while not until(t) and not t.eof:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            changed = t.changed
+            try:
+                await asyncio.wait_for(changed.wait(), min(left, 0.5))
+            except asyncio.TimeoutError:
+                pass
+        return until(t)
+
+    async def tunnel_close(self, t):
+        await self.ws.send_json({"id": t.id, "type": "stream", "stream": {"channel": "tcp", "eof": True}})
+        await asyncio.sleep(0.3)
+        if t.eof:
+            t.problems.append(f"board sent eof after the server's: {t.eof}")
+        del self.tunnels[t.id]
+
+    def verdict(self, label, t, ok, extra=""):
+        ok = ok and not t.problems
+        log(f"  {'PASS' if ok else 'FAIL'} tunnel {label}{extra}" + "".join(f"\n    - {x}" for x in t.problems))
+        if not ok:
+            self.failures += 1
+
+    async def tunnel_echo(self, host, port):
+        log(f"→ lan_tcp_dial {host}:{port} (echo)")
+        t, p = await self.dial(host, port)
+        if not t.window:
+            log(f"  FAIL tunnel echo: {(p.final or {}).get('error')!r} {p.problems}")
+            self.failures += 1
+            return
+        line = b"hello through the T-Circle\n"
+        await self.tunnel_send(t, line)
+        ok = await self.tunnel_wait(t, lambda t: len(t.data) >= len(line), 10)
+        ok = ok and bytes(t.data[:len(line)]) == line
+        if not ok:
+            t.problems.append(f"short echo: {bytes(t.data)!r}")
+        big = random.Random(1009).randbytes(1024 * 1024)
+        start = time.monotonic()
+        t.data.clear()
+        t.frames = 0
+        base_sent = t.sent
+        sender = asyncio.create_task(self.tunnel_send(t, big))
+        stuck = lambda: sender.done() and not sender.result()  # noqa: E731
+        got = await self.tunnel_wait(t, lambda t: len(t.data) >= len(big) or stuck(), 120)
+        got = got and not stuck()
+        took = time.monotonic() - start
+        if await sender:
+            await self.tunnel_wait(t, lambda t: t.acked >= base_sent + len(big), 10)
+        if bytes(t.data) != big:
+            at = next((i for i, (a, b) in enumerate(zip(t.data, big)) if a != b), min(len(t.data), len(big)))
+            t.problems.append(f"1 MB echo differs at offset {at} ({len(t.data)} of {len(big)} B)")
+        if t.acked != t.sent:
+            t.problems.append(f"board acked {t.acked} of {t.sent} B written")
+        extra = (f": 1 MB each way in {took:.1f} s ({len(big) / 1024 / took:.0f} KB/s), {t.frames} frames from the "
+                 f"board, largest {t.largest} B")
+        await self.tunnel_close(t)
+        self.verdict("echo", t, ok and got, extra)
+
+    async def tunnel_pull(self, host, port, expected):
+        log(f"→ lan_tcp_dial {host}:{port} (pull {len(expected)} B)")
+        start = time.monotonic()
+        t, p = await self.dial(host, port)
+        if not t.window:
+            log(f"  FAIL tunnel pull: {(p.final or {}).get('error')!r} {p.problems}")
+            self.failures += 1
+            return
+        await self.tunnel_wait(t, lambda t: False, 120)  # until the source closes
+        took = time.monotonic() - start
+        if bytes(t.data) != expected:
+            at = next((i for i, (a, b) in enumerate(zip(t.data, expected)) if a != b), min(len(t.data), len(expected)))
+            t.problems.append(f"pulled bytes differ at offset {at} ({len(t.data)} of {len(expected)} B)")
+        if not t.eof:
+            t.problems.append("no eof after the source closed")
+        elif t.eof.get("error"):
+            t.problems.append(f"eof carries an error: {t.eof.get('error')!r}")
+        self.tunnels.pop(t.id, None)
+        self.verdict("pull", t, True, f": {len(t.data)} B in {took:.1f} s ({len(t.data) / 1024 / took:.0f} KB/s), "
+                                      f"{t.frames} frames, largest {t.largest} B")
+
+    async def tunnel_refused(self, host, port):
+        log(f"→ lan_tcp_dial {host}:{port} (closed port)")
+        t, p = await self.dial(host, port, 5)
+        self.tunnels.pop(t.id, None)
+        err = (p.final or {}).get("error") or ""
+        ok = (p.final or {}).get("type") == "error" and "refused" in err and "reset" not in err
+        log(f"  {'PASS' if ok else 'FAIL'} tunnel refused: {err!r}")
+        if not ok:
+            self.failures += 1
+
+    async def tunnel_rtsp(self, host, port):
+        log(f"→ lan_tcp_dial {host}:{port} (RTSP OPTIONS)")
+        t, p = await self.dial(host, port)
+        if not t.window:
+            log(f"  FAIL tunnel rtsp: {(p.final or {}).get('error')!r} {p.problems}")
+            self.failures += 1
+            return
+        start = time.monotonic()
+        req = f"OPTIONS rtsp://{host}:{port}/stream1 RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: comma-fake-connector\r\n\r\n"
+        await self.tunnel_send(t, req.encode())
+        await self.tunnel_wait(t, lambda t: b"\r\n\r\n" in t.data, 10)
+        took = (time.monotonic() - start) * 1000
+        head = bytes(t.data).split(b"\r\n\r\n")[0].decode("latin-1")
+        ok = head.startswith("RTSP/1.0 200")
+        log("  " + head.replace("\r\n", "\n  "))
+        if self.args.hold > 0 and ok:
+            await self.hold(t, host, port)
+            return
+        await self.tunnel_close(t)
+        self.verdict("rtsp", t, ok, f": {took:.0f} ms round trip")
+
+    async def hold(self, t, host, port):
+        """For the call test: keep the tunnel up (an OPTIONS every 10 s) until the board ends it, e.g.
+        because a call started; then redial every 5 s and log each refusal until one is accepted."""
+        args = self.args
+        log(f"  holding the tunnel for up to {args.hold} s: start a call on the board now")
+        deadline = time.monotonic() + args.hold
+        cseq = 1
+        while time.monotonic() < deadline and not t.eof:
+            await self.tunnel_wait(t, lambda t: False, 10)
+            if t.eof:
+                break
+            cseq += 1
+            t.data.clear()
+            req = f"OPTIONS rtsp://{host}:{port}/stream1 RTSP/1.0\r\nCSeq: {cseq}\r\n\r\n"
+            await self.tunnel_send(t, req.encode())
+            await self.tunnel_wait(t, lambda t: b"\r\n\r\n" in t.data, 10)
+            log(f"  OPTIONS {cseq}: {bytes(t.data).split(b'\r\n')[0].decode('latin-1')!r}")
+        self.tunnels.pop(t.id, None)
+        if not t.eof:
+            log("  FAIL hold: the tunnel was still open at the end (no call started?)")
+            self.failures += 1
+            return
+        err = t.eof.get("error") or ""
+        ok = "busy: voice call active" in err
+        log(f"  {'PASS' if ok else 'FAIL'} hold: the board ended the tunnel: {err!r}")
+        self.failures += 0 if ok else 1
+        refusals = 0
+        while time.monotonic() < deadline + 600:
+            await asyncio.sleep(5)
+            t2, p = await self.dial(host, port, 5)
+            if p.final and p.final.get("type") == "response":
+                log(f"  dial accepted again after {refusals} busy refusal(s): the call is over")
+                await self.tunnel_close(t2)
+                break
+            self.tunnels.pop(t2.id, None)
+            e = (p.final or {}).get("error")
+            log(f"  dial during the call: {e!r}")
+            if e and "busy: voice call active" in e:
+                refusals += 1
+            else:
+                self.failures += 1
+        log(f"  {'PASS' if refusals else 'FAIL'} busy refusals during the call: {refusals}")
+        self.failures += 0 if refusals else 1
+
+    async def tunnel_plan(self):
+        args = self.args
+        host = args.serve_host or self.local_ip
+        methods = (self.metadata or {}).get("capabilities", {}).get("lan_gateway", {}).get("methods") or []
+        if "lan_tcp_dial" not in methods:
+            log(f"FAIL: metadata lan_gateway.methods {methods} has no lan_tcp_dial")
+            self.failures += 1
+        if args.tunnel:
+            await self.tunnel_echo(host, args.echo_port)
+            await self.tunnel_pull(host, args.source_port, self.source_payload)
+            await self.tunnel_refused(host, closed_port())
+        for target in args.rtsp:
+            h, _, port = target.partition(":")
+            await self.tunnel_rtsp(h, int(port or 554))
+
     async def plan(self):
         args = self.args
         try:
@@ -417,6 +766,11 @@ class Session:
                 log("→ device_access allow_operations=true (saved on the board)")
                 p = await self.request("device_access", {"allow_operations": True}, 10)
                 log(f"  {p.final}")
+        if args.tunnel or args.rtsp:
+            await self.tunnel_plan()
+            if not (args.serve or args.fetch):
+                log(f"done: {self.failures} failure(s). The board stays connected; Ctrl-C to quit.")
+                return
         targets = []  # (url, expected bytes or None, label)
         if args.serve:
             base = f"http://{args.serve_host or self.local_ip}:{args.serve_port}/"
@@ -462,6 +816,7 @@ async def serve_connection(reader, writer, args, done):
         log("WARNING: the board sent a real-looking token; the override build should send a dummy one")
     ws = WebSocket(reader, writer)
     session = Session(ws, args, local_ip)
+    session.source_payload = args.source_payload
     await ws.send_json(
         {
             "type": "connected",
@@ -500,6 +855,16 @@ async def main():
     ap.add_argument("--loop", type=int, default=1, help="rounds of fetches; 0 = until Ctrl-C")
     ap.add_argument("--pause", type=float, default=3, help="seconds between rounds")
     ap.add_argument("--out", default="fake_connector_out", help="where bodies go")
+    ap.add_argument("--tunnel", action="store_true", help="lan_tcp_dial checks: echo, 1 MB pull, closed port")
+    ap.add_argument("--rtsp", action="append", default=[], metavar="HOST[:PORT]",
+                    help="RTSP OPTIONS through a tunnel (repeatable), e.g. 192.168.5.33:554")
+    ap.add_argument("--echo-port", type=int, default=7007, help="TCP echo server port for --tunnel")
+    ap.add_argument("--source-port", type=int, default=7008, help="TCP source server port for --tunnel")
+    ap.add_argument("--hold", type=int, default=0, metavar="S",
+                    help="with --rtsp: keep the tunnel open up to S s for the call test (see hold())")
+    ap.add_argument("--ack-pause", type=float, default=0, metavar="S",
+                    help="hold acks back for S s once 256 KB have arrived on a tunnel (slow-server test)")
+    ap.add_argument("--ack-timeout", type=float, default=15, help="seconds to wait for a tcp_ack before failing")
     ap.add_argument("--allow-ops", action="store_true", help="send device_access true if the board is read-only")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -507,6 +872,10 @@ async def main():
         make_files(args.make_files)
     if args.serve:
         serve_files(args.serve, args.serve_port)
+    args.source_payload = random.Random(1010).randbytes(1024 * 1024)
+    if args.tunnel:
+        start_echo_server(args.echo_port)
+        start_source_server(args.source_port, args.source_payload)
     done = []
     server = await asyncio.start_server(
         lambda r, w: serve_connection(r, w, args, done), "0.0.0.0", args.port, limit=MAX_FRAME

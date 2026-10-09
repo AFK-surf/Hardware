@@ -23,6 +23,10 @@ static char g_connect_host[64];
 static bool g_wifi_up = true;
 static uint32_t g_self;
 static uint32_t g_mask;
+// Non-zero: connect fails with this errno, as lwIP fails a refused connect with ECONNRESET (G3).
+static int g_connect_errno;
+// Non-zero: connect goes to this port instead of the server's (a closed one, for a real refusal).
+static int g_connect_port;
 
 bool wifi_ip_info(uint32_t *ip, uint32_t *netmask)
 {
@@ -68,6 +72,13 @@ int esp_transport_connect(esp_transport_handle_t t, const char *host, int port, 
     (void)timeout_ms;
     strlcpy(g_connect_host, host, sizeof(g_connect_host));
     t->fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (g_connect_errno) {
+        t->err = g_connect_errno;
+        return -1;
+    }
+    if (g_connect_port) {
+        port = g_connect_port;
+    }
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(t->fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
@@ -461,7 +472,7 @@ static void test_bad_params(void)
     CHECK(is_error(f, "line break"), "header injection: %s", g_frame);
     cJSON_Delete(f);
     f = run("{\"url\":\"http://192.168.5.50:1/\",\"method\":\"GET\"}");
-    CHECK(is_error(f, "connect to 192.168.5.50:1 failed"), "refused: %s", g_frame);
+    CHECK(is_error(f, "connect to 192.168.5.50:1 refused"), "refused: %s", g_frame);
     cJSON_Delete(f);
 }
 
@@ -773,6 +784,42 @@ static void test_chunks(void)
     sink_reset(0, 0);
 }
 
+// G2 saw "the gateway reset" for a request to the camera's closed port 8800. lwIP reports the refused
+// connect as ECONNRESET, whose text is "Connection reset by peer". Both modes must say refused, and
+// nothing must crash (this runs under ASan).
+static void test_connect_refused(void)
+{
+    static const char *const modes[] = {"", ",\"response_mode\":\"chunks\""};
+    for (int real = 0; real < 2; ++real) {
+        for (int m = 0; m < 2; ++m) {
+            int closed_port = 0;
+            if (real) {
+                int s = socket(AF_INET, SOCK_STREAM, 0);
+                struct sockaddr_in a = {.sin_family = AF_INET};
+                a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                bind(s, (struct sockaddr *)&a, sizeof(a));
+                socklen_t l = sizeof(a);
+                getsockname(s, (struct sockaddr *)&a, &l);
+                closed_port = ntohs(a.sin_port);
+                close(s);  // nothing listens there now
+                g_connect_port = closed_port;
+            } else {
+                g_connect_errno = ECONNRESET;
+            }
+            sink_reset(8192, 0);
+            cJSON *f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.33:8800/onvif/snapshot\"%s}", modes[m]);
+            CHECK(is_error(f, "connect to 192.168.5.33:8800 refused: nothing is listening on that port"),
+                  "%s refused (%s): %s", m ? "chunk mode" : "text mode", real ? "real" : "lwIP errno", g_frame);
+            CHECK(!strstr(g_frame, "reset"), "refused reads as a reset: %s", g_frame);
+            CHECK(g_sink.frames == 0, "chunks sent for a refused connect");
+            cJSON_Delete(f);
+            g_connect_errno = 0;
+            g_connect_port = 0;
+        }
+    }
+    sink_reset(0, 0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -785,6 +832,7 @@ int main(int argc, char **argv)
     test_responses();
     test_requests();
     test_chunks();
+    test_connect_refused();
     printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed ? 1 : 0;
 }

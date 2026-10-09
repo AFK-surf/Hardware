@@ -8,6 +8,7 @@
 #include "lan_dest.h"
 #include "wifi.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -795,6 +796,11 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
         const int e = esp_transport_get_errno(t);
         if (remaining_ms(deadline_us) == 0) {
             snprintf(err, sizeof(err), "request to %s timed out after %d s", url.host, timeout_s);
+        } else if (e == ECONNREFUSED || e == ECONNRESET) {
+            // lwIP reports a refused connect (RST to the SYN) as ECONNRESET, "Connection reset by
+            // peer", which read like the T-Circle itself had reset (G2, port 8800).
+            snprintf(err, sizeof(err), "connect to %s:%d refused: nothing is listening on that port", url.host,
+                     url.port);
         } else if (url.https && e == 0) {
             snprintf(err, sizeof(err), "TLS connection to %s:%d failed (handshake or untrusted certificate)", url.host,
                      url.port);
