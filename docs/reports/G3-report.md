@@ -2,7 +2,7 @@
 
 2026-10-09 · `t-circle-s3/main/lan_tunnel.c/.h` (new), `connector.c`, `lan_http.c`, `main/CMakeLists.txt`, `tools/lan_tunnel_test/` (new), `tools/lan_http_test/test.c`, `tools/fake_connector.py`, `tools/test_fake_connector.py`, `docs/connector-protocol.md` · IDF 6.0.2
 
-> **Status:** code, host tests and the Mac-side fake-connector checks are done and committed. **Nothing was flashed**, because the user is out of the office. The board steps are in *On the board, later*; they need one phone call.
+> **Status:** done and verified on the board (2026-10-09, office). With the fake connector: tunnel checks, camera RTSP, slow server and the call test all pass (see *Board*). One known limitation is found: a stall when both directions block at once (see *Board*, last part). The board is back on the normal build on staging. The idle limit was raised from 60 s to 5 min at the user's request.
 
 ## Result
 
@@ -12,10 +12,10 @@
 | Tunnels at a time | **2** (see *Design*). |
 | Dial timeout | `timeout_seconds`, capped at 15 s (a missing, ≤ 0 or > 15 value means 15). The server waits 20 s. |
 | Receive task, send path, window both ways | **Done.** One task with a `select()` loop. |
-| Close on eof / error / socket loss / access downgrade / 60 s idle | **Done.** |
+| Close on eof / error / socket loss / access downgrade / 5 min idle | **Done.** |
 | Access gate, LAN destinations only | **Done.** The same refusal text as the other methods; `lan_dest_check` is reused. |
 | Busy during a call | **Done.** A dial during a call gets `error` `busy: voice call active` with no connect. A call that starts ends every open tunnel with `eof` + that error within one loop pass (≤ 20 ms). |
-| No pile-up in Wi-Fi/lwIP RX buffers | **Done in code, board not measured.** The LAN socket is read promptly, and its lwIP receive window is cut to 16 KB (see *Design*). |
+| No pile-up in Wi-Fi/lwIP RX buffers | **Done, verified on the board.** The LAN socket is read promptly, and its lwIP receive window is cut to 16 KB (see *Design*). A 35 s server stall cost no internal RAM. |
 | Capability | `"lan_tcp_dial"` added to `capabilities.lan_gateway.methods`. |
 | Item 5, "the gateway reset" on port 8800 | **Not a crash; a wording problem, fixed.** See *Item 5*. |
 | Host tests | **Pass:** tunnel ~1160 checks, `http_request` 263, `udp_request` 747, fake connector 10 tests. |
@@ -37,7 +37,7 @@ Where the T-Circle differs from the Mac/station connectors, on purpose:
 | Tunnels | 8 | 2 |
 | `window` / `max_frame` | 512 KB / 32 KB | 128 KB / 8 KB |
 | Destinations | any | LAN only (`lan_dest`), like `http_request` |
-| Idle | none | 60 s with no data either way → `eof` `tunnel idle for 60 s` |
+| Idle | none | 300 s (5 min) with no data either way → `eof` `tunnel idle for 300 s` |
 | Server `eof` with bytes still queued | closes at once (they are dropped) | writes what it holds for up to 2 s, then closes |
 | Access turned off | `eof` "connector stopped the tunnel" | `eof` with the read-only refusal text |
 | Voice call | n/a | refused / ended with `busy: voice call active` |
@@ -206,7 +206,76 @@ Mutation checks: each change below was made, the suite re-run, and the change re
   - it then redials every 5 s, logging each busy refusal, until a dial is accepted (call over).
 - The server side behaves like `DeviceRelay`: frames ≤ 32 KB, the board's window honoured, an ack after every data frame. It checks the answer keys, frame keys and sizes against `max_frame`, base64, ack order, and `lan_tcp_dial` in metadata.
 
-## On the board, later (user in the office)
+## Board (2026-10-09, office)
+
+Board `Comma-5D28` on office Wi-Fi (RSSI −53), Mac at 192.168.5.13 running `fake_connector.py`. Every flash was `app-flash` only (NVS untouched), each one after asking the user.
+
+### Step 1: tunnel checks, `build-fake`
+
+| Check | Result |
+|---|---|
+| Echo, 1 MB each way | **PASS**, 6.2 s (166 KB/s each way at once), largest frame 8192 B |
+| Pull 1 MB | **PASS**, byte-identical, 4.1 s (**249 KB/s**, G1's ceiling), plain eof |
+| Closed port | **PASS**: `connect to 192.168.5.13:64367 refused: nothing is listening on that port` |
+| Camera RTSP `OPTIONS` 192.168.5.33:554 | **PASS**: `RTSP/1.0 200 OK`, dial 157 ms, round trip 50 ms |
+| Metadata | `methods: ["http_request","udp_request","lan_discover","lan_tcp_dial"]` |
+| `receive window cut by 49151` | In the log for every tunnel: the 16 KB cut takes |
+
+**RAM.**
+- Internal free with the Connector up and no tunnel: 131.9 KB.
+- Lowest sampled during tunnels (`internal min`):
+  - echo / pull: 131.1 KB;
+  - RTSP: 131.6 KB;
+  - so **~1 KB** for these runs.
+- The tunnel samples RAM after each frame it sends. The lowest value seen while traffic was stalled, both directions blocked (step 2), was **117.3 KB, ~15 KB below idle**. That matches the ≤ 16 KB of RX buffers the window cut allows.
+- The "lowest since boot" (115 KB) dates from boot, before any tunnel.
+
+### Step 2: slow server (`--ack-pause`)
+
+- **Pull with acks held for 35 s after 256 KB: PASS.**
+  - The board stopped at one window.
+  - Internal free stayed at **131 559 B** in the stats lines throughout the pause.
+  - Heartbeats kept going (`last_heartbeat` 8–9 s).
+  - The pull finished byte-identical once acks resumed.
+- **Echo with acks held: a stall, and once an RST.** This is the known limitation below.
+
+### Step 3: the call test (one call), `--rtsp 192.168.5.33:554 --hold 120`
+
+- **The camera tunnel was open 87 s** (OPTIONS every 10 s, all `200 OK`).
+- **When the call started, the board ended it in the same millisecond** as the voice dial: `eof` `busy: voice call active`.
+- **Redials during the call:** 10, all refused `busy: voice call active`.
+- **After hang-up,** the first redial was accepted.
+- **PASS** (0 failures).
+- **The call itself was normal:**
+  - agent greeting, VAD sending the user's speech;
+  - internal free at its lowest in the call: **91 KB** (floor ≥ 40 KB).
+
+### Step 4: normal build back
+
+- The normal build was flashed at 11:19. The binary has no override URL, dummy token or debug strings.
+- It dialed `wss://salix-staging.comma.surf` with the saved token: `device=dev_jueVjQgP8FlzV8H0NpJVRg`, generation 24.
+
+### Known limitation: a stall when both directions block at once (lwIP)
+
+**Seen with:** the echo test plus acks held back. The board stops reading the LAN host (window full toward the server), while the LAN host stops reading because it is blocked writing to the board. Both TCP windows reach 0.
+
+**Mechanism.** Found with a debug build (`-DCOMMA_TUNNEL_DEBUG=1`, one lwIP pcb snapshot per second):
+1. The board has data for the LAN host, so lwIP sends zero-window probes. **Each probe advances `snd_nxt` by 1** (`tcp_out.c:2244`).
+2. When the board reads again, its pcb shows the full window open (`rcv_wnd` 16384, `ann` 16384), and lwIP sends the window update. That is a pure ACK with seq = `snd_nxt`: one past what the peer has accepted.
+3. Per RFC 793, a receiver with a zero window accepts a zero-length segment only at `SEG.SEQ == RCV.NXT`. **The Mac drops the window updates.**
+4. It learns about the open window only from its own persist probes, every few seconds and backing off. It sends 16 KB, stops again, and so on.
+5. After a 10 s pause, data resumed only after 18 s. After a 35 s pause, the Mac reset the connection at 71 s.
+
+**Not caused by the window cut, by this reasoning:** none of the steps depend on the receive window's size. Not A/B-tested on the board; `-DCOMMA_TUNNEL_SOCKET_WINDOW=0` builds the comparison.
+
+**Who it affects:**
+- **Not RTSP:** the camera always reads, and the board only sends it requests of a few hundred bytes.
+- **Not one-way bulk:** the pull passed.
+- **It needs bulk data both ways at once together with a slow server,** e.g. an `scp` through the tunnel in both directions.
+
+**Possible fix, not done:** write to the LAN socket only as much as the peer's window has room for, read from the pcb in the tcpip thread. The rest waits in the PSRAM queue. lwIP then never enters persist on that pcb, so `snd_nxt` never runs ahead.
+
+## Board steps as planned
 
 Before each flash: `lsof /dev/cu.usbmodem1101` must be empty, and **ask the user first**. Flash with `app-flash` only (NVS untouched).
 
@@ -257,9 +326,11 @@ idf.py build && idf.py -p /dev/cu.usbmodem1101 app-flash
 
 ## Open points
 
+0. **The two-way stall above:** a known limitation for now, with the fix sketched there.
+
 1. **SSH through the T-Circle.**
    - Advertising `lan_tcp_dial` makes the T-Circle a candidate gateway for `ssh.open` as well (the backend resolves gateways by method).
-   - That works within the LAN rule, but the **60 s idle limit will cut an idle SSH session** unless the client sends keepalives.
+   - That works within the LAN rule, but the **5 min idle limit will cut an idle SSH session** unless the client sends keepalives.
    - If that matters: raise the limit for port 22, or ask the backend to send SSH keepalives (OpenSSH `ServerAliveInterval` defaults to off).
    - Also open: which gateway the backend prefers when the Mac and the T-Circle both qualify.
 2. **RTSP main stream vs the link.**

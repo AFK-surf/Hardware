@@ -52,6 +52,9 @@
 #define READS_PER_PASS 4
 // After the server's eof: how long queued bytes may take to reach the LAN host before the close.
 #define DRAIN_MS 2000
+#ifndef COMMA_TUNNEL_DEBUG
+#define COMMA_TUNNEL_DEBUG 0
+#endif
 #define B64_LEN(n) (((n) + 2) / 3 * 4)
 // The id as a JSON string (escaped) fits this.
 #define ID_JSON_MAX (ID_MAX * 6 + 3)
@@ -339,6 +342,50 @@ static err_t wnd_apply(struct tcpip_api_call_data *data)
     }
     return ERR_OK;
 }
+
+#if COMMA_TUNNEL_DEBUG
+// Dev builds only (-DCOMMA_TUNNEL_DEBUG=1): a snapshot of the pcb, read in the tcpip thread.
+typedef struct {
+    struct tcpip_api_call_data call;
+    struct netconn *conn;
+    int state, rcv_wnd, rcv_ann_wnd, ann_edge, snd_wnd, persist_backoff, unsent, unacked, refused;
+} pcb_snap_t;
+
+static err_t pcb_snap(struct tcpip_api_call_data *data)
+{
+    pcb_snap_t *p = (pcb_snap_t *)data;
+    struct tcp_pcb *pcb = p->conn ? p->conn->pcb.tcp : NULL;
+    if (!pcb) {
+        return ERR_CONN;
+    }
+    p->state = pcb->state;
+    p->rcv_wnd = pcb->rcv_wnd;
+    p->rcv_ann_wnd = pcb->rcv_ann_wnd;
+    p->ann_edge = (int)(pcb->rcv_ann_right_edge - pcb->rcv_nxt);
+    p->snd_wnd = pcb->snd_wnd;
+    p->persist_backoff = pcb->persist_backoff;
+    p->unsent = pcb->unsent != NULL;
+    p->unacked = pcb->unacked != NULL;
+    p->refused = pcb->refused_data != NULL;
+    return ERR_OK;
+}
+
+static void debug_log(const tunnel_t *t)
+{
+    struct lwip_sock *sock = lwip_socket_dbg_get_socket(t->fd);
+    pcb_snap_t p = {.conn = sock ? sock->conn : NULL};
+    int unread = -1;
+    ioctl(t->fd, FIONREAD, &unread);
+    if (!p.conn || tcpip_api_call(pcb_snap, &p.call) != ERR_OK) {
+        ESP_LOGI(TAG, "dbg %s: no pcb", t->id);
+        return;
+    }
+    ESP_LOGI(TAG, "dbg %s st=%d up sent=%lld acked=%lld | down queued=%u written=%lld | unread=%d rcv_wnd=%d ann=%d "
+                  "edge=%d snd_wnd=%d persist=%d unsent=%d unacked=%d refused=%d",
+             t->id, t->state, (long long)t->sent, (long long)t->acked, (unsigned)t->queued, (long long)t->written, unread,
+             p.rcv_wnd, p.rcv_ann_wnd, p.ann_edge, p.snd_wnd, p.persist_backoff, p.unsent, p.unacked, p.refused);
+}
+#endif
 
 static int window_set(int fd, int target, int cut)
 {
@@ -696,6 +743,13 @@ static void pump_in(tunnel_t *t)
 // Verdicts, deadlines and idle time.
 static void housekeeping(tunnel_t *t, int64_t now)
 {
+#if COMMA_TUNNEL_DEBUG && defined(ESP_PLATFORM)
+    static int64_t s_dbg_us;
+    if (t->state == T_OPEN && now - s_dbg_us >= 1000000) {
+        s_dbg_us = now;
+        debug_log(t);
+    }
+#endif
     const char *reason = NULL;
     const lan_tunnel_verdict_t v = s_host.check ? s_host.check(s_host.ctx, t->session, &reason) : LAN_TUNNEL_GO;
     if (v == LAN_TUNNEL_END_SILENT) {

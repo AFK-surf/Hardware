@@ -39,12 +39,15 @@
 #define LAN_TUNNEL_WINDOW (128 * 1024)
 #define LAN_TUNNEL_DIAL_TIMEOUT_MAX_S 15
 #ifndef LAN_TUNNEL_IDLE_S
-#define LAN_TUNNEL_IDLE_S 60
+#define LAN_TUNNEL_IDLE_S 300
 #endif
 // lwIP receive window of each tunnel's LAN socket (the global one is 64 KB for the voice socket).
 // Received data that the device hasn't read holds Wi-Fi RX buffers (zero-copy RX, see G1), so this
 // caps what a stalled tunnel pins at ~11 buffers. Still ~3 MB/s on the LAN.
+// 0 turns the cut off (dev builds: -DLAN_TUNNEL_SOCKET_WINDOW=0).
+#ifndef LAN_TUNNEL_SOCKET_WINDOW
 #define LAN_TUNNEL_SOCKET_WINDOW (16 * 1024)
+#endif
 
 typedef enum {
     LAN_TUNNEL_GO = 0,

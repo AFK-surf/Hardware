@@ -39,3 +39,11 @@ endif()
 if(COMMA_VOICE_CLEAN_BENCH)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE VOICE_CLEAN_BENCH=1)
 endif()
+# Dev only: `-DCOMMA_TUNNEL_DEBUG=1` logs each open tunnel's lwIP state every second (lan_tunnel.c);
+# `-DCOMMA_TUNNEL_SOCKET_WINDOW=0` turns off the per-socket receive-window cut, for comparison.
+if(COMMA_TUNNEL_DEBUG)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_TUNNEL_DEBUG=1)
+endif()
+if(DEFINED COMMA_TUNNEL_SOCKET_WINDOW)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE LAN_TUNNEL_SOCKET_WINDOW=${COMMA_TUNNEL_SOCKET_WINDOW})
+endif()

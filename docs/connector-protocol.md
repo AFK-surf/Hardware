@@ -174,9 +174,9 @@ Or an `error` frame: `connect to 192.168.5.33:8800 refused: nothing is listening
 - `data`: standard base64 with padding. The device sends at most `max_frame` (8 KiB) raw per frame. **The server sends up to 32 KiB per frame regardless of `max_frame`** (DeviceRelay's own `@max_frame`); the device accepts that.
 - `tcp_ack`: "I have written `seq` bytes in total", sent by whichever side receives data, after it writes it.
 - Each sender keeps at most `window` bytes unacknowledged. The server reads `window` from the answer (if ≥ 32 KiB, else it assumes 512 KiB). The device ends the tunnel with `tunnel window exceeded` if the server overruns it, or `invalid tunnel frame` for bad base64 or a frame over 32 KiB.
-- `eof` from the device: the LAN host closed (no `error`), or a failure (`error`: `192.168.5.33:554 reset the connection`, `tunnel idle for 60 s`, the read-only refusal, `busy: voice call active`). After an `eof` from the server the device writes what it still holds (≤ 2 s), closes the LAN socket and sends nothing more.
+- `eof` from the device: the LAN host closed (no `error`), or a failure (`error`: `192.168.5.33:554 reset the connection`, `tunnel idle for 300 s`, the read-only refusal, `busy: voice call active`). After an `eof` from the server the device writes what it still holds (≤ 2 s), closes the LAN socket and sends nothing more.
 
-**Gates:** access (read-only → `error`, no network; turned read-only mid-tunnel → `eof` with the refusal), LAN destinations only (same rule as `http_request`), at most 2 tunnels. **Refused during a voice call** (`busy: voice call active`), and a call that starts ends every open tunnel with `eof` + that error. A tunnel with no data either way for 60 s ends. A Connector socket that closes ends its tunnels silently.
+**Gates:** access (read-only → `error`, no network; turned read-only mid-tunnel → `eof` with the refusal), LAN destinations only (same rule as `http_request`), at most 2 tunnels. **Refused during a voice call** (`busy: voice call active`), and a call that starts ends every open tunnel with `eof` + that error. A tunnel with no data either way for 300 s (5 min) ends. A Connector socket that closes ends its tunnels silently.
 
 ### `device_access`
 Params `{"allow_operations": bool}`. Anything else → `error` `allow_operations must be a boolean`.
@@ -210,7 +210,7 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 | Chunk mode during a voice call | Refused: `error` `busy: voice call active`, before any network use. A call that starts mid-transfer ends it with the same `error`. Retry after the call (G1 report: a transfer alongside a call froze the board's Wi-Fi) |
 | Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |
 | Server wait on `lan_tcp_dial` | 20 s for the answer (`SalixEnv.Protocol`) |
-| T-Circle `lan_tcp_dial` | 2 tunnels; `window` 128 KiB, `max_frame` 8 KiB toward the server; accepts 32 KiB frames from it; dial ≤ 15 s; 60 s idle; LAN socket receive window cut to 16 KiB |
+| T-Circle `lan_tcp_dial` | 2 tunnels; `window` 128 KiB, `max_frame` 8 KiB toward the server; accepts 32 KiB frames from it; dial ≤ 15 s; 300 s idle; LAN socket receive window cut to 16 KiB |
 
 ## 7. Reconnect
 
