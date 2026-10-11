@@ -3,10 +3,11 @@
 # http_parser sources from managed_components and $IDF_PATH (default: IDF 6.0.2 under ~/.espressif).
 set -e
 cd "$(dirname "$0")"
+. ../host_board_flags.sh
 IDF=${IDF_PATH:-$HOME/.espressif/v6.0.2/esp-idf}
 CJSON=../../managed_components/espressif__cjson/cJSON
 OUT=${TMPDIR:-/tmp}/lan_http_test
-cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations -g -fsanitize=address,undefined \
+cc $COMMA_TEST_DEFINES -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations -g -fsanitize=address,undefined \
     -Istubs -I../../main -I"$CJSON" -I"$IDF/components/http_parser" \
     test.c "$CJSON/cJSON.c" "$IDF/components/http_parser/http_parser.c" -o "$OUT"
 rm -f "$OUT.port"

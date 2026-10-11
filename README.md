@@ -1,41 +1,41 @@
 # Hardware
 
-Comma hardware firmware. One folder per device; each folder is a standalone ESP-IDF project.
+Comma hardware firmware: one ESP-IDF project, shared gateway code, and per-board overlays.
 
-| Folder | Board | What it runs |
-| --- | --- | --- |
-| `firmware/` | LilyGO T-Circle-S3 (ESP32-S3, 16 MB flash, 8 MB PSRAM) | `comma.voice.v1` voice calls, BLE setup, and a LAN gateway (HTTP, UDP, discovery, TCP tunnels) |
+| Folder | Purpose |
+| --- | --- |
+| `firmware/main/` | Shared Connector, LAN methods, Wi-Fi, BLE provisioning and BOOT controls |
+| `firmware/boards/t_circle_s3/` | T-Circle display, touch, audio and voice |
+| `firmware/boards/esp32_devkit/` | DevKit GPIO0 BOOT and GPIO2 status LED |
+| `devices/` | Board configurations and [porting instructions](devices/README.md) |
+| `tools/board.sh` | Build and flash one board with its own generated config and build directory |
 
 ### Planned boards
 
-Every ESP32 board has Wi-Fi and BLE, so each one can serve as a home Connector (LAN gateway). Voice
-is enabled only on boards with a microphone and speaker. Camera snapshots (RTSP through
-`lan_tcp_dial`) need enough RAM to receive the server's 32 KiB tunnel frames
-([protocol §4, `lan_tcp_dial`](docs/connector-protocol.md)), and that is the main difference between boards.
+A supported ESP32 board with Wi-Fi and BLE can serve as a home Connector. Voice requires a microphone
+and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB tunnel frames
+([protocol §4](docs/connector-protocol.md)). Build support alone does not establish that these workloads fit.
 
-| Board | Chip / memory | Connector (HTTP, UDP, discovery) | Snapshots (TCP tunnel) | Voice | Pairing without a code on screen |
+| Board | Chip / memory | Connector | Snapshots (TCP tunnel) | Voice | Pairing |
 | --- | --- | --- | --- | --- | --- |
-| LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Yes (running) | Yes, 2 tunnels (board-tested) | Yes | Not needed: passkey on the screen |
-| ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Yes | Yes, expected same as T-Circle | Yes | Speaker reads the 6-digit passkey aloud |
-| M5Stack Stick (model to confirm) | ESP32-S3 or ESP32, depends on model | Yes | S3 model: yes. ESP32 model: as DevKit | If it has a mic and speaker | Not needed: passkey on the screen |
-| ESP32 DevKit (WROOM-32) | ESP32-D0WD rev v1.0, 4 MB flash, **no PSRAM** | Yes, with smaller limits (≈16 KiB per text response; chunk mode for larger) | **Unverified**: at most 1 tunnel, possibly none; needs a board test | No | Press BOOT to confirm (dev builds: passkey in the serial log) |
+| LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Running: HTTP, UDP, discovery | 2, board-tested in G3 | Yes | On-screen passkey, MITM |
+| ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Planned, not added | Expected; unverified | Planned | Planned spoken passkey |
+| M5Stack Stick (model to confirm) | Depends on model | Planned, not added | Unverified | Depends on hardware | Depends on hardware |
+| ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Builds; LED and BOOT logic verified; network acceptance pending | Experimental 1 × 32 KiB window; **not yet validated** | No | Secure Connections Just Works, no MITM |
 
-Porting notes:
+DevKit currently uses a 16 KiB text cap, 4 KiB HTTP chunks, a 16 KiB discovery arena and internal RAM
+fallback. The initial pairing heap measured about 173 KB free. BLE system pairing and the three-round
+TLS/transfer memory tests remain pending: the Mac was locked and the configured 2.4 GHz access point
+was not found. Do not treat the experimental tunnel/discovery settings as proven capacity.
+See [H1's measurements and remaining checks](docs/reports/H1-report.md).
 
-- Gateway code currently allocates its buffers and some task stacks with `MALLOC_CAP_SPIRAM`. Boards
-  without PSRAM need those to fall back to internal RAM and need smaller per-board limits.
-- On boards without PSRAM, BLE should run only during setup, so its memory returns to the network.
-- If a board cannot hold a tunnel, it must leave `lan_tcp_dial` out of `capabilities.lan_gateway.methods`;
-  the backend then does not route snapshots to it.
-- The app needs a pairing-method hint in the BLE advertisement (screen / spoken / button) to show the
-  right instructions.
-- Voice is a board feature (microphone + speaker), not a chip feature. Boards without audio build
-  without the voice stack, and the device should report that it has no voice, so the app does not ask for
-  `server` / `voice_key` (today [BLE setup](docs/ble-provisioning.md) requires every field) or offer calls.
+The BLE UUIDs and credential fields are unchanged; even the no-voice board still accepts the existing
+`server` and `voice_key` fields for app compatibility. BOOT grants a provisioned board a temporary
+pairing window; Just Works encryption cannot stop an active man-in-the-middle.
 
 ## Set up the toolchain
 
-Install **ESP-IDF v6.0.2** with the ESP32-S3 tools, following the
+Install **ESP-IDF v6.0.2** with the ESP32 and ESP32-S3 tools, following the
 [official installation guide](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32s3/get-started/index.html).
 The guide covers macOS, Linux, and Windows. Activate that installation in your terminal
 (or open its ESP-IDF terminal on Windows), then check:
@@ -54,29 +54,35 @@ You need read access to this private repository and GitHub authentication config
 
 ```sh
 git clone https://github.com/AFK-surf/Hardware.git
-cd Hardware/firmware
-idf.py build
+cd Hardware
+tools/board.sh t-circle-s3 build
+tools/board.sh esp32-devkit build
 ```
 
 No board, Wi-Fi password, backend credential, or `secrets.h` is needed to compile. The target and
-board settings are checked in as `sdkconfig` / `sdkconfig.defaults`; component versions are pinned
-in `dependencies.lock`. The first build downloads managed components, so it needs internet access.
-Keep the lockfile; do not run `idf.py update-dependencies` as part of ordinary setup.
+board settings come from `firmware/sdkconfig.defaults` plus `devices/sdkconfig.<board>`. Each build
+generates `firmware/build-<board>/sdkconfig`; no generated sdkconfig is committed. Dependencies are
+locked in `firmware/dependencies.lock` (T-Circle) and `firmware/dependencies.lock.esp32` (DevKit).
+The first build needs internet access. DevKit excludes ESP-SR and the LCD/audio stack. Build boards
+sequentially: the component manager uses one shared `firmware/managed_components/` directory.
+Do not run `idf.py update-dependencies` as part of ordinary setup.
 
 Display assets, fonts, and the logo binary are already checked in. Their generator scripts are
-optional and are not part of the firmware build. Outputs are under `firmware/build/`.
+optional and are not part of the firmware build. Outputs are under `firmware/build-<board>/`.
 
 ## Flash and provision a board
 
-Connect your T-Circle with a USB data cable. Replace `PORT` with its actual serial port, for example
-`/dev/cu.usbmodem1101` on macOS, `/dev/ttyACM0` on Linux, or `COM5` on Windows. Run from `firmware/`:
+Connect the intended board with a USB data cable. Replace `PORT` with its actual serial port, for example
+`/dev/cu.usbmodem1101` on macOS, `/dev/ttyACM0` on Linux, or `COM5` on Windows. Run from the repository root:
 
 ```sh
-idf.py -p PORT flash monitor
+tools/board.sh t-circle-s3 flash-monitor PORT
+# DevKit on this Mac (check the port before using):
+tools/board.sh esp32-devkit flash-monitor /dev/cu.usbserial-0001
 ```
 
-The first flash must include the bootloader, partition table, application, and ESP-SR model
-partition; use `flash`, not just `app-flash`. Exit the serial monitor with Ctrl+]. Do not erase
+The first flash must include the bootloader, partition table and application (plus the ESP-SR model
+partition on T-Circle); use `flash`, not just `app-flash`. Exit the serial monitor with Ctrl+]. Do not erase
 flash when updating a configured board unless you intend to remove its saved credentials.
 
 An unconfigured board advertises over BLE. Use the Comma app to set up **2.4 GHz Wi-Fi** and issue
@@ -84,12 +90,13 @@ the board its own Connector token and voice key. See the [BLE setup contract](do
 Runtime calls and LAN control require a compatible Comma/Salix backend; this repository contains
 the firmware and development tools, not the backend or Android app.
 
-- Tap the screen to call; tap again to hang up.
+- T-Circle: tap the screen to call; tap again to hang up.
+- DevKit: LED off normally, slow blink while advertising, fast blink while BLE connected, solid 3 s after saved.
 - Hold BOOT for at least 3 seconds and release before 10 seconds to enter pairing mode.
 - Hold BOOT for 10 seconds to factory reset and erase the saved configuration.
 - Enable device operations in the app before using the gateway; it starts read-only.
 
-For local development only, copy `main/secrets.h.example` to `main/secrets.h`, fill in your own
+For local development only, copy `firmware/main/secrets.h.example` to `firmware/main/secrets.h`, fill in your own
 credentials, and set `COMMA_DEV_SECRETS` to `1`. That overrides BLE/NVS settings and embeds those
 credentials in the firmware. `secrets.h` and build directories are ignored by Git. Ordinary builds
 and shared firmware should use BLE provisioning instead.
@@ -118,6 +125,10 @@ sh firmware/tools/lan_discover_test/run.sh
 sh firmware/tools/lan_http_test/run.sh
 sh firmware/tools/lan_udp_test/run.sh
 sh firmware/tools/lan_tunnel_test/run.sh
+# Smaller DevKit limits (from its overlay):
+sh firmware/tools/lan_http_test/run.sh --devkit
+sh firmware/tools/lan_udp_test/run.sh --devkit
+sh firmware/tools/lan_discover_test/run.sh --devkit
 ```
 
 These compile the real LAN implementations with ESP stubs and AddressSanitizer/UndefinedBehaviorSanitizer.
@@ -126,7 +137,10 @@ Wi-Fi, BLE, audio, or the lwIP receive-window adjustment.
 
 ## Project map and current limits
 
-- `firmware/main/`: firmware, board drivers, voice, setup, and LAN gateway.
+- `firmware/main/`: shared gateway, setup, controls, Kconfig and memory policy.
+- `firmware/boards/`: board drivers and feedback; T-Circle voice stays here.
+- `devices/`: per-board sdkconfig overlays; [add-a-board guide](devices/AGENTS.md).
+- `firmware/cmake/idf_patches.cmake`: shared NimBLE timeout patch and ARP table configuration.
 - `firmware/components/`: checked-in LCD driver.
 - `firmware/tools/` and `tools/`: provisioning clients, protocol simulators, and host tests.
 - [Connector protocol](docs/connector-protocol.md): backend integration contract.
@@ -135,7 +149,6 @@ Wi-Fi, BLE, audio, or the lwIP receive-window adjustment.
   test environment; use your own device and checkout.
 - [Code review, 2026-10-09](docs/reports/2026-10-09-code-review.md): newly identified issues awaiting fixes.
 
-Chunked HTTP transfers and TCP tunnels are refused during voice calls. Two simultaneous tunnels
-are supported, with a 5-minute idle limit. The [G3 report](docs/reports/G3-report.md) describes a known
+Chunked HTTP transfers and TCP tunnels are refused during voice calls. T-Circle supports two simultaneous tunnels, with a 5-minute idle limit. The [G3 report](docs/reports/G3-report.md) describes a known
 stall under bidirectional backpressure. OTA is not implemented. Secure Boot, flash encryption, and
 NVS encryption are not enabled in the current development configuration.

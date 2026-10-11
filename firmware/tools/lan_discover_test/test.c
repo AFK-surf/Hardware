@@ -562,8 +562,10 @@ static void test_caps(void)
     char *raw;
     r = result(ctx, &raw);
     CHECK(strlen(raw) <= LD_MAX_JSON, "result %zu bytes, budget %d", strlen(raw), LD_MAX_JSON);
-    CHECK(count(cJSON_GetObjectItem(r, "hosts")) > 0 && count(cJSON_GetObjectItem(r, "hosts")) < 64,
-          "some whole hosts dropped, %d kept", count(cJSON_GetObjectItem(r, "hosts")));
+    // A smaller arena truncates strings first, so all 64 sparse hosts can fit the JSON budget.
+    const int kept = count(cJSON_GetObjectItem(r, "hosts"));
+    CHECK(kept > 0 && kept <= 64 && (CONFIG_COMMA_LAN_DISCOVER_ARENA_BYTES < LD_MAX_JSON || kept < 64),
+          "bounded host result, %d kept", kept);
     CHECK(truncated(r), "budget sets truncated");
     free(raw);
     cJSON_Delete(r);

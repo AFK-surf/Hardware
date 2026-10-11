@@ -195,6 +195,16 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 
 ## 6. Liveness, timeouts, limits
 
+Limits below describe T-Circle unless a board is named. Firmware now loads per-board limits from
+`devices/sdkconfig.<board>`; consumers must read the actual `metadata` and tunnel dial response.
+DevKit's initial, **not yet transfer-validated** profile is: text 16 KiB, HTTP chunks 4 KiB (total cap
+still 4 MiB), RX JSON 48 KiB, discovery arena 16 KiB, UDP answers 2 KiB, one 32 KiB-window tunnel with
+4 KiB outgoing frames, and a 2 KiB WebSocket buffer. It still accepts the server's 32 KiB raw frames.
+`client_source` and `component_versions` use `esp32-devkit`; T-Circle keeps `t-circle`. Disabled
+methods disappear from `lan_gateway.methods`. See [H1](reports/H1-report.md) before relying on DevKit
+capacity; its final memory decision is pending network measurements.
+
+
 | Item | Value |
 |---|---|
 | Server heartbeat interval | 15 s |

@@ -632,7 +632,7 @@ static void test_requests(void)
 // One chunk-mode fetch of server path `path`, checked against the pattern: frames in order, bytes
 // identical, final frame consistent.
 static void check_chunked(const char *path, const char *extra, size_t frame_bytes, size_t want_bytes,
-                          bool want_truncated, unsigned want_chunks)
+                          bool want_truncated)
 {
     sink_reset(frame_bytes, 0);
     cJSON *f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d%s\",\"response_mode\":\"chunks\"%s}", g_port,
@@ -643,7 +643,9 @@ static void check_chunked(const char *path, const char *extra, size_t frame_byte
     CHECK(strcmp(str(r, "body_encoding"), "chunks") == 0, "%s: body_encoding", path);
     CHECK(cJSON_GetObjectItemCaseSensitive(r, "body") == NULL, "%s: no text body in chunk mode", path);
     CHECK(num(r, "chunks") == g_sink.frames, "%s: chunks %g, frames sent %u", path, num(r, "chunks"), g_sink.frames);
-    if (want_chunks) {
+    if (frame_bytes) {
+        const size_t cap = frame_bytes < LAN_HTTP_CHUNK_BYTES ? frame_bytes : LAN_HTTP_CHUNK_BYTES;
+        const unsigned want_chunks = (unsigned)((want_bytes + cap - 1) / cap);
         CHECK(g_sink.frames == want_chunks, "%s: %u frames, want %u", path, g_sink.frames, want_chunks);
     }
     CHECK(num(r, "body_bytes") == want_bytes && g_sink.len == want_bytes, "%s: body_bytes %g, got %zu, want %zu", path,
@@ -672,25 +674,25 @@ static void test_chunks(void)
     char extra[64];
 
     // The prompt's test files: 10 KB, an 800 KB "JPEG", 5 MB (over the 4 MB cap), every byte value.
-    check_chunked("/pattern/10240", "", 8192, 10240, false, 2);
-    check_chunked("/pattern/819200", "", LAN_HTTP_CHUNK_BYTES, 819200, false, 25);
-    check_chunked("/pattern/819200", "", 8192, 819200, false, 100);
-    check_chunked("/pattern/5242880", "", LAN_HTTP_CHUNK_BYTES, LAN_HTTP_CHUNK_MAX_TOTAL, true, 128);
-    check_chunked("/pattern/65536", "", 999, 65536, false, 66);  // every byte value, many times
+    check_chunked("/pattern/10240", "", 8192, 10240, false);
+    check_chunked("/pattern/819200", "", LAN_HTTP_CHUNK_BYTES, 819200, false);
+    check_chunked("/pattern/819200", "", 8192, 819200, false);
+    check_chunked("/pattern/5242880", "", LAN_HTTP_CHUNK_BYTES, LAN_HTTP_CHUNK_MAX_TOTAL, true);
+    check_chunked("/pattern/65536", "", 999, 65536, false);  // every byte value, many times
     // max_bytes over the cap means the cap; under it, it's the limit.
     snprintf(extra, sizeof(extra), ",\"max_bytes\":10485760");
-    check_chunked("/pattern/5242880", extra, LAN_HTTP_CHUNK_BYTES, LAN_HTTP_CHUNK_MAX_TOTAL, true, 128);
+    check_chunked("/pattern/5242880", extra, LAN_HTTP_CHUNK_BYTES, LAN_HTTP_CHUNK_MAX_TOTAL, true);
     snprintf(extra, sizeof(extra), ",\"max_bytes\":100000");
-    check_chunked("/pattern/819200", extra, 8192, 100000, true, 13);
+    check_chunked("/pattern/819200", extra, 8192, 100000, true);
     snprintf(extra, sizeof(extra), ",\"max_bytes\":819200");
-    check_chunked("/pattern/819200", extra, 8192, 819200, false, 100);
+    check_chunked("/pattern/819200", extra, 8192, 819200, false);
     // Over the text cap (64 KB) is fine in chunk mode.
-    check_chunked("/pattern/70000", "", LAN_HTTP_CHUNK_BYTES, 70000, false, 3);
+    check_chunked("/pattern/70000", "", LAN_HTTP_CHUNK_BYTES, 70000, false);
     // Other framings, and a frame size that changes from frame to frame.
-    check_chunked("/pattern-chunked/300001", "", 0, 300001, false, 0);
-    check_chunked("/pattern-close/70001", "", 4096, 70001, false, 18);
+    check_chunked("/pattern-chunked/300001", "", 0, 300001, false);
+    check_chunked("/pattern-close/70001", "", 4096, 70001, false);
     // frame_bytes() above the device max is clamped.
-    check_chunked("/pattern/100000", "", 1 << 20, 100000, false, 4);
+    check_chunked("/pattern/100000", "", 1 << 20, 100000, false);
 
     // Empty body: no chunk frames, the digest of nothing.
     sink_reset(8192, 0);

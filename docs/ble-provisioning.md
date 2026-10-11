@@ -1,4 +1,4 @@
-# T-Circle BLE provisioning contract
+# Comma BLE provisioning contract
 
 Firmware: `firmware/main/provisioning.c` (B1). App side: comma-android "Add device" (B2).
 Test client: `firmware/tools/ble_provision.py` (bleak). Visible text in the app is English.
@@ -9,10 +9,10 @@ Test client: `firmware/tools/ble_provision.py` (bleak). Visible text in the app 
 | --- | --- |
 | Unprovisioned (fresh flash, or after factory reset) | advertises until provisioned, no timeout |
 | Provisioned, idle | **off** (NimBLE fully shut down) |
-| Provisioned, pairing mode (hold BOOT 3 s, let go before 10 s) | advertises; leaves after 5 min without a connection, or on a tap on the screen |
+| Provisioned, pairing mode (hold BOOT 3 s, let go before 10 s) | advertises; leaves after 5 min without a connection, or on a tap on the T-Circle screen |
 | In a call | **off**; pairing mode cannot start during a call, and a call cannot start while BLE is on |
 
-Hold BOOT 10 s = factory reset: the screen counts down from 3 s on, then NVS is erased (credentials,
+Hold BOOT 10 s = factory reset: T-Circle shows a countdown and DevKit logs it from 3 s on, then NVS is erased (credentials,
 Wi-Fi, BLE keys) and the device restarts unprovisioned. A hold only counts if it starts after boot: if BOOT is
 still down when the device restarts, it is ignored until let go, so holding on erases once. The app tells the user this on unpair.
 
@@ -34,7 +34,7 @@ exclude the AD length and type bytes:
 | --- | --- | --- |
 | 0–1 | Company ID, little endian | `0xFFFF` (`FF FF`), reserved for testing |
 | 2 | Format version | `0x01` |
-| 3 | Model | `0x01` = T-Circle-S3 |
+| 3 | Model | `0x01` = existing Comma setup family (T-Circle-S3 and DevKit) |
 | 4 | State | `0x00` = unprovisioned; `0x01` = provisioned, pairing mode |
 | 5–6 | Short ID | Last two Wi-Fi MAC bytes, in name order: `Comma-5D28` → `5D 28` |
 
@@ -42,6 +42,10 @@ exclude the AD length and type bytes:
 before production. Ignore unknown format versions; later versions may append fields. A missing
 or unsupported payload does not mean unprovisioned. The short ID is a display hint, not a unique
 identity or proof of ownership; `info.mac` remains the stable identity after pairing.
+
+The DevKit keeps the existing model byte for compatibility with the current app scanner; use
+`info.model` (`t-circle-s3` or `esp32-devkit`) as the board identity after pairing. No new advertisement
+format or app hint was introduced.
 
 Both legacy packets fit in 31 bytes: advertising is **21 bytes** (flags `1 + 2`, UUID `16 + 2`);
 scan response is **21 bytes** (name `10 + 2`, manufacturer data `7 + 2`), leaving 10 bytes free.
@@ -58,14 +62,20 @@ bytes as its value.
 
 ## Security
 
-- LE Secure Connections only (legacy pairing refused), MITM: **passkey entry**. The device is
-  "display only": it shows a random 6-digit code on the round screen (`482 019`); the user types it
-  into the Android system pairing dialog.
-- The device sends a Security Request as soon as a phone connects, so the pairing dialog comes up
-  right away. If the app touches a characteristic first, Android gets "insufficient authentication"
-  and pairs then; either way works.
-- Every characteristic (including its notifications) requires an encrypted, authenticated link with
-  a 16-byte key. Nothing is readable before pairing.
+- Both boards accept **LE Secure Connections only**, reject legacy pairing, and require encryption
+  with a 16-byte key before any protected characteristic can be accessed.
+- **T-Circle:** display-only IO, random six-digit on-screen passkey, MITM protection, and
+  `READ_AUTHEN`/`WRITE_AUTHEN` as before. Enter the code in the system pairing dialog.
+- **ESP32 DevKit:** NoInputNoOutput IO, bonding on, MITM off, and encryption-only GATT permissions.
+  Just Works needs no passkey; the Android app already calls the system's `createBond()`, so its
+  protocol needs no change. OS confirmation behavior still needs an unlocked-device acceptance test.
+  **Just Works cannot prevent an active man-in-the-middle.** BOOT gates access to setup on an already
+  provisioned board, but physical presence does not provide cryptographic MITM protection.
+- NimBLE's `SM_SC_ONLY=1` additionally demands authenticated Level 4 GATT security; that rejects
+  Just Works even if GATT's AUTHEN flags are removed. DevKit therefore uses `SM_SC_ONLY=0`, while
+  `SM_SC=y` and `SM_LEGACY=n` still refuse legacy pairing. T-Circle keeps `SM_SC_ONLY=1`.
+- The phone initiates pairing (`createBond()` or first protected access). Firmware does not send an
+  early Security Request on connection, preserving the existing app timing and SMP timeout behavior.
 - Bonds live in device RAM for the current session only, so a dropped connection can reconnect
   without a new code until the device leaves pairing mode or restarts. Because the address changes
   each session, an old Android bond never matches a new session; the app may call `removeBond` on
@@ -84,7 +94,7 @@ Service `f2d20001-eb8e-4a64-9ec7-ab0cbb8107c8`. All values are UTF-8 JSON. Chara
 | `0003` | `wifi_credentials` | write | `{"ssid": "...", "password": "..."}` |
 | `0004` | `credentials` | write | see below |
 | `0005` | `status` | read, notify | see below |
-| `0006` | `info` | read | `{"fw_version", "mac", "model": "t-circle-s3", "name", "provisioned"}` |
+| `0006` | `info` | read | `{"fw_version", "mac", "model": "t-circle-s3" or "esp32-devkit", "name", "provisioned"}` |
 
 Use write-with-response for all writes; the response carries the validation result.
 
@@ -126,7 +136,8 @@ is stored until `credentials` is also written and Wi-Fi is up.
 }
 ```
 
-All fields are required. `server` is the voice host. `connect_url` is the Connector URL: copy
+All fields remain required on both boards, including the no-voice DevKit, to preserve the existing
+GATT contract. `server` is the voice host. `connect_url` is the Connector URL: copy
 `connect_url` from the connector-token response as given (it is the Salix host, which differs from
 the Comma API host; see `docs/connector-protocol.md`). Limits (bytes): `server` 127, `connect_url`
 159, `workspace_id`/`group_id` 95, `connector_token`/`voice_key` 159, `device_name` 63. `server` must
@@ -147,6 +158,11 @@ When both are in and Wi-Fi is up, the device stores everything in NVS (atomicall
 save leaves it unprovisioned), stops advertising and notifies `saved`. It then keeps BLE up until the
 app disconnects or 30 s pass, shuts BLE down, and becomes a normal device (calls allowed). The app
 may disconnect after `saved`, or wait a few seconds for `connector_up` first.
+
+This setup order remains the same for both boards. DevKit's simultaneous BLE/TLS heap test is still
+pending; H1 has not selected an early-BLE-shutdown policy without a measurement. DevKit LED states:
+off normally; 500 ms on/off while advertising; 100 ms on/off while connected; solid about 3 s after
+`saved`, including when BLE closes during that interval. Serial logs describe each transition.
 
 In pairing mode on an already provisioned device, writing only `credentials` (no
 `wifi_credentials`) keeps the stored Wi-Fi network; this is how credentials are rotated. Writing
