@@ -1,3 +1,4 @@
+#include "heap_diag.h"
 // BLE provisioning over NimBLE. Contract: docs/ble-provisioning.md.
 //
 // Every characteristic needs an encrypted, authenticated link: LE Secure Connections with a
@@ -37,7 +38,7 @@
 
 void ble_store_config_init(void);
 
-#define MODEL "t-circle-s3"
+#define MODEL CONFIG_COMMA_BOARD_ID
 #define SCAN_MAX 20
 #define WIFI_TRIAL_TIMEOUT_US (30LL * 1000000)
 // After the credentials are saved, BLE stays up until the app disconnects, at most this long.
@@ -291,8 +292,17 @@ static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt
     return rc;
 }
 
-#define SECURE_READ (BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN)
-#define SECURE_WRITE (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN)
+#if CONFIG_COMMA_PAIRING_PASSKEY
+#define PAIRING_MITM 1
+#define PAIRING_IO BLE_SM_IO_CAP_DISP_ONLY
+#define PAIRING_NAME "passkey"
+#else
+#define PAIRING_MITM 0
+#define PAIRING_IO BLE_SM_IO_CAP_NO_IO
+#define PAIRING_NAME "Just Works (no MITM protection)"
+#endif
+#define SECURE_READ (BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | (PAIRING_MITM ? BLE_GATT_CHR_F_READ_AUTHEN : 0))
+#define SECURE_WRITE (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | (PAIRING_MITM ? BLE_GATT_CHR_F_WRITE_AUTHEN : 0))
 
 static const struct ble_gatt_svc_def SERVICES[] = {
     {
@@ -303,28 +313,33 @@ static const struct ble_gatt_svc_def SERVICES[] = {
                 {
                     .uuid = &UUID_WIFI_SCAN.u,
                     .access_cb = gatt_access,
+                    .min_key_size = 16,
                     .flags = SECURE_WRITE | BLE_GATT_CHR_F_NOTIFY,
                     .val_handle = &s_handle_scan,
                 },
                 {
                     .uuid = &UUID_WIFI_CREDENTIALS.u,
                     .access_cb = gatt_access,
+                    .min_key_size = 16,
                     .flags = SECURE_WRITE,
                 },
                 {
                     .uuid = &UUID_CREDENTIALS.u,
                     .access_cb = gatt_access,
+                    .min_key_size = 16,
                     .flags = SECURE_WRITE,
                 },
                 {
                     .uuid = &UUID_STATUS.u,
                     .access_cb = gatt_access,
+                    .min_key_size = 16,
                     .flags = SECURE_READ | BLE_GATT_CHR_F_NOTIFY,
                     .val_handle = &s_handle_status,
                 },
                 {
                     .uuid = &UUID_INFO.u,
                     .access_cb = gatt_access,
+                    .min_key_size = 16,
                     .flags = SECURE_READ,
                 },
                 {0},
@@ -457,9 +472,9 @@ static int on_gap(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_ENC_CHANGE:
         if (event->enc_change.status == 0 && ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0 &&
-            desc.sec_state.encrypted && desc.sec_state.authenticated && desc.sec_state.key_size == 16) {
+            desc.sec_state.encrypted && (!PAIRING_MITM || desc.sec_state.authenticated) && desc.sec_state.key_size == 16) {
             s_secure = true;
-            ESP_LOGI(TAG, "paired (LE Secure Connections, passkey)");
+            ESP_LOGI(TAG, "paired (LE Secure Connections, " PAIRING_NAME ")");
             post(EV_PAIRED, 0, NULL);
         } else {
             ESP_LOGW(TAG, "pairing failed, status %d", event->enc_change.status);
@@ -536,9 +551,9 @@ static esp_err_t ble_up(void)
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
+    ble_hs_cfg.sm_io_cap = PAIRING_IO;
     ble_hs_cfg.sm_bonding = 1;
-    ble_hs_cfg.sm_mitm = 1;
+    ble_hs_cfg.sm_mitm = PAIRING_MITM;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
@@ -578,7 +593,9 @@ static void ble_down(void)
     s_conn = BLE_HS_CONN_HANDLE_NONE;
     s_secure = false;
     wifi_set_power_save(false);
+    comma_heap_log("ble_off");
     ESP_LOGI(TAG, "BLE off");
+    board_pairing_state(BOARD_PAIRING_OFF);
 }
 
 // ---- State --------------------------------------------------------------------------------------
@@ -658,7 +675,13 @@ static void show(screen_t screen)
         board_show_card("Wi-Fi connected", NULL, "Finishing setup in the app");
         break;
     case SCREEN_SAVED:
-        board_show_card("All set", NULL, device_config_provisioned() ? "Tap to call Comma" : "");
+        board_show_card("All set", NULL,
+#if CONFIG_COMMA_HAS_VOICE
+                        device_config_provisioned() ? "Tap to call Comma" : ""
+#else
+                        "Connector ready"
+#endif
+        );
         break;
     case SCREEN_PAIR_FAILED:
         board_show_card("Pairing failed", NULL, "Try again from the app");
@@ -811,7 +834,9 @@ static void commit(void)
     s_saved = true;
     s.saved_us = esp_timer_get_time();
     ble_gap_adv_stop();
+    comma_heap_log("saved_ble_up");
     publish_status("saved", NULL);
+    board_pairing_state(BOARD_PAIRING_SAVED);
     show(SCREEN_SAVED);
 }
 
@@ -849,6 +874,7 @@ static void handle(const event_t *ev)
 {
     switch (ev->type) {
     case EV_CONNECTED:
+        board_pairing_state(BOARD_PAIRING_CONNECTED);
         s.idle_since_us = 0;
         if (s.screen == SCREEN_PAIR_FAILED || s.screen == SCREEN_PAIR_TIMEOUT) {
             show(SCREEN_ADVERTISING);
@@ -857,6 +883,7 @@ static void handle(const event_t *ev)
         wifi_hold_reconnect(true);
         break;
     case EV_DISCONNECTED:
+        if (!s_saved) board_pairing_state(BOARD_PAIRING_ADVERTISING);
         s.idle_since_us = esp_timer_get_time();
         wifi_hold_reconnect(false);
         if (!s_saved) {
@@ -975,6 +1002,7 @@ static void prov_task(void *arg)
     s_connector_device_id[0] = '\0';
     publish_status("idle", NULL);
     show(SCREEN_ADVERTISING);
+    board_pairing_state(BOARD_PAIRING_ADVERTISING);
 
     bool stop = false;
     while (!stop) {
@@ -1062,6 +1090,7 @@ esp_err_t provisioning_start(void)
         s_active = false;
         return ESP_ERR_NO_MEM;
     }
+    comma_heap_log("pairing_wifi_ble_up");
     ESP_LOGI(TAG, "provisioning started (%s)", device_config_provisioned() ? "pairing mode" : "unprovisioned");
     return ESP_OK;
 }

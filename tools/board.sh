@@ -7,6 +7,7 @@ ACTION=${2:-build}
 if [ "$#" -ge 2 ]; then shift 2; else shift; fi
 case "$BOARD" in
   t-circle-s3) TARGET=esp32s3 ;;
+  esp32-devkit) TARGET=esp32 ;;
   *) echo "Unknown board: $BOARD" >&2; exit 2 ;;
 esac
 case "$ACTION" in

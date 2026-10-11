@@ -1,17 +1,23 @@
 menu "Comma firmware"
 choice COMMA_BOARD
     prompt "Board"
+    default COMMA_BOARD_ESP32_DEVKIT if IDF_TARGET_ESP32
     default COMMA_BOARD_T_CIRCLE_S3
 config COMMA_BOARD_T_CIRCLE_S3
     bool "LilyGO T-Circle-S3"
     depends on IDF_TARGET_ESP32S3
+config COMMA_BOARD_ESP32_DEVKIT
+    bool "ESP32 DevKit (no PSRAM)"
+    depends on IDF_TARGET_ESP32
 endchoice
 config COMMA_BOARD_ID
     string
     default "t-circle-s3" if COMMA_BOARD_T_CIRCLE_S3
+    default "esp32-devkit" if COMMA_BOARD_ESP32_DEVKIT
 config COMMA_CLIENT_SOURCE
     string
     default "t-circle" if COMMA_BOARD_T_CIRCLE_S3
+    default "esp32-devkit" if COMMA_BOARD_ESP32_DEVKIT
 config COMMA_HAS_VOICE
     bool "Voice"
     default y if COMMA_BOARD_T_CIRCLE_S3
@@ -67,4 +73,12 @@ config COMMA_CONNECTOR_WS_BUFFER_SIZE
     int "WebSocket client read/write buffer"
     range 1024 4096
     default 4096
+config COMMA_LED_GPIO
+    int "Status LED GPIO (-1 disables)"
+    range -1 33
+    default -1
+config COMMA_BOOT_GPIO
+    int "BOOT GPIO (active low)"
+    range 0 39
+    default 0
 endmenu

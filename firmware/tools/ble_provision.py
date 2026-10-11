@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision a T-Circle over BLE, the way the Comma app does. Contract: docs/ble-provisioning.md.
+"""Provision a Comma board over BLE, the way the Comma app does. Contract: docs/ble-provisioning.md.
 
     pip install bleak
     tools/ble_provision.py scan
@@ -14,8 +14,8 @@ Secrets come from the environment so they stay out of shell history:
     COMMA_CONNECTOR_TOKEN salix_conn_...
     COMMA_WIFI_PASSWORD   (instead of --password)
 
-The first encrypted access makes the OS ask for the passkey shown on the device. On macOS a system
-dialog comes up; type the 6 digits there.
+The first encrypted access triggers system pairing. T-Circle displays a six-digit passkey;
+ESP32 DevKit uses Just Works confirmation with no passkey and no MITM protection.
 """
 
 import argparse
@@ -117,7 +117,7 @@ async def pair(client):
             await client.pair()
         except (BleakError, NotImplementedError) as e:
             log(f"pair(): {e}")
-    log("reading info (accept the pairing prompt and type the code on the device screen) ...")
+    log("reading info (accept system pairing; enter a code only if the board displays one) ...")
     for attempt in range(60):
         try:
             return await client.read_gatt_char(INFO)
