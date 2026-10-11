@@ -1,3 +1,4 @@
+#include "heap_diag.h"
 #include "memory_caps.h"
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
@@ -487,6 +488,7 @@ char *lan_discover_run(const char *id, const cJSON *params)
     bool truncated;
     ld_counts(ctx, &hosts, &n_arp, &n_mdns, &n_ssdp, &truncated);
     char *result = ld_result_json(ctx);
+    comma_heap_log("discovery_peak");
     ld_free(ctx);
     free(buf);
     free(dump);

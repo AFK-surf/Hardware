@@ -72,3 +72,13 @@ endif()
 if(DEFINED COMMA_TUNNEL_SOCKET_WINDOW)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE LAN_TUNNEL_SOCKET_WINDOW=${COMMA_TUNNEL_SOCKET_WINDOW})
 endif()
+
+# Local TLS memory tests: authenticate a fake WSS server with a test-only CA.
+if(COMMA_CONNECT_TEST_CA)
+    if(NOT COMMA_CONNECT_URL_OVERRIDE)
+        message(FATAL_ERROR "COMMA_CONNECT_TEST_CA requires COMMA_CONNECT_URL_OVERRIDE")
+    endif()
+    configure_file("${COMMA_CONNECT_TEST_CA}" "${CMAKE_CURRENT_BINARY_DIR}/connector_test_ca.pem" COPYONLY)
+    target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_BINARY_DIR}/connector_test_ca.pem" TEXT)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_CONNECT_TEST_CA=1)
+endif()

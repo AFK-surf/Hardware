@@ -1,3 +1,4 @@
+#include "heap_diag.h"
 #include "memory_caps.h"
 // http_request for the Connector. Built on esp_transport + http_parser rather than esp_http_client:
 // esp_http_client reads nothing from a response that has neither Content-Length nor chunked
@@ -889,6 +890,7 @@ done:;
         ESP_LOGW(TAG, "%s failed: %s", id, err);
         frame = error_frame(id, err);
     }
+    comma_heap_log(chunk_mode ? "http_chunks_peak" : "http_text_peak");
     if (t) {
         esp_transport_close(t);
         esp_transport_destroy(t);
@@ -901,5 +903,6 @@ done:;
     sb_free(&r.value);
     sb_free(&r.body);
     cJSON_Delete(r.headers);
+    comma_heap_log("http_cleanup");
     return frame;
 }

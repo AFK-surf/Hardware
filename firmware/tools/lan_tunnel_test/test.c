@@ -35,6 +35,21 @@ QueueHandle_t xQueueCreate(size_t len, size_t item_size)
     return q;
 }
 
+void vQueueDelete(QueueHandle_t q)
+{
+    pthread_mutex_destroy(&q->mu);
+    pthread_cond_destroy(&q->cv);
+    free(q->items);
+    free(q);
+}
+
+static atomic_size_t g_fail_alloc_size;
+void *test_heap_alloc(size_t n)
+{
+    if (n == g_fail_alloc_size) { g_fail_alloc_size = 0; return NULL; }
+    return malloc(n);
+}
+
 static void deadline_after(struct timespec *ts, TickType_t ms)
 {
     struct timeval now;
@@ -967,10 +982,34 @@ static void test_drain_on_eof(server_t *echo)
     drop_frames();
 }
 
+static void test_out_of_memory(server_t *echo)
+{
+    for (int fail_command = 0; fail_command < 2; ++fail_command) {
+        route(echo);
+        CHECK(open_tunnel("tun_oom", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+        const size_t n = 32768;
+        unsigned char *data = pattern(n, 42);
+        g_fail_alloc_size = fail_command ? sizeof(cmd_t) : sizeof(block_t) + B64_LEN(n) / 4 * 3;
+        server_data("tun_oom", data, n);
+        free(data);
+        cJSON *f = next_frame(2000);
+        CHECK(f && is_eof(f) && str(f, "error"), "OOM must end with error, not stall");
+        cJSON_Delete(f);
+        CHECK(wait_no_tunnels(2000), "OOM leaked a tunnel");
+        CHECK(g_fail_alloc_size == 0, "allocation fault did not fire");
+        drop_frames();
+    }
+    // A subsequent request must still work after both failure modes.
+    test_connect_answer_and_echo(echo);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
     const lan_tunnel_host_t host = {.send = host_send, .check = host_check};
+    g_fail_alloc_size = FRAME_CAP;
+    CHECK(!lan_tunnel_start(&host), "startup allocation fault did not refuse");
+    CHECK(!s_cmds && !s_raw && !s_frame, "startup allocation fault leaked resources");
     if (!lan_tunnel_start(&host)) {
         fprintf(stderr, "lan_tunnel_start failed\n");
         return 1;
@@ -988,6 +1027,7 @@ int main(void)
     test_lan_reset();
     test_drain_on_eof(echo);
     test_idle(echo);
+    test_out_of_memory(echo);
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

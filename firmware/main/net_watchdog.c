@@ -1,3 +1,4 @@
+#include "heap_diag.h"
 #include "memory_caps.h"
 #include "net_watchdog.h"
 
@@ -195,6 +196,7 @@ static void watchdog_task(void *arg)
         }
         next_ping = now + PING_INTERVAL_US;
         bool ok = ping_gateway(gw, ++seq);
+        comma_heap_log("netdog");
 #ifdef NET_WATCHDOG_SIMULATE
         // Bench test only (#define NET_WATCHDOG_SIMULATE at the top of this file; -D via idf.py is
         // cached in build/toolchain/cflags and not rebuilt): 1 = three misses once after 60 s uptime,

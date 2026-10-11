@@ -46,6 +46,7 @@ toggle in Settings.
 """
 
 import argparse
+import ssl
 import asyncio
 import base64
 import functools
@@ -489,6 +490,18 @@ class Session:
             log(f"  {(p.final or {}).get('error')!r} {p.problems}")
             self.failures += 1
 
+    async def text_limit_request(self, url):
+        cap = self.metadata["capabilities"]["lan_gateway"]["max_bytes"]
+        p = await self.request("http_request", {"method": "GET", "url": url, "max_bytes": cap,
+                                               "timeout_seconds": 30}, 40)
+        res = (p.final or {}).get("result", {})
+        ok = (res.get("body") == "x" * cap and res.get("body_bytes") == cap
+              and res.get("truncated") is True and not p.chunks)
+        log(f"{'PASS' if ok else 'FAIL'} text at limit: {cap} bytes, "
+            f"body_bytes={res.get('body_bytes')}, truncated={res.get('truncated')}, "
+            f"error={(p.final or {}).get('error')!r}")
+        self.failures += 0 if ok else 1
+
     # ---- tunnels ----
 
     async def on_tunnel_frame(self, frame):
@@ -738,8 +751,8 @@ class Session:
         host = args.serve_host or self.local_ip
         methods = (self.metadata or {}).get("capabilities", {}).get("lan_gateway", {}).get("methods") or []
         if "lan_tcp_dial" not in methods:
-            log(f"FAIL: metadata lan_gateway.methods {methods} has no lan_tcp_dial")
-            self.failures += 1
+            log("SKIP tunnels: board does not advertise lan_tcp_dial")
+            return
         if args.tunnel:
             await self.tunnel_echo(host, args.echo_port)
             await self.tunnel_pull(host, args.source_port, self.source_payload)
@@ -756,9 +769,12 @@ class Session:
             log("no metadata within 15 s")
             return
         caps = self.metadata.get("capabilities", {})
-        if not caps.get("lan_gateway", {}).get("response_chunks"):
-            log("FAIL: metadata has no capabilities.lan_gateway.response_chunks")
-            self.failures += 1
+        gateway = caps.get("lan_gateway", {})
+        methods = gateway.get("methods") or []
+        http_enabled = "http_request" in methods
+        chunks_enabled = http_enabled and bool(gateway.get("response_chunks"))
+        if not chunks_enabled:
+            log("SKIP chunks: board does not advertise response_chunks")
         if caps.get("scope") != "":
             if not args.allow_ops:
                 log("the board is read-only: requests will be refused (use --allow-ops, or allow it in Settings)")
@@ -766,11 +782,6 @@ class Session:
                 log("→ device_access allow_operations=true (saved on the board)")
                 p = await self.request("device_access", {"allow_operations": True}, 10)
                 log(f"  {p.final}")
-        if args.tunnel or args.rtsp:
-            await self.tunnel_plan()
-            if not (args.serve or args.fetch):
-                log(f"done: {self.failures} failure(s). The board stays connected; Ctrl-C to quit.")
-                return
         targets = []  # (url, expected bytes or None, label)
         if args.serve:
             base = f"http://{args.serve_host or self.local_ip}:{args.serve_port}/"
@@ -784,11 +795,24 @@ class Session:
         rounds = 0
         while True:
             rounds += 1
-            for url, expected, label in targets:
+            log(f"round {rounds}")
+            if args.tunnel or args.rtsp:
+                await self.tunnel_plan()
+            if args.discover:
+                if "lan_discover" in methods:
+                    p = await self.request("lan_discover", {"timeout_ms": 3000}, 15)
+                    ok = bool(p.final) and p.final.get("type") == "response"
+                    log(f"{'PASS' if ok else 'FAIL'} discovery: {p.final}")
+                    self.failures += 0 if ok else 1
+                else:
+                    log("SKIP discovery: board does not advertise lan_discover")
+            if args.text_limit and args.serve and http_enabled:
+                await self.text_limit_request(base + "limit.txt")
+            for url, expected, label in (targets if chunks_enabled else []):
                 await self.fetch_chunks(url, expected, label)
                 if self.ws.closed:
                     return
-            if args.serve and rounds == 1 and not args.no_text:
+            if args.serve and http_enabled and rounds == 1 and not args.no_text:
                 # An ordinary request still gets the old text reply.
                 await self.text_request(f"http://{args.serve_host or self.local_ip}:{args.serve_port}/")
             if args.loop != 0 and rounds >= args.loop:
@@ -866,10 +890,22 @@ async def main():
                     help="hold acks back for S s once 256 KB have arrived on a tunnel (slow-server test)")
     ap.add_argument("--ack-timeout", type=float, default=15, help="seconds to wait for a tcp_ack before failing")
     ap.add_argument("--allow-ops", action="store_true", help="send device_access true if the board is read-only")
+    ap.add_argument("--discover", action="store_true", help="test advertised LAN discovery each round")
+    ap.add_argument("--text-limit", action="store_true", help="test text at advertised limit (--make-files/--serve)")
+    ap.add_argument("--tls-cert", help="PEM certificate for local WSS tests")
+    ap.add_argument("--tls-key", help="PEM key for local WSS tests")
     args = ap.parse_args()
+    tls = None
+    if args.tls_cert or args.tls_key:
+        if not (args.tls_cert and args.tls_key):
+            ap.error("--tls-cert and --tls-key must be supplied together")
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(args.tls_cert, args.tls_key)
     os.makedirs(args.out, exist_ok=True)
     if args.make_files:
         make_files(args.make_files)
+        with open(os.path.join(args.make_files, "limit.txt"), "w") as text_file:
+            text_file.write("x" * 131072)
     if args.serve:
         serve_files(args.serve, args.serve_port)
     args.source_payload = random.Random(1010).randbytes(1024 * 1024)
@@ -878,9 +914,9 @@ async def main():
         start_source_server(args.source_port, args.source_payload)
     done = []
     server = await asyncio.start_server(
-        lambda r, w: serve_connection(r, w, args, done), "0.0.0.0", args.port, limit=MAX_FRAME
+        lambda r, w: serve_connection(r, w, args, done), "0.0.0.0", args.port, limit=MAX_FRAME, ssl=tls
     )
-    log(f"fake Connector on ws://0.0.0.0:{args.port}/v1/connect — waiting for the board")
+    log(f"fake Connector on {'wss' if tls else 'ws'}://0.0.0.0:{args.port}/v1/connect — waiting for the board")
     async with server:
         await server.serve_forever()
 

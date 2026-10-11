@@ -1,3 +1,4 @@
+#include "heap_diag.h"
 #include "memory_caps.h"
 // lan_tcp_dial (G3): TCP tunnels from the T-Circle to LAN hosts, relayed over the Connector socket.
 // Protocol and limits in lan_tunnel.h.
@@ -21,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +80,7 @@ typedef enum {
     CMD_DATA,
     CMD_ACK,
     CMD_EOF,
+    CMD_OOM, // stop this tunnel instead of dropping a data frame and stalling
     CMD_BAD,  // a data frame that is not valid base64 or is too large
 } cmd_kind_t;
 
@@ -139,6 +142,7 @@ static tunnel_t s_t[LAN_TUNNEL_MAX_OPEN];
 static unsigned char *s_raw;  // one LAN read, PSRAM
 static char *s_frame;         // one data frame, PSRAM
 static volatile int s_count;
+static atomic_bool s_command_failure;
 
 static void *psram_alloc(size_t n)
 {
@@ -633,6 +637,8 @@ static void run_cmd(cmd_t *c)
         } else {
             finish(t, "", false);
         }
+    } else if (c->kind == CMD_OOM) {
+        finish(t, "out of memory for a tunnel frame", true);
     } else if (c->kind == CMD_BAD) {
         finish(t, "invalid tunnel frame", true);
     } else if (c->kind == CMD_DATA && t->state != T_DRAINING) {
@@ -772,6 +778,11 @@ static void housekeeping(tunnel_t *t, int64_t now)
 
 void lan_tunnel_step(int wait_ms)
 {
+    if (atomic_exchange(&s_command_failure, false)) {
+        for (int i = 0; i < LAN_TUNNEL_MAX_OPEN; ++i) {
+            if (s_t[i].state != T_FREE) finish(&s_t[i], "tunnel command unavailable", true);
+        }
+    }
     drain_cmds(s_count > 0 ? 0 : pdMS_TO_TICKS(wait_ms));
     if (s_count == 0) {
         return;
@@ -850,11 +861,19 @@ static void tunnel_task(void *arg)
     (void)arg;
     for (;;) {
         lan_tunnel_step(1000);
+#if CONFIG_COMMA_HEAP_DIAGNOSTICS
+        static int64_t last;
+        if (esp_timer_get_time() - last > 1000000) {
+            last = esp_timer_get_time();
+            comma_heap_log("tunnel_sample");
+        }
+#endif
     }
 }
 
 bool lan_tunnel_start(const lan_tunnel_host_t *host)
 {
+    comma_heap_log("tunnel_task_start");
     s_host = *host;
     for (int i = 0; i < LAN_TUNNEL_MAX_OPEN; ++i) {
         s_t[i].fd = -1;
@@ -864,14 +883,22 @@ bool lan_tunnel_start(const lan_tunnel_host_t *host)
     s_frame = psram_alloc(FRAME_CAP);
     if (!s_cmds || !s_raw || !s_frame) {
         ESP_LOGE(TAG, "out of memory, lan_tcp_dial off");
-        return false;
+        goto fail;
     }
     // Sockets only, never flash: the stack can be in PSRAM.
     if (xTaskCreateWithCaps(tunnel_task, "lan_tunnel", TASK_STACK, NULL, TASK_PRIO, NULL, COMMA_BUFFER_CAPS) != pdPASS) {
         ESP_LOGE(TAG, "task create failed, lan_tcp_dial off");
-        return false;
+        goto fail;
     }
     return true;
+fail:
+    if (s_cmds) vQueueDelete(s_cmds);
+    free(s_raw);
+    free(s_frame);
+    s_cmds = NULL;
+    s_raw = NULL;
+    s_frame = NULL;
+    return false;
 }
 
 int lan_tunnel_count(void)
@@ -886,6 +913,7 @@ static bool post(cmd_t *c)
     // The tunnel task drains the queue every POLL_MS, so this only waits when something is badly wrong.
     if (xQueueSend(s_cmds, &c, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ESP_LOGW(TAG, "%s: command queue full, dropped", c->id);
+        s_command_failure = true;
         free(c->block);
         free(c);
         return false;
@@ -909,6 +937,7 @@ static cmd_t *new_cmd(cmd_kind_t kind, const char *id, unsigned session)
 
 bool lan_tunnel_dial(const char *id, const cJSON *params, unsigned session)
 {
+    if (!s_cmds) return false;
     cmd_t *c = new_cmd(CMD_DIAL, id, session);
     if (!c) {
         return false;
@@ -931,6 +960,7 @@ bool lan_tunnel_dial(const char *id, const cJSON *params, unsigned session)
 
 bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)
 {
+    if (!s_cmds) return false;
     const cJSON *stream = cJSON_GetObjectItemCaseSensitive(msg, "stream");
     const cJSON *channel = cJSON_IsObject(stream) ? cJSON_GetObjectItemCaseSensitive(stream, "channel") : NULL;
     if (!cJSON_IsString(channel)) {
@@ -968,8 +998,8 @@ bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)
                 c = new_cmd(CMD_DATA, id, session);
                 block_t *b = c ? psram_alloc(sizeof(block_t) + most) : NULL;
                 if (c && !b) {
-                    free(c);
-                    c = NULL;
+                    comma_heap_log("tunnel_decode_oom");
+                    c->kind = CMD_OOM;
                 } else if (c) {
                     const long n = lan_tunnel_b64_decode(data->valuestring, text, b->data, most);
                     memset(b, 0, sizeof(*b));
@@ -988,6 +1018,7 @@ bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)
     }
     if (!c) {
         ESP_LOGW(TAG, "%s: out of memory for a tunnel frame", id);
+        s_command_failure = true;
         return true;
     }
     post(c);

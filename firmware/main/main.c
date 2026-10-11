@@ -1,3 +1,4 @@
+#include "heap_diag.h"
 #include "memory_caps.h"
 #include "app_controls.h"
 #include "board.h"
@@ -91,6 +92,7 @@ void app_main(void)
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     ESP_ERROR_CHECK(device_config_init());
     board_init();
+    comma_heap_log("boot_before_wifi");
     ESP_ERROR_CHECK(wifi_init());
     board_start_feedback();
     device_config_t *cfg = calloc(1, sizeof(*cfg));

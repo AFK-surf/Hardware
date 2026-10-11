@@ -65,8 +65,8 @@ class FakeBoard:
                 "capabilities": {
                     "scope": scope,
                     "lan_gateway": {
-                        "methods": ["http_request", "lan_tcp_dial"],
-                        "response_chunks": {"max_total_bytes": 4194304, "chunk_bytes": 32768},
+                        "methods": ["http_request"] if corrupt == "no-tunnels" else ["http_request", "lan_tcp_dial"],
+                        "response_chunks": None if corrupt == "no-chunks" else {"max_total_bytes": 4194304, "chunk_bytes": 32768},
                     },
                 },
                 "system_info": {"hostname": "Comma-TEST"},
@@ -303,6 +303,17 @@ class FakeConnectorTest(unittest.TestCase):
             proc.terminate()
             log = proc.communicate(timeout=10)[0]
         return log, files, out
+
+    def test_board_without_tunnels(self):
+        log, _, _ = self.run_fake("no-tunnels", self.tunnel_args(), files_args=False)
+        self.assertIn("SKIP tunnels", log)
+        self.assertIn("done: 0 failure(s)", log)
+
+    def test_board_without_chunks(self):
+        log, _, _ = self.run_fake("no-chunks")
+        self.assertIn("SKIP chunks", log)
+        self.assertIn("PASS text mode", log)
+        self.assertIn("done: 0 failure(s)", log)
 
     def test_all_files_pass(self):
         log, files, out = self.run_fake()

@@ -1,3 +1,4 @@
+#include "heap_diag.h"
 #include "firmware_config.h"
 #include "memory_caps.h"
 #include "connector.h"
@@ -102,6 +103,7 @@ static const char *TAG = "connector";
 typedef enum {
     EV_OPEN,
     EV_TEXT,     // data: NUL-terminated frame, PSRAM, freed by the receiver
+    EV_NO_MEMORY, // data: request id when recoverable; NULL closes the session
     EV_TOO_BIG,  // data: request id, or NULL when it could not be read
     EV_CLOSED,
     EV_REPLY,    // data: a whole reply frame from the LAN worker, PSRAM, for socket `session`
@@ -174,11 +176,11 @@ static int64_t s_stats_us;
 // with COMMA_DEV_SECRETS on a dev board.
 static bool connector_credentials(credentials_t *out)
 {
+    out->generation = device_config_generation();
     device_config_t *cfg = calloc(1, sizeof(*cfg));
     if (!cfg) {
         return false;
     }
-    out->generation = device_config_generation();
     const bool provisioned = device_config_get(cfg);
     strlcpy(out->url, cfg->connect_url, sizeof(out->url));
     strlcpy(out->token, cfg->connector_token, sizeof(out->token));
@@ -346,7 +348,9 @@ static void consume_chunk(const esp_websocket_event_data_t *event)
         if (text) {
             post(EV_TEXT, text);
         } else {
+            comma_heap_log("rx_copy_oom");
             ESP_LOGW(TAG, "out of memory for a %u-byte frame", (unsigned)s_frame_len);
+            post(EV_NO_MEMORY, find_request_id((const char *)s_rx, s_frame_len));
         }
     }
     // The server ignores binary frames, so it never sends any.
@@ -452,6 +456,30 @@ static void send_metadata(void)
     }
 }
 
+static size_t oom_frame(char *frame, size_t cap, const char *id)
+{
+    char escaped[ID_MAX * 6 + 1];
+    size_t n = 0;
+    if (strlen(id) > ID_MAX) return 0;
+    for (const unsigned char *p = (const unsigned char *)id; *p; ++p) {
+        if (*p < 0x20 || *p == '"' || *p == '\\') {
+            n += (size_t)snprintf(escaped + n, sizeof(escaped) - n, "\\u%04x", *p);
+        } else {
+            escaped[n++] = (char)*p;
+        }
+    }
+    escaped[n] = 0;
+    int len = snprintf(frame, cap, "{\"id\":\"%s\",\"type\":\"error\","
+                      "\"error\":\"out of memory on this device\"}", escaped);
+    return len > 0 && (size_t)len < cap ? (size_t)len : 0;
+}
+
+static void send_oom(const char *id)
+{
+    char frame[ID_MAX * 6 + 96];
+    if (oom_frame(frame, sizeof(frame), id)) send_json(frame);
+}
+
 static void send_error(const char *id, const char *message)
 {
     cJSON *obj = cJSON_CreateObject();
@@ -535,6 +563,7 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root)
     strlcpy(job.id, id, sizeof(job.id));
     job.params = cJSON_DetachItemFromObjectCaseSensitive(root, "params");
     if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
+        comma_heap_log("lan_result_ready");
         cJSON_Delete(job.params);
         send_error(id, "the T-Circle is busy with other LAN requests; try again shortly");
     }
@@ -613,7 +642,7 @@ static bool chunk_wait_room(chunk_ctx_t *c, char *err, size_t err_size)
         }
         if (esp_timer_get_time() - since >= CHUNK_STALL_LIMIT_MS * 1000LL) {
             ESP_LOGW(TAG, "chunk: no room on the Connector socket for %d s, giving up", CHUNK_STALL_LIMIT_MS / 1000);
-            snprintf(err, err_size, "the T-Circle's link to the server made no progress for %d s",
+            snprintf(err, err_size, "the device's link to the server made no progress for %d s",
                      CHUNK_STALL_LIMIT_MS / 1000);
             return false;
         }
@@ -752,6 +781,7 @@ static void lan_worker(void *arg)
     for (;;) {
         lan_job_t job;
         xQueueReceive(s_lan_jobs, &job, portMAX_DELAY);
+        comma_heap_log("lan_begin");
         char *frame;
         const bool selftest = job.session == SELFTEST_SESSION;
         if (!selftest && job.session != s_session) {
@@ -777,7 +807,13 @@ static void lan_worker(void *arg)
         } else {
             frame = run_http_request(&job);
         }
+        comma_heap_log("lan_result_ready");
         cJSON_Delete(job.params);
+        if (!frame && !selftest && job.session == s_session) {
+            char error[ID_MAX * 6 + 96];
+            const size_t len = oom_frame(error, sizeof(error), job.id);
+            if (len) send_on_session(job.session, error, len);
+        }
         if (frame && selftest) {
             const size_t len = strlen(frame);
             for (size_t at = 0; at < len; at += 400) {
@@ -853,7 +889,11 @@ static void handle_text(const char *json)
 {
     cJSON *root = cJSON_Parse(json);
     if (!root) {
-        ESP_LOGW(TAG, "ignored malformed text frame");
+        ESP_LOGW(TAG, "invalid JSON or out of memory parsing frame");
+        comma_heap_log("json_parse_failed");
+        char *id = find_request_id(json, strlen(json));
+        if (id) { send_oom(id); free(id); }
+        else { post(EV_CLOSED, NULL); }
         return;
     }
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
@@ -899,6 +939,7 @@ static void log_stats(void)
         return;
     }
     s_stats_us = now;
+    comma_heap_log("connector_stats");
     char age[24] = "never";
     if (s_heartbeat_us != 0) {
         snprintf(age, sizeof(age), "%llds", (long long)((now - s_heartbeat_us) / 1000000));
@@ -1034,6 +1075,7 @@ static int64_t run_session(const credentials_t *creds)
     s_assembling = false;
     drain_events();
 
+    comma_heap_log("connector_before_dial");
     esp_websocket_client_config_t cfg = {
         .uri = s_uri,
         .headers = s_headers,
@@ -1051,6 +1093,11 @@ static int64_t run_session(const credentials_t *creds)
         cfg.transport = WEBSOCKET_TRANSPORT_OVER_TCP;
         cfg.crt_bundle_attach = NULL;
     }
+#ifdef COMMA_CONNECT_TEST_CA
+    extern const char test_ca[] asm("_binary_connector_test_ca_pem_start");
+    cfg.cert_pem = test_ca;
+    cfg.crt_bundle_attach = NULL;
+#endif
     // The client mallocs two buffer_size buffers, which CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL would
     // put in internal RAM. Right after BLE provisioning that has ~12 KB left, too little for them
     // plus the task stack, so steer this one init to PSRAM. Connector traffic is light.
@@ -1101,6 +1148,7 @@ static int64_t run_session(const credentials_t *creds)
             if (ev.kind == EV_OPEN) {
                 opened_us = last_rx_us;
                 s_heartbeat_us = 0;
+                comma_heap_log("connector_open");
                 ESP_LOGI(TAG, "socket open");
                 conn_fd_find();
                 send_metadata();
@@ -1110,12 +1158,16 @@ static int64_t run_session(const credentials_t *creds)
                 if (ev.session == s_session) {
                     send_json(ev.data);
                 }
+            } else if (ev.kind == EV_NO_MEMORY) {
+                if (!ev.data) break; // Closing the session fails its pending requests server-side.
+                send_oom(ev.data);
             } else if (ev.kind == EV_TOO_BIG) {
                 if (ev.data) {
                     send_error(ev.data, "request too large for this device");
                 }
             }
             free(ev.data);
+            if (ev.kind == EV_REPLY) comma_heap_log("lan_reply_freed");
         }
     }
     s_up = false;
@@ -1143,6 +1195,7 @@ static void wait_for_new_credentials(const credentials_t *creds)
 static void connector_task(void *arg)
 {
     (void)arg;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // startup publishes all worker readiness first
     credentials_t creds;
     load_access();
     make_instance_id();
@@ -1207,41 +1260,58 @@ static void connector_task(void *arg)
 void connector_start(void)
 {
     static bool started;
-    if (started) {
+    static int64_t retry_after;
+    if (started || esp_timer_get_time() < retry_after) {
         return;
     }
-    started = true;
+    retry_after = esp_timer_get_time() + 5000000;
+    TaskHandle_t worker = NULL, connector = NULL;
     s_events = xQueueCreate(16, sizeof(event_t));
     s_lan_jobs = xQueueCreate(LAN_QUEUE_LEN, sizeof(lan_job_t));
     s_client_mutex = xSemaphoreCreateMutex();
     s_rx = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
     if (!s_events || !s_lan_jobs || !s_client_mutex || !s_rx) {
-        ESP_LOGE(TAG, "out of memory, Connector off");
-        return;
+        ESP_LOGE(TAG, "out of memory, Connector retries in 5 s");
+        goto fail;
     }
     // The worker never writes flash, so its stack can be in PSRAM.
-    s_lan_ready = xTaskCreateWithCaps(lan_worker, "lan", LAN_WORKER_STACK, NULL, LAN_WORKER_PRIO, NULL,
+    s_lan_ready = xTaskCreateWithCaps(lan_worker, "lan", LAN_WORKER_STACK, NULL, LAN_WORKER_PRIO, &worker,
                                       COMMA_BUFFER_CAPS) == pdPASS;
     if (!s_lan_ready) {
         ESP_LOGE(TAG, "LAN worker create failed, http_request, udp_request and lan_discover off");
     }
-    #if CONFIG_COMMA_LAN_TUNNELS > 0
-    const lan_tunnel_host_t tunnel_host = {.send = tunnel_send, .check = tunnel_check};
-    s_tunnel_ready = lan_tunnel_start(&tunnel_host);
-    #endif
 #ifdef COMMA_CONNECT_URL_OVERRIDE
     ESP_LOGW(TAG, "dev build: Connector dials %s with a dummy token, not the saved credentials",
              COMMA_CONNECT_URL_OVERRIDE);
 #endif
+    if (xTaskCreate(connector_task, "connector", 6144, NULL, CONNECTOR_TASK_PRIO, &connector) != pdPASS) {
+        ESP_LOGE(TAG, "task create failed, Connector retries in 5 s");
+        if (worker) vTaskDeleteWithCaps(worker);
+        s_lan_ready = false;
+        goto fail;
+    }
+    started = true;
 #if COMMA_LAN_DISCOVER_SELFTEST_S > 0
     ESP_LOGW(TAG, "lan_discover self-test every %d s (dev build)", COMMA_LAN_DISCOVER_SELFTEST_S);
     if (s_lan_ready) {
         xTaskCreateWithCaps(selftest_task, "lan_selftest", 3072, NULL, LAN_WORKER_PRIO, NULL, COMMA_BUFFER_CAPS);
     }
 #endif
-    if (xTaskCreate(connector_task, "connector", 6144, NULL, CONNECTOR_TASK_PRIO, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "task create failed, Connector off");
-    }
+#if CONFIG_COMMA_LAN_TUNNELS > 0
+    const lan_tunnel_host_t tunnel_host = {.send = tunnel_send, .check = tunnel_check};
+    s_tunnel_ready = lan_tunnel_start(&tunnel_host);
+#endif
+    xTaskNotifyGive(connector);
+    return;
+fail:
+    if (s_events) vQueueDelete(s_events);
+    if (s_lan_jobs) vQueueDelete(s_lan_jobs);
+    if (s_client_mutex) vSemaphoreDelete(s_client_mutex);
+    free(s_rx);
+    s_events = NULL;
+    s_lan_jobs = NULL;
+    s_client_mutex = NULL;
+    s_rx = NULL;
 }
 
 bool connector_is_up(void)
