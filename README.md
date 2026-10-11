@@ -29,6 +29,9 @@ Porting notes:
   the backend then does not route snapshots to it.
 - The app needs a pairing-method hint in the BLE advertisement (screen / spoken / button) to show the
   right instructions.
+- Voice is a board feature (microphone + speaker), not a chip feature. Boards without audio build
+  without the voice stack, and the device should report that it has no voice, so the app does not ask for
+  `server` / `voice_key` (today [BLE setup](docs/ble-provisioning.md) requires every field) or offer calls.
 
 ## Set up the toolchain
 
