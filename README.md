@@ -6,6 +6,30 @@ Comma hardware firmware. One folder per device; each folder is a standalone ESP-
 | --- | --- | --- |
 | `t-circle-s3/` | LilyGO T-Circle-S3 (ESP32-S3, 16 MB flash, 8 MB PSRAM) | `comma.voice.v1` voice calls, BLE setup, and a LAN gateway (HTTP, UDP, discovery, TCP tunnels) |
 
+### Planned boards
+
+Every ESP32 board has Wi-Fi and BLE, so each one can serve as a home Connector (LAN gateway). Voice
+is enabled only on boards with a microphone and speaker. Camera snapshots (RTSP through
+`lan_tcp_dial`) need enough RAM to receive the server's 32 KiB tunnel frames
+([protocol §4, `lan_tcp_dial`](docs/connector-protocol.md)), and that is the main difference between boards.
+
+| Board | Chip / memory | Connector (HTTP, UDP, discovery) | Snapshots (TCP tunnel) | Voice | Pairing without a code on screen |
+| --- | --- | --- | --- | --- | --- |
+| LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Yes (running) | Yes, 2 tunnels (board-tested) | Yes | Not needed: passkey on the screen |
+| ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Yes | Yes, expected same as T-Circle | Yes | Speaker reads the 6-digit passkey aloud |
+| M5Stack Stick (model to confirm) | ESP32-S3 or ESP32, depends on model | Yes | S3 model: yes. ESP32 model: as DevKit | If it has a mic and speaker | Not needed: passkey on the screen |
+| ESP32 DevKit (WROOM-32) | ESP32-D0WD rev v1.0, 4 MB flash, **no PSRAM** | Yes, with smaller limits (≈16 KiB per text response; chunk mode for larger) | **Unverified**: at most 1 tunnel, possibly none; needs a board test | No | Press BOOT to confirm (dev builds: passkey in the serial log) |
+
+Porting notes:
+
+- Gateway code currently allocates its buffers and some task stacks with `MALLOC_CAP_SPIRAM`. Boards
+  without PSRAM need those to fall back to internal RAM and need smaller per-board limits.
+- On boards without PSRAM, BLE should run only during setup, so its memory returns to the network.
+- If a board cannot hold a tunnel, it must leave `lan_tcp_dial` out of `capabilities.lan_gateway.methods`;
+  the backend then does not route snapshots to it.
+- The app needs a pairing-method hint in the BLE advertisement (screen / spoken / button) to show the
+  right instructions.
+
 ## Set up the toolchain
 
 Install **ESP-IDF v6.0.2** with the ESP32-S3 tools, following the
