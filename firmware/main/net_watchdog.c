@@ -1,10 +1,11 @@
+#include "memory_caps.h"
 #include "net_watchdog.h"
 
 #include <stdatomic.h>
 #include <string.h>
 #include <sys/socket.h>
 
-#include "cue_voice.h"
+#include "voice_state.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -107,7 +108,7 @@ static bool ping_gateway(uint32_t gw, uint16_t seq)
 static void restart(const char *why)
 {
     // A dead link ends a call within 10 s on its own (UPLINK_STALL_LIMIT_MS); don't cut a live one.
-    while (cue_voice_state() == CUE_VOICE_UP || cue_voice_state() == CUE_VOICE_CONNECTING) {
+    while (comma_voice_active()) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     ESP_LOGE(TAG, "restarting: %s", why);
@@ -247,7 +248,7 @@ void net_watchdog_start(void)
     }
     started = true;
     // No flash writes on this task, so its stack can live in PSRAM.
-    if (xTaskCreateWithCaps(watchdog_task, "netdog", 4096, NULL, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreateWithCaps(watchdog_task, "netdog", 4096, NULL, 3, NULL, COMMA_BUFFER_CAPS) != pdPASS) {
         ESP_LOGE(TAG, "task create failed");
     }
 }

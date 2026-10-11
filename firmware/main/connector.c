@@ -1,7 +1,9 @@
+#include "firmware_config.h"
+#include "memory_caps.h"
 #include "connector.h"
 #include "net_watchdog.h"
 
-#include "cue_voice.h"
+#include "voice_state.h"
 #include "device_config.h"
 #include "lan_discover.h"
 #include "lan_http.h"
@@ -40,7 +42,7 @@
 // Largest request frame: room for an http_request body as big as the response cap, plus the
 // envelope. A larger text frame is dropped; if its id can be read from the first chunk, it still
 // gets an error so the caller does not wait out its timeout. PSRAM.
-#define RX_MAX (LAN_HTTP_MAX_BYTES + 8 * 1024)
+#define RX_MAX CONFIG_COMMA_CONNECTOR_RX_MAX
 #define ID_MAX 64
 // The server heartbeats every 15 s. Like salix-connect, 45 s without any frame means the link is dead.
 #define READ_TIMEOUT_US (45LL * 1000000)
@@ -67,7 +69,7 @@
 // TCP_SNDLOWAT (12 KB of the 24 KB send buffer) free. A frame of 8 KB raw is ~11 KB of JSON, so the
 // write neither waits in poll_write nor blocks in the socket while holding the client's TX lock, and
 // the websocket task's PING/PONG never times out on that lock behind it.
-#define CHUNK_GATED_BYTES (8 * 1024)
+#define CHUNK_GATED_BYTES CONFIG_COMMA_LAN_HTTP_CHUNK_FRAME_BYTES
 // No room for a frame for this long: give up with an error frame (V1's no-progress limit).
 #define CHUNK_STALL_LIMIT_MS 10000
 // No chunk transfers during a voice call, for now: on the board a transfer alongside a call froze
@@ -270,7 +272,7 @@ static void post(event_kind_t kind, char *data)
 
 static char *psram_strndup(const char *src, size_t len)
 {
-    char *out = heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *out = heap_caps_malloc(len + 1, COMMA_BUFFER_CAPS);
     if (out) {
         memcpy(out, src, len);
         out[len] = 0;
@@ -424,12 +426,19 @@ static void send_metadata(void)
                      "\"persistent_processes\":false,\"computer_use_tool\":false,\"host_access_required\":false,"
                      "\"runtime_probe\":false,\"meeting_runtime\":false,"
                      // Not part of salix-connect's set: tells the backend (C2) what this gateway does.
-                     "\"lan_gateway\":{\"methods\":[\"http_request\",\"udp_request\",\"lan_discover\",\"lan_tcp_dial\"],\"max_bytes\":%d,"
+                     "\"lan_gateway\":{\"methods\":[\"http_request\",\"udp_request\""
+#if CONFIG_COMMA_LAN_DISCOVER
+                     ",\"lan_discover\""
+#endif
+#if CONFIG_COMMA_LAN_TUNNELS > 0
+                     ",\"lan_tcp_dial\""
+#endif
+                     "],\"max_bytes\":%d,"
                      "\"max_timeout_seconds\":%d,"
                      "\"response_chunks\":{\"max_total_bytes\":%d,\"chunk_bytes\":%d}},"
-                     "\"component_versions\":{\"t-circle\":\"" FIRMWARE_VERSION "\"}},"
+                     "\"component_versions\":{\"" CONFIG_COMMA_CLIENT_SOURCE "\":\"" FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
-                     "\"system_info\":{\"client_source\":\"t-circle\",\"hostname\":%s,\"os_type\":\"esp-idf\","
+                     "\"system_info\":{\"client_source\":\"" CONFIG_COMMA_CLIENT_SOURCE "\",\"hostname\":%s,\"os_type\":\"esp-idf\","
                      "\"arch\":\"xtensa\"%s}}",
                      current_scope(), LAN_HTTP_MAX_BYTES, LAN_HTTP_TIMEOUT_MAX_S, LAN_HTTP_CHUNK_MAX_TOTAL,
                      LAN_HTTP_CHUNK_BYTES, hostname, collected_at);
@@ -545,8 +554,7 @@ typedef struct {
 
 static bool call_active(void)
 {
-    const cue_voice_state_t state = cue_voice_state();
-    return state == CUE_VOICE_UP || state == CUE_VOICE_CONNECTING;
+    return comma_voice_active();
 }
 
 static const char *chunk_refuse(void *arg)
@@ -661,6 +669,7 @@ static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_byte
 
 // Tunnel frames are at most LAN_TUNNEL_MAX_FRAME (8 KB) raw, so they pass the same writable gate as
 // chunks and never block holding the client's TX lock.
+#if CONFIG_COMMA_LAN_TUNNELS > 0
 static bool tunnel_send(void *arg, unsigned session, const char *frame, size_t len)
 {
     (void)arg;
@@ -712,6 +721,8 @@ static void handle_tcp_dial(const char *id, const cJSON *params)
     }
 }
 
+#endif
+
 static char *run_http_request(const lan_job_t *job)
 {
     chunk_ctx_t ctx = {
@@ -757,8 +768,10 @@ static void lan_worker(void *arg)
             cJSON_AddStringToObject(obj, "error", message);
             frame = cJSON_PrintUnformatted(obj);
             cJSON_Delete(obj);
+#if CONFIG_COMMA_LAN_DISCOVER
         } else if (job.method == LAN_DISCOVER) {
             frame = lan_discover_run(job.id, job.params);
+#endif
         } else if (job.method == LAN_UDP_REQUEST) {
             frame = lan_udp_run(job.id, job.params);
         } else {
@@ -821,10 +834,14 @@ static void handle_request(const char *id, const char *method, cJSON *root)
         handle_lan_request(id, LAN_HTTP_REQUEST, root);
     } else if (strcmp(method, "udp_request") == 0) {
         handle_lan_request(id, LAN_UDP_REQUEST, root);
+#if CONFIG_COMMA_LAN_DISCOVER
     } else if (strcmp(method, "lan_discover") == 0) {
         handle_lan_request(id, LAN_DISCOVER, root);
+#endif
+#if CONFIG_COMMA_LAN_TUNNELS > 0
     } else if (strcmp(method, "lan_tcp_dial") == 0) {
         handle_tcp_dial(id, params);
+#endif
     } else {
         char message[128];
         snprintf(message, sizeof(message), "unknown method: %.100s", method);
@@ -1023,7 +1040,7 @@ static int64_t run_session(const credentials_t *creds)
         .transport = WEBSOCKET_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .disable_auto_reconnect = true,
-        .buffer_size = 4096,
+        .buffer_size = CONFIG_COMMA_CONNECTOR_WS_BUFFER_SIZE,
         .task_stack = 6144,
         .task_prio = CONNECTOR_WS_PRIO,
         .network_timeout_ms = 10000,
@@ -1037,9 +1054,13 @@ static int64_t run_session(const credentials_t *creds)
     // The client mallocs two buffer_size buffers, which CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL would
     // put in internal RAM. Right after BLE provisioning that has ~12 KB left, too little for them
     // plus the task stack, so steer this one init to PSRAM. Connector traffic is light.
+#if CONFIG_SPIRAM
     heap_caps_malloc_extmem_enable(0);
+#endif
     esp_websocket_client_handle_t client = esp_websocket_client_init(&cfg);
+#if CONFIG_SPIRAM
     heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
+#endif
     xSemaphoreTake(s_client_mutex, portMAX_DELAY);
     s_client = client;
     xSemaphoreGive(s_client_mutex);
@@ -1193,19 +1214,21 @@ void connector_start(void)
     s_events = xQueueCreate(16, sizeof(event_t));
     s_lan_jobs = xQueueCreate(LAN_QUEUE_LEN, sizeof(lan_job_t));
     s_client_mutex = xSemaphoreCreateMutex();
-    s_rx = heap_caps_malloc(RX_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_rx = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
     if (!s_events || !s_lan_jobs || !s_client_mutex || !s_rx) {
         ESP_LOGE(TAG, "out of memory, Connector off");
         return;
     }
     // The worker never writes flash, so its stack can be in PSRAM.
     s_lan_ready = xTaskCreateWithCaps(lan_worker, "lan", LAN_WORKER_STACK, NULL, LAN_WORKER_PRIO, NULL,
-                                      MALLOC_CAP_SPIRAM) == pdPASS;
+                                      COMMA_BUFFER_CAPS) == pdPASS;
     if (!s_lan_ready) {
         ESP_LOGE(TAG, "LAN worker create failed, http_request, udp_request and lan_discover off");
     }
+    #if CONFIG_COMMA_LAN_TUNNELS > 0
     const lan_tunnel_host_t tunnel_host = {.send = tunnel_send, .check = tunnel_check};
     s_tunnel_ready = lan_tunnel_start(&tunnel_host);
+    #endif
 #ifdef COMMA_CONNECT_URL_OVERRIDE
     ESP_LOGW(TAG, "dev build: Connector dials %s with a dummy token, not the saved credentials",
              COMMA_CONNECT_URL_OVERRIDE);
@@ -1213,7 +1236,7 @@ void connector_start(void)
 #if COMMA_LAN_DISCOVER_SELFTEST_S > 0
     ESP_LOGW(TAG, "lan_discover self-test every %d s (dev build)", COMMA_LAN_DISCOVER_SELFTEST_S);
     if (s_lan_ready) {
-        xTaskCreateWithCaps(selftest_task, "lan_selftest", 3072, NULL, LAN_WORKER_PRIO, NULL, MALLOC_CAP_SPIRAM);
+        xTaskCreateWithCaps(selftest_task, "lan_selftest", 3072, NULL, LAN_WORKER_PRIO, NULL, COMMA_BUFFER_CAPS);
     }
 #endif
     if (xTaskCreate(connector_task, "connector", 6144, NULL, CONNECTOR_TASK_PRIO, NULL) != pdPASS) {

@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 #include "cue_voice.h"
 
 #include "board_audio.h"
@@ -1116,13 +1117,13 @@ esp_err_t cue_voice_start(void)
         return cfg_err;
     }
     if (!s_rx) {
-        s_rx = heap_caps_malloc(RX_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_rx = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
         if (!s_rx) {
             return ESP_ERR_NO_MEM;
         }
     }
     if (!s_mic_queue) {
-        s_mic_queue_storage = heap_caps_malloc(MIC_QUEUE_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_mic_queue_storage = heap_caps_malloc(MIC_QUEUE_BYTES + 1, COMMA_BUFFER_CAPS);
         if (!s_mic_queue_storage) {
             return ESP_ERR_NO_MEM;
         }
@@ -1130,7 +1131,7 @@ esp_err_t cue_voice_start(void)
     }
 #if COMMA_VOICE_CLEAN
     if (!s_preroll) {
-        s_preroll = heap_caps_malloc(PREROLL_FRAMES * sizeof(s_preroll[0]), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_preroll = heap_caps_malloc(PREROLL_FRAMES * sizeof(s_preroll[0]), COMMA_BUFFER_CAPS);
         if (!s_preroll) {
             return ESP_ERR_NO_MEM;
         }

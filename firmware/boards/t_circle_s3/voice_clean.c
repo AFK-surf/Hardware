@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 #include "voice_clean.h"
 
 #include <math.h>
@@ -85,8 +86,8 @@ esp_err_t voice_clean_init(void)
         return ESP_OK;
     }
     // The resampler and FIFO come first: without the AFE they still carry the raw mic (pass-through).
-    s_out = heap_caps_malloc(OUT_FIFO_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    s_out_speech = heap_caps_malloc(OUT_FIFO_SAMPLES, MALLOC_CAP_SPIRAM);
+    s_out = heap_caps_malloc(OUT_FIFO_SAMPLES * sizeof(int16_t), COMMA_BUFFER_CAPS);
+    s_out_speech = heap_caps_malloc(OUT_FIFO_SAMPLES, COMMA_BUFFER_CAPS);
     if (!s_out || !s_out_speech) {
         return ESP_ERR_NO_MEM;
     }
@@ -150,7 +151,7 @@ static esp_err_t create_afe(void)
         s_data = NULL;
         return ESP_FAIL;
     }
-    s_in = heap_caps_malloc(s_feed_chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    s_in = heap_caps_malloc(s_feed_chunk * sizeof(int16_t), COMMA_BUFFER_CAPS);
     if (!s_in) {
         s_afe->destroy(s_data);
         s_data = NULL;
@@ -287,7 +288,7 @@ void voice_clean_bench(void)
             continue;
         }
         const int chunk = afe->get_feed_chunksize(data);
-        int16_t *in = heap_caps_malloc(chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        int16_t *in = heap_caps_malloc(chunk * sizeof(int16_t), COMMA_BUFFER_CAPS);
         const int chunks = 3 * VOICE_CLEAN_RATE_HZ / chunk;
         int64_t busy = 0;
         for (int c = 0; c < chunks; ++c) {

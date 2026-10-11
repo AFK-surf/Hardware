@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 #include "app_controls.h"
 #include "board.h"
 #include "connector.h"

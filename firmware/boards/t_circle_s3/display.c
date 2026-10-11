@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 // GC9D01 160x160 round panel. Idle screen is the Cue logo, still; calls and setup show text cards.
 // The screen redraws only when what it shows changes, and sleeps (backlight off, panel in SLPIN)
 // after DISPLAY_SLEEP_US without activity. Pins match the T-Circle-S3 panel used by the previous
@@ -94,7 +95,7 @@ esp_err_t display_init(void)
         return ESP_ERR_INVALID_SIZE;
     }
     build_lut();
-    s_fb = heap_caps_aligned_calloc(64, 1, FB_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_fb = heap_caps_aligned_calloc(64, 1, FB_BYTES, COMMA_BUFFER_CAPS);
     s_fb_free = xSemaphoreCreateBinary();
     if (!s_fb || !s_fb_free) {
         return ESP_ERR_NO_MEM;

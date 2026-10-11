@@ -1,3 +1,4 @@
+#include "firmware_config.h"
 #pragma once
 
 #include "cJSON.h"
@@ -18,7 +19,7 @@
 // One datagram that fits a Wi-Fi frame without IP fragmentation.
 #define LAN_UDP_MAX_PAYLOAD 1472
 // Longest answer kept; a longer datagram is cut to this by the socket.
-#define LAN_UDP_MAX_ANSWER 4096
+#define LAN_UDP_MAX_ANSWER CONFIG_COMMA_LAN_UDP_MAX_ANSWER
 
 // Blocks for up to timeout_ms. Returns the whole reply frame for `id` (a `response`, or an `error`),
 // NUL-terminated; the caller frees it. NULL only when out of memory.

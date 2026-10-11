@@ -21,4 +21,50 @@ config COMMA_HAS_DISPLAY
 config COMMA_PAIRING_PASSKEY
     bool "Pair with display passkey and MITM protection"
     default y if COMMA_BOARD_T_CIRCLE_S3
+config COMMA_LAN_DISCOVER
+    bool "LAN discovery"
+    default y
+config COMMA_HEAP_DIAGNOSTICS
+    bool "Log heap and task stack measurements"
+    default n
+config COMMA_LAN_HTTP_MAX_BYTES
+    int "Maximum text HTTP body"
+    range 1024 65536
+    default 65536
+config COMMA_LAN_HTTP_CHUNK_BYTES
+    int "Maximum raw HTTP chunk"
+    range 512 32768
+    default 32768
+config COMMA_LAN_HTTP_CHUNK_FRAME_BYTES
+    int "Raw HTTP chunk with writable socket gate"
+    range 512 8192
+    default 8192
+config COMMA_CONNECTOR_RX_MAX
+    int "Maximum incoming Connector JSON frame"
+    range 2048 73728
+    default 73728
+config COMMA_LAN_DISCOVER_ARENA_BYTES
+    int "Discovery string arena"
+    range 1024 98304
+    default 98304
+config COMMA_LAN_UDP_MAX_ANSWER
+    int "Maximum UDP answer"
+    range 512 4096
+    default 4096
+config COMMA_LAN_TUNNELS
+    int "Concurrent TCP tunnels"
+    range 0 2
+    default 2
+config COMMA_LAN_TUNNEL_WINDOW
+    int "Tunnel window (server requires at least 32 KiB)"
+    range 32768 131072
+    default 131072
+config COMMA_LAN_TUNNEL_MAX_FRAME
+    int "Raw device to server tunnel frame"
+    range 512 8192
+    default 8192
+config COMMA_CONNECTOR_WS_BUFFER_SIZE
+    int "WebSocket client read/write buffer"
+    range 1024 4096
+    default 4096
 endmenu

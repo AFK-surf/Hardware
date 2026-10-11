@@ -1,3 +1,5 @@
+#include "firmware_config.h"
+#include "memory_caps.h"
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -32,7 +34,7 @@
 #define MAX_ADDRS 96
 #define MAX_META_TYPES 32
 #define TXT_RAW_MAX 1300
-#define ARENA_BYTES (96 * 1024)
+#define ARENA_BYTES CONFIG_COMMA_LAN_DISCOVER_ARENA_BYTES
 #define NAME_BUF 256
 
 #define DNS_A 1
@@ -108,7 +110,7 @@ struct ld_ctx {
 
 static void *psram_alloc(size_t n)
 {
-    void *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *p = heap_caps_malloc(n, COMMA_BUFFER_CAPS);
     if (p) {
         memset(p, 0, n);
     }
@@ -182,7 +184,7 @@ void ld_sb_add(ld_sb_t *b, const char *s, size_t n)
         while (cap < b->len + n + 1) {
             cap *= 2;
         }
-        char *p = heap_caps_realloc(b->p, cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        char *p = heap_caps_realloc(b->p, cap, COMMA_BUFFER_CAPS);
         if (!p) {
             b->oom = true;
             return;
@@ -245,7 +247,7 @@ ld_ctx_t *ld_create(uint32_t self_ip, uint32_t netmask)
         return NULL;
     }
     ctx->hosts = psram_alloc(sizeof(host_t) * LD_MAX_HOSTS);
-    ctx->arena = heap_caps_malloc(ARENA_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ctx->arena = heap_caps_malloc(ARENA_BYTES, COMMA_BUFFER_CAPS);
     if (!ctx->hosts || !ctx->arena) {
         ld_free(ctx);
         return NULL;

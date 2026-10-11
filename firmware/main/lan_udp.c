@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 // udp_request for the Connector: one datagram out, answers in, as base64. See lan_udp.h.
 
 #include "lan_udp.h"
@@ -176,8 +177,8 @@ char *lan_udp_run(const char *id, const cJSON *params)
     ld_sb_str(&out, "{\"id\":");
     ld_sb_json(&out, id);
     ld_sb_str(&out, ",\"type\":\"response\",\"result\":{\"responses\":[");
-    uint8_t *buf = heap_caps_malloc(LAN_UDP_MAX_ANSWER, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    char *text = heap_caps_malloc((LAN_UDP_MAX_ANSWER + 2) / 3 * 4 + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *buf = heap_caps_malloc(LAN_UDP_MAX_ANSWER, COMMA_BUFFER_CAPS);
+    char *text = heap_caps_malloc((LAN_UDP_MAX_ANSWER + 2) / 3 * 4 + 1, COMMA_BUFFER_CAPS);
     if (out.oom || !buf || !text) {
         ld_sb_free(&out);
         free(buf);

@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 // http_request for the Connector. Built on esp_transport + http_parser rather than esp_http_client:
 // esp_http_client reads nothing from a response that has neither Content-Length nor chunked
 // encoding (its read loop compares against content_length = -1), and plenty of small LAN devices
@@ -54,7 +55,7 @@ static void sb_add(sb_t *b, const char *s, size_t n)
         while (cap < b->len + n + 1) {
             cap *= 2;
         }
-        char *p = heap_caps_realloc(b->p, cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        char *p = heap_caps_realloc(b->p, cap, COMMA_BUFFER_CAPS);
         if (!p) {
             b->oom = true;
             return;
@@ -305,10 +306,10 @@ static bool chunks_init(chunks_t *c, const lan_http_sink_t *sink, const char *id
     sb_str(&prefix, "{\"id\":");
     sb_json(&prefix, id, strlen(id));
     sb_str(&prefix, ",\"type\":\"response_chunk\",\"seq\":");
-    c->raw = heap_caps_malloc(LAN_HTTP_CHUNK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    c->raw = heap_caps_malloc(LAN_HTTP_CHUNK_BYTES, COMMA_BUFFER_CAPS);
     // prefix, seq, the data_b64 key, the base64 text, the closing "} and a NUL
     c->frame = heap_caps_malloc(prefix.len + 16 + 16 + B64_LEN(LAN_HTTP_CHUNK_BYTES) + 4,
-                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                COMMA_BUFFER_CAPS);
     c->sha = psa_hash_operation_init();
     const bool ok = !prefix.oom && c->raw && c->frame && psa_hash_setup(&c->sha, PSA_ALG_SHA_256) == PSA_SUCCESS;
     if (ok) {
@@ -770,7 +771,7 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
 
     esp_transport_handle_t t = url.https ? esp_transport_ssl_init() : esp_transport_tcp_init();
     resp_t r = {.headers = cJSON_CreateObject(), .limit = limit};
-    char *buf = heap_caps_malloc(READ_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *buf = heap_caps_malloc(READ_CHUNK, COMMA_BUFFER_CAPS);
     char *frame = NULL;
     int status = 0;
     chunks_t chunks;

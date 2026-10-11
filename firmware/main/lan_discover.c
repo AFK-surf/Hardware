@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -337,8 +338,8 @@ char *lan_discover_run(const char *id, const cJSON *params)
         return error_frame(id, "the T-Circle is not connected to Wi-Fi right now");
     }
     ld_ctx_t *ctx = ld_create(self_ip, netmask);
-    uint8_t *buf = heap_caps_malloc(RECV_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    arp_dump_t *dump = heap_caps_malloc(sizeof(arp_dump_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *buf = heap_caps_malloc(RECV_BUF, COMMA_BUFFER_CAPS);
+    arp_dump_t *dump = heap_caps_malloc(sizeof(arp_dump_t), COMMA_BUFFER_CAPS);
     if (!ctx || !buf || !dump) {
         ld_free(ctx);
         free(buf);

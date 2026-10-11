@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 // lan_tcp_dial (G3): TCP tunnels from the T-Circle to LAN hosts, relayed over the Connector socket.
 // Protocol and limits in lan_tunnel.h.
 //
@@ -141,7 +142,7 @@ static volatile int s_count;
 
 static void *psram_alloc(size_t n)
 {
-    return heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return heap_caps_malloc(n, COMMA_BUFFER_CAPS);
 }
 
 // ---- base64 --------------------------------------------------------------------------------------
@@ -866,7 +867,7 @@ bool lan_tunnel_start(const lan_tunnel_host_t *host)
         return false;
     }
     // Sockets only, never flash: the stack can be in PSRAM.
-    if (xTaskCreateWithCaps(tunnel_task, "lan_tunnel", TASK_STACK, NULL, TASK_PRIO, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreateWithCaps(tunnel_task, "lan_tunnel", TASK_STACK, NULL, TASK_PRIO, NULL, COMMA_BUFFER_CAPS) != pdPASS) {
         ESP_LOGE(TAG, "task create failed, lan_tcp_dial off");
         return false;
     }

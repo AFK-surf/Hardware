@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 #include "playback.h"
 
 #include "board_audio.h"
@@ -254,7 +255,7 @@ void playback_init(void)
     if (s_buf) {
         return;
     }
-    s_buf = heap_caps_malloc(PLAYBACK_BYTES, MALLOC_CAP_SPIRAM);
+    s_buf = heap_caps_malloc(PLAYBACK_BYTES, COMMA_BUFFER_CAPS);
     s_lock = xSemaphoreCreateMutex();
     if (!s_buf || !s_lock) {
         ESP_LOGE(TAG, "playback buffer alloc failed");

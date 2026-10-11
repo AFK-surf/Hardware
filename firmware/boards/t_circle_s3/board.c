@@ -1,3 +1,4 @@
+#include "memory_caps.h"
 #include "board.h"
 #include "app_controls.h"
 #include "board_audio.h"
@@ -270,7 +271,7 @@ void board_start_feedback(void)
     // The display task only draws into the PSRAM framebuffer, so its stack can live there too. That
     // leaves 8 KB more internal RAM for the Connector, which has to start while BLE still holds
     // its controller memory.
-    if (xTaskCreateWithCaps(display_task, "display", 8192, NULL, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreateWithCaps(display_task, "display", 8192, NULL, 3, NULL, COMMA_BUFFER_CAPS) != pdPASS) {
         ESP_LOGE(TAG, "display task create failed");
     }
 

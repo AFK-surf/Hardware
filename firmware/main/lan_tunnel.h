@@ -1,3 +1,4 @@
+#include "firmware_config.h"
 #pragma once
 
 #include <stdbool.h>
@@ -26,17 +27,17 @@
 // Two at a time: an RTSP snapshot needs one; the second lets a retry or a second consumer start
 // while the first is still closing. Each costs one lwIP socket (10 in all) and up to
 // LAN_TUNNEL_SOCKET_WINDOW of Wi-Fi RX buffers.
-#define LAN_TUNNEL_MAX_OPEN 2
+#define LAN_TUNNEL_MAX_OPEN CONFIG_COMMA_LAN_TUNNELS
 // Raw bytes per device→server data frame: ~11 KB of JSON, always under the 12 KB the Connector
 // socket's writable gate guarantees (G1), so a frame write never blocks holding the TX lock.
-#define LAN_TUNNEL_MAX_FRAME (8 * 1024)
+#define LAN_TUNNEL_MAX_FRAME CONFIG_COMMA_LAN_TUNNEL_MAX_FRAME
 // The server ignores the device's max_frame and sends up to 32 KB per frame (DeviceRelay @max_frame).
 #define LAN_TUNNEL_SERVER_FRAME_MAX (32 * 1024)
 // Unacknowledged bytes per direction. Device→server it bounds data in flight (held by the server and
 // the network, not the device): 128 KB over the ~250 ms Cloudflare round trip allows ~500 KB/s, above
 // the ~245 KB/s the Connector socket managed in G1, so the window is never the bottleneck.
 // Server→device it bounds what can queue here (PSRAM, as it arrives).
-#define LAN_TUNNEL_WINDOW (128 * 1024)
+#define LAN_TUNNEL_WINDOW CONFIG_COMMA_LAN_TUNNEL_WINDOW
 #define LAN_TUNNEL_DIAL_TIMEOUT_MAX_S 15
 #ifndef LAN_TUNNEL_IDLE_S
 #define LAN_TUNNEL_IDLE_S 300
@@ -64,6 +65,7 @@ typedef struct {
     void *ctx;
 } lan_tunnel_host_t;
 
+#if CONFIG_COMMA_LAN_TUNNELS > 0
 // Starts the tunnel task. host is copied.
 bool lan_tunnel_start(const lan_tunnel_host_t *host);
 
@@ -85,3 +87,8 @@ void lan_tunnel_step(int wait_ms);
 // strict (padding required, no whitespace) and returns the decoded length, or -1.
 size_t lan_tunnel_b64_encode(const unsigned char *in, size_t n, char *out);
 long lan_tunnel_b64_decode(const char *in, size_t n, unsigned char *out, size_t cap);
+#else
+static inline int lan_tunnel_count(void) { return 0; }
+static inline bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)
+{ (void)id; (void)msg; (void)session; return false; }
+#endif

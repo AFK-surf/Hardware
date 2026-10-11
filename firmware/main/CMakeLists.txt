@@ -1,7 +1,13 @@
 set(board_dir "../boards/t_circle_s3")
 set(srcs "main.c" "wifi.c" "connector.c" "net_watchdog.c" "lan_http.c"
-         "lan_discover.c" "lan_discover_core.c" "lan_dest.c" "lan_udp.c" "lan_tunnel.c"
+         "lan_discover_core.c" "lan_dest.c" "lan_udp.c"
          "device_config.c" "provisioning.c" "${board_dir}/board.c")
+if(CONFIG_COMMA_LAN_DISCOVER)
+    list(APPEND srcs "lan_discover.c")
+endif()
+if(CONFIG_COMMA_LAN_TUNNELS GREATER 0)
+    list(APPEND srcs "lan_tunnel.c")
+endif()
 set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
          tcp_transport http_parser lwip)

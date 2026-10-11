@@ -1,3 +1,4 @@
+#include "firmware_config.h"
 #pragma once
 
 #include <stdbool.h>
@@ -13,13 +14,13 @@
 // Device limits: timeout_seconds is capped at LAN_HTTP_TIMEOUT_MAX_S, max_bytes at
 // LAN_HTTP_MAX_BYTES (longer bodies come back with "truncated": true). No redirects.
 #define LAN_HTTP_TIMEOUT_MAX_S 30
-#define LAN_HTTP_MAX_BYTES (64 * 1024)
+#define LAN_HTTP_MAX_BYTES CONFIG_COMMA_LAN_HTTP_MAX_BYTES
 
 // Chunk mode (params "response_mode": "chunks", docs/connector-protocol.md §4): the body is binary
 // and streams out as `response_chunk` frames of at most LAN_HTTP_CHUNK_BYTES raw bytes each, up to
 // LAN_HTTP_CHUNK_MAX_TOTAL in all; the device never holds more than one frame of it. Advertised in
 // metadata as capabilities.lan_gateway.response_chunks.
-#define LAN_HTTP_CHUNK_BYTES (32 * 1024)
+#define LAN_HTTP_CHUNK_BYTES CONFIG_COMMA_LAN_HTTP_CHUNK_BYTES
 #define LAN_HTTP_CHUNK_MAX_TOTAL (4 * 1024 * 1024)
 // A big body can take a while to stream, so chunk mode allows a longer timeout_seconds. The server
 // waits at most 120 s for the final frame.
