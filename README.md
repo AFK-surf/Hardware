@@ -4,7 +4,7 @@ Comma hardware firmware. One folder per device; each folder is a standalone ESP-
 
 | Folder | Board | What it runs |
 | --- | --- | --- |
-| `t-circle-s3/` | LilyGO T-Circle-S3 (ESP32-S3, 16 MB flash, 8 MB PSRAM) | `comma.voice.v1` voice calls, BLE setup, and a LAN gateway (HTTP, UDP, discovery, TCP tunnels) |
+| `firmware/` | LilyGO T-Circle-S3 (ESP32-S3, 16 MB flash, 8 MB PSRAM) | `comma.voice.v1` voice calls, BLE setup, and a LAN gateway (HTTP, UDP, discovery, TCP tunnels) |
 
 ### Planned boards
 
@@ -54,7 +54,7 @@ You need read access to this private repository and GitHub authentication config
 
 ```sh
 git clone https://github.com/AFK-surf/Hardware.git
-cd Hardware/t-circle-s3
+cd Hardware/firmware
 idf.py build
 ```
 
@@ -64,12 +64,12 @@ in `dependencies.lock`. The first build downloads managed components, so it need
 Keep the lockfile; do not run `idf.py update-dependencies` as part of ordinary setup.
 
 Display assets, fonts, and the logo binary are already checked in. Their generator scripts are
-optional and are not part of the firmware build. Outputs are under `t-circle-s3/build/`.
+optional and are not part of the firmware build. Outputs are under `firmware/build/`.
 
 ## Flash and provision a board
 
 Connect your T-Circle with a USB data cable. Replace `PORT` with its actual serial port, for example
-`/dev/cu.usbmodem1101` on macOS, `/dev/ttyACM0` on Linux, or `COM5` on Windows. Run from `t-circle-s3/`:
+`/dev/cu.usbmodem1101` on macOS, `/dev/ttyACM0` on Linux, or `COM5` on Windows. Run from `firmware/`:
 
 ```sh
 idf.py -p PORT flash monitor
@@ -103,21 +103,21 @@ in a separate virtual environment from ESP-IDF:
 python3 -m venv tools/.venv
 . tools/.venv/bin/activate
 python -m pip install -r tools/requirements.txt
-python -m unittest discover -s t-circle-s3/tools -p 'test_*.py'
+python -m unittest discover -s firmware/tools -p 'test_*.py'
 ```
 
 The Python tests use simulated BLE data and local HTTP/WebSocket servers; they do not need a board
-or backend credentials. The BLE client is `t-circle-s3/tools/ble_provision.py`, and
-`t-circle-s3/tools/fake_connector.py` provides a local test Connector.
+or backend credentials. The BLE client is `firmware/tools/ble_provision.py`, and
+`firmware/tools/fake_connector.py` provides a local test Connector.
 
 The C host tests currently target **macOS** (the HTTP test uses CommonCrypto). Run one firmware build
 first to download the managed cJSON component, activate ESP-IDF so `IDF_PATH` is set, and run:
 
 ```sh
-sh t-circle-s3/tools/lan_discover_test/run.sh
-sh t-circle-s3/tools/lan_http_test/run.sh
-sh t-circle-s3/tools/lan_udp_test/run.sh
-sh t-circle-s3/tools/lan_tunnel_test/run.sh
+sh firmware/tools/lan_discover_test/run.sh
+sh firmware/tools/lan_http_test/run.sh
+sh firmware/tools/lan_udp_test/run.sh
+sh firmware/tools/lan_tunnel_test/run.sh
 ```
 
 These compile the real LAN implementations with ESP stubs and AddressSanitizer/UndefinedBehaviorSanitizer.
@@ -126,9 +126,9 @@ Wi-Fi, BLE, audio, or the lwIP receive-window adjustment.
 
 ## Project map and current limits
 
-- `t-circle-s3/main/`: firmware, board drivers, voice, setup, and LAN gateway.
-- `t-circle-s3/components/`: checked-in LCD driver.
-- `t-circle-s3/tools/` and `tools/`: provisioning clients, protocol simulators, and host tests.
+- `firmware/main/`: firmware, board drivers, voice, setup, and LAN gateway.
+- `firmware/components/`: checked-in LCD driver.
+- `firmware/tools/` and `tools/`: provisioning clients, protocol simulators, and host tests.
 - [Connector protocol](docs/connector-protocol.md): backend integration contract.
 - [Project plan](docs/connector-plan.md) and [reports](docs/reports/): design decisions and historical
   board results. Paths, ports, device IDs, and commit IDs in older reports describe the original

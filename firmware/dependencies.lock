@@ -124,6 +124,6 @@ direct_dependencies:
 - espressif/esp-sr
 - espressif/esp_websocket_client
 - idf
-manifest_hash: 0b298641e9d5a95fc82635f1333b5b973938b8fb4f1bfdea367eb8f3548a6ccb
+manifest_hash: f08e9b1b25a27d0b42945bf8e7bd05e9fc171525d2a41cc049598a6d5af364d6
 target: esp32s3
 version: 3.0.0

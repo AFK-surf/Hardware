@@ -1,0 +1,24 @@
+menu "Comma firmware"
+choice COMMA_BOARD
+    prompt "Board"
+    default COMMA_BOARD_T_CIRCLE_S3
+config COMMA_BOARD_T_CIRCLE_S3
+    bool "LilyGO T-Circle-S3"
+    depends on IDF_TARGET_ESP32S3
+endchoice
+config COMMA_BOARD_ID
+    string
+    default "t-circle-s3" if COMMA_BOARD_T_CIRCLE_S3
+config COMMA_CLIENT_SOURCE
+    string
+    default "t-circle" if COMMA_BOARD_T_CIRCLE_S3
+config COMMA_HAS_VOICE
+    bool "Voice"
+    default y if COMMA_BOARD_T_CIRCLE_S3
+config COMMA_HAS_DISPLAY
+    bool "Display"
+    default y if COMMA_BOARD_T_CIRCLE_S3
+config COMMA_PAIRING_PASSKEY
+    bool "Pair with display passkey and MITM protection"
+    default y if COMMA_BOARD_T_CIRCLE_S3
+endmenu

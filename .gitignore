@@ -25,3 +25,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Generated per-board configuration.
+sdkconfig

@@ -17,7 +17,7 @@
 
 #include "cJSON.h"
 #include "device_config.h"
-#include "display.h"
+#include "board.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -627,20 +627,20 @@ static void show(screen_t screen)
     switch (screen) {
     case SCREEN_ADVERTISING:
         snprintf(buf, sizeof(buf), "Open the Comma app to set up %s", s_name);
-        display_show_card(s.was_provisioned ? "Pairing mode" : "Hello", NULL, buf);
+        board_show_card(s.was_provisioned ? "Pairing mode" : "Hello", NULL, buf);
         break;
     case SCREEN_PASSKEY: {
         char code[16];
         snprintf(code, sizeof(code), "%03u %03u", (unsigned)(s.passkey / 1000), (unsigned)(s.passkey % 1000));
-        display_show_card("Pairing code", code, "Enter it on your phone");
+        board_show_card("Pairing code", code, "Enter it on your phone");
         break;
     }
     case SCREEN_PAIRED:
-        display_show_card("Paired", NULL, "Choose a Wi-Fi network in the app");
+        board_show_card("Paired", NULL, "Choose a Wi-Fi network in the app");
         break;
     case SCREEN_WIFI_CONNECTING:
         snprintf(buf, sizeof(buf), "%s", s.wifi.ssid);
-        display_show_card("Connecting to", NULL, buf);
+        board_show_card("Connecting to", NULL, buf);
         break;
     case SCREEN_WIFI_FAILED: {
         const char *why = "Could not connect. Try again in the app.";
@@ -651,20 +651,20 @@ static void show(screen_t screen)
         } else if (s.error && strcmp(s.error, "timeout") == 0) {
             why = "No answer from the network. Try again.";
         }
-        display_show_card("Wi-Fi failed", NULL, why);
+        board_show_card("Wi-Fi failed", NULL, why);
         break;
     }
     case SCREEN_WIFI_UP:
-        display_show_card("Wi-Fi connected", NULL, "Finishing setup in the app");
+        board_show_card("Wi-Fi connected", NULL, "Finishing setup in the app");
         break;
     case SCREEN_SAVED:
-        display_show_card("All set", NULL, device_config_provisioned() ? "Tap to call Comma" : "");
+        board_show_card("All set", NULL, device_config_provisioned() ? "Tap to call Comma" : "");
         break;
     case SCREEN_PAIR_FAILED:
-        display_show_card("Pairing failed", NULL, "Try again from the app");
+        board_show_card("Pairing failed", NULL, "Try again from the app");
         break;
     case SCREEN_PAIR_TIMEOUT:
-        display_show_card("Pairing timed out", NULL, "Try again from the app");
+        board_show_card("Pairing timed out", NULL, "Try again from the app");
         break;
     }
 }
@@ -1014,7 +1014,7 @@ static void prov_task(void *arg)
     if (s_saved) {
         vTaskDelay(pdMS_TO_TICKS(2000));  // let "All set" show
     }
-    display_show_logo();
+    board_show_idle();
     s_active = false;
     s_task_running = false;
     vTaskDelete(NULL);

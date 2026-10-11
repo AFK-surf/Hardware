@@ -5,7 +5,7 @@ Inter (SIL Open Font License) is the font the Comma apps use; the variable TTF i
 reference/fonts/ is a copy of comma-android's res/font/inter_variable.ttf.
 
 Output:
-  main/ui_font.c, main/ui_font.h  two fonts (ui_font_small: printable ASCII,
+  boards/t_circle_s3/ui_font.c, boards/t_circle_s3/ui_font.h  two fonts (ui_font_small: printable ASCII,
                                   ui_font_large: digits, space and colon)
 
 Each glyph is a tight bitmap of 4-bit coverage, two pixels per byte, high nibble left,
@@ -121,8 +121,8 @@ def main():
         h_lines.append(f"// Inter {px} px, weight {weight}.")
         h_lines.append(f"extern const ui_font_t ui_font_{name};")
         print(f"{name}: {len(chars)} glyphs, {len(bitmap)} bytes, line {line_height}px")
-    (ROOT / "main" / "ui_font.c").write_text("\n".join(c_lines) + "\n")
-    (ROOT / "main" / "ui_font.h").write_text("\n".join(h_lines) + "\n")
+    (ROOT / "boards" / "t_circle_s3" / "ui_font.c").write_text("\n".join(c_lines) + "\n")
+    (ROOT / "boards" / "t_circle_s3" / "ui_font.h").write_text("\n".join(h_lines) + "\n")
 
 
 if __name__ == "__main__":

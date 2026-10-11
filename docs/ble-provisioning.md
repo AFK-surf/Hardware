@@ -1,7 +1,7 @@
 # T-Circle BLE provisioning contract
 
-Firmware: `t-circle-s3/main/provisioning.c` (B1). App side: comma-android "Add device" (B2).
-Test client: `t-circle-s3/tools/ble_provision.py` (bleak). Visible text in the app is English.
+Firmware: `firmware/main/provisioning.c` (B1). App side: comma-android "Add device" (B2).
+Test client: `firmware/tools/ble_provision.py` (bleak). Visible text in the app is English.
 
 ## When the device advertises
 
@@ -50,7 +50,7 @@ is `FF FF 01 01 00 5D 28` when unprovisioned, or `FF FF 01 01 01 5D 28` in provi
 mode. The firmware logs these bytes once on each successful advertising start.
 
 Without connecting or pairing, run `python tools/ble_provision.py scan --timeout 8` from
-`t-circle-s3/` (requires `bleak`). It actively scans by service UUID and prints name, state,
+`firmware/` (requires `bleak`). It actively scans by service UUID and prints name, state,
 short ID and RSSI; for example `Comma-5D28 ... state=unprovisioned(0x00) short_id=5D28 ...`.
 Name and manufacturer data may arrive after the first advertisement; the tool merges those
 reports. Bleak exposes company ID `0xFFFF` as the `manufacturer_data` key and the remaining five

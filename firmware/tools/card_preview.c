@@ -1,6 +1,6 @@
 // Render the firmware's text cards on the host, for checking layout on the round glass.
 //
-//   cc -std=c11 -O2 -Imain tools/card_preview.c main/ui_card.c main/ui_font.c -lm -o build/card_preview
+//   cc -std=c11 -O2 -Imain tools/card_preview.c boards/t_circle_s3/ui_card.c boards/t_circle_s3/ui_font.c -lm -o build/card_preview
 //   build/card_preview build-preview/cards
 //
 // Writes one 8-bit PGM per card (gray level = LUT index * 17).

@@ -46,7 +46,7 @@ T-Circle（ESP32-S3）只做两件事：
 
 ## 三条线
 
-### A. 固件 Connector（主线，`Hardware/t-circle-s3`）
+### A. 固件 Connector（主线，`Hardware/firmware`）
 
 | 步骤 | 内容 | 验收 |
 |---|---|---|
