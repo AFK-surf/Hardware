@@ -76,3 +76,11 @@ CONFIG_COMMA_LAN_TUNNEL_MAX_FRAME=4096
 CONFIG_COMMA_CONNECTOR_WS_BUFFER_SIZE=2048
 # Hardware measurements are complete; see the e6ced9c retest in the H1 report.
 CONFIG_COMMA_HEAP_DIAGNOSTICS=n
+
+# H2: bound probe state/payloads on no-PSRAM hardware. 4 KiB of answers is ~5.5 KiB
+# of base64 within the unchanged 12 KiB result cap. Keep 1024-byte answers: a Gree
+# scan envelope can approach 512 bytes, and the backend discards cut answers.
+CONFIG_COMMA_LAN_DISCOVER_PROBES=4
+CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD=256
+CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER=1024
+CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET=4096

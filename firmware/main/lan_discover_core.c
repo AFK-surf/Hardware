@@ -22,6 +22,7 @@
 // pointers backwards, and records are matched to instances by exact name, not substring.
 
 #include "lan_discover_core.h"
+#include "lan_discover.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,10 +92,42 @@ typedef struct {
     bool handed_out;
 } meta_t;
 
+// One allocation per probing run. Pair indices follow the stable (unsorted) host table.
+// Even the largest profile is below the DevKit's measured ~36 KB largest free block.
+#define PROBE_SLOTS (CONFIG_COMMA_LAN_DISCOVER_PROBES > 0 ? CONFIG_COMMA_LAN_DISCOVER_PROBES : 1)
+#define PROBE_SENT 1
+#define PROBE_ANSWERED 2
+#define PROBE_STORED 4
+#define PROBE_CUT 8
+
+typedef struct {
+    char id[17];
+    uint16_t port;
+    uint16_t payload_len;
+    uint8_t payload[CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD];
+} probe_t;
+
+typedef struct {
+    uint32_t first_ms; // elapsed time in this run, including a failed first attempt
+    uint16_t offset, len;
+    uint8_t attempts, flags;
+} probe_pair_t;
+
+typedef struct {
+    unsigned count;
+    size_t used;
+    int sent, answered, resent;
+    bool truncated;
+    probe_t probes[PROBE_SLOTS];
+    probe_pair_t pairs[LD_MAX_HOSTS][PROBE_SLOTS];
+    uint8_t answers[CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET];
+} probe_state_t;
+
 struct ld_ctx {
     uint32_t self_ip;
     uint32_t netmask;
     bool truncated;
+    probe_state_t *probes;
     int n_arp, n_mdns, n_ssdp;  // answers seen, for the log
     int nhosts;
     host_t *hosts;  // LD_MAX_HOSTS
@@ -265,6 +298,7 @@ ld_ctx_t *ld_create(uint32_t self_ip, uint32_t netmask)
 void ld_free(ld_ctx_t *ctx)
 {
     if (ctx) {
+        free(ctx->probes);
         free(ctx->hosts);
         free(ctx->arena);
         free(ctx);
@@ -316,12 +350,290 @@ static host_t *host_for(ld_ctx_t *ctx, uint32_t ip)
     return h;
 }
 
+// ---- Caller-supplied UDP probes ---------------------------------------------------------------
+
+static const char PROBE_B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int probe_b64_value(char c)
+{
+    const char *p = c ? strchr(PROBE_B64, c) : NULL;
+    return p ? (int)(p - PROBE_B64) : -1;
+}
+
+// Validate without allocating; decode on the second pass into the per-run table. Require RFC 4648
+// standard padded base64, including zero pad bits. Bound encoded length before walking it.
+static int probe_decode(const char *s, uint8_t *out)
+{
+    const size_t n = strlen(s);
+    if (!n || n % 4 || n > 4 * ((CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD + 2) / 3)) return -1;
+    size_t used = 0;
+    for (size_t i = 0; i < n; i += 4) {
+        int a = probe_b64_value(s[i]), b = probe_b64_value(s[i + 1]);
+        int c = probe_b64_value(s[i + 2]), d = probe_b64_value(s[i + 3]);
+        int pad = s[i + 2] == '=' ? 2 : (s[i + 3] == '=' ? 1 : 0);
+        if (a < 0 || b < 0 || (pad && i + 4 != n) ||
+            (pad == 2 && (s[i + 3] != '=' || (b & 15))) ||
+            (pad < 2 && c < 0) || (pad == 1 && (c & 3)) || (pad == 0 && d < 0)) return -1;
+        uint32_t v = ((uint32_t)a << 18) | ((uint32_t)b << 12) |
+                     (pad < 2 ? (uint32_t)c << 6 : 0) | (pad == 0 ? (uint32_t)d : 0);
+        if (used + 3 - pad > CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD) return -1;
+        for (int k = 0; k < 3 - pad; ++k) {
+            if (out) out[used] = (uint8_t)(v >> (16 - 8 * k));
+            used++;
+        }
+    }
+    return (int)used;
+}
+
+static const char *validate_probes(const cJSON *params, unsigned sources)
+{
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(params, "udp_probes");
+    if (!list || cJSON_IsNull(list)) return NULL;
+    if (CONFIG_COMMA_LAN_DISCOVER_PROBES == 0) return "'udp_probes' is disabled on this board";
+    if (!cJSON_IsArray(list) || cJSON_GetArraySize(list) < 1 ||
+        cJSON_GetArraySize(list) > CONFIG_COMMA_LAN_DISCOVER_PROBES) {
+        return "'udp_probes' must be a non-empty array within discover_probes.max_probes";
+    }
+    if (!(sources & LD_SRC_ARP)) return "'udp_probes' requires 'arp' in 'sources'";
+    const cJSON *entry;
+    cJSON_ArrayForEach(entry, list) {
+        if (!cJSON_IsObject(entry)) return "each 'udp_probes' entry must be an object";
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(entry, "id");
+        const cJSON *port = cJSON_GetObjectItemCaseSensitive(entry, "port");
+        const cJSON *payload = cJSON_GetObjectItemCaseSensitive(entry, "payload_b64");
+        if (!cJSON_IsString(id) || !id->valuestring[0] || strlen(id->valuestring) > 16 ||
+            strspn(id->valuestring, "abcdefghijklmnopqrstuvwxyz0123456789_") != strlen(id->valuestring)) {
+            return "probe 'id' must be 1..16 characters of [a-z0-9_]";
+        }
+        // Range-check before any integer cast, including non-finite/huge JSON numbers.
+        if (!cJSON_IsNumber(port) || !(port->valuedouble >= 1 && port->valuedouble <= 65535) ||
+            port->valuedouble != (double)port->valueint) {
+            return "probe 'port' must be a whole number between 1 and 65535";
+        }
+        for (const cJSON *prev = list->child; prev != entry; prev = prev->next) {
+            if (strcmp(cJSON_GetObjectItemCaseSensitive(prev, "id")->valuestring, id->valuestring) == 0)
+                return "probe 'id' must be unique";
+            if (cJSON_GetObjectItemCaseSensitive(prev, "port")->valueint == port->valueint)
+                return "probe 'port' must be unique";
+        }
+        if (!cJSON_IsString(payload) || probe_decode(payload->valuestring, NULL) < 1) {
+            return "probe 'payload_b64' must be standard padded base64 of 1..discover_probes.max_payload_bytes bytes";
+        }
+    }
+    return NULL;
+}
+
+bool ld_probes_init(ld_ctx_t *ctx, const cJSON *params)
+{
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(params, "udp_probes");
+    if (!list || cJSON_IsNull(list)) return true;
+    probe_state_t *ps = psram_alloc(sizeof(*ps));
+    if (!ps) return false;
+    ctx->probes = ps;
+    const cJSON *entry;
+    cJSON_ArrayForEach(entry, list) {
+        probe_t *p = &ps->probes[ps->count++];
+        strcpy(p->id, cJSON_GetObjectItemCaseSensitive(entry, "id")->valuestring);
+        p->port = (uint16_t)cJSON_GetObjectItemCaseSensitive(entry, "port")->valueint;
+        p->payload_len = (uint16_t)probe_decode(cJSON_GetObjectItemCaseSensitive(entry, "payload_b64")->valuestring,
+                                                p->payload);
+    }
+    return true;
+}
+
+bool ld_has_probes(const ld_ctx_t *ctx)
+{
+    return ctx->probes != NULL;
+}
+
+void ld_mark_probes_truncated(ld_ctx_t *ctx)
+{
+    if (ctx->probes) {
+        ctx->truncated = true;
+        ctx->probes->truncated = true;
+    }
+}
+
+static bool probe_ip(const ld_ctx_t *ctx, uint32_t ip)
+{
+    return usable_ip(ctx, ip) && ((const uint8_t *)&ip)[0] != 0 && on_subnet(ctx, ip) &&
+           ip != (ctx->self_ip & ctx->netmask) && ip != (ctx->self_ip | ~ctx->netmask);
+}
+
+bool ld_probe_next(ld_ctx_t *ctx, uint32_t elapsed_ms, ld_probe_send_t *out)
+{
+    probe_state_t *ps = ctx->probes;
+    if (!ps) return false;
+    // First attempts take priority. A bounded scan (64 * 8 * 2) needs no queue or per-send allocation.
+    for (int retry = 0; retry < 2; ++retry) {
+        for (int h = 0; h < ctx->nhosts; ++h) {
+            const host_t *host = &ctx->hosts[h];
+            if (!(host->sources & LD_SRC_ARP) || !probe_ip(ctx, host->ip)) continue;
+            for (unsigned p = 0; p < ps->count; ++p) {
+                probe_pair_t *pair = &ps->pairs[h][p];
+                if (pair->attempts != retry || (pair->flags & PROBE_ANSWERED) ||
+                    (retry && elapsed_ms - pair->first_ms < LD_PROBE_RETRY_MS)) continue;
+                *out = (ld_probe_send_t){.ip = host->ip, .port = ps->probes[p].port,
+                                        .payload = ps->probes[p].payload, .len = ps->probes[p].payload_len,
+                                        .host_index = (unsigned)h, .probe_index = p};
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void ld_probe_sent(ld_ctx_t *ctx, const ld_probe_send_t *send, uint32_t elapsed_ms, bool success)
+{
+    probe_state_t *ps = ctx->probes;
+    probe_pair_t *pair = &ps->pairs[send->host_index][send->probe_index];
+    if (!pair->attempts) pair->first_ms = elapsed_ms;
+    pair->attempts++;
+    if (success) {
+        pair->flags |= PROBE_SENT;
+        ps->sent++;
+        if (pair->attempts == 2) ps->resent++;
+    } else {
+        ld_mark_probes_truncated(ctx);
+    }
+}
+
+void ld_add_probe_answer(ld_ctx_t *ctx, uint32_t ip, uint16_t port, const uint8_t *data, size_t len)
+{
+    probe_state_t *ps = ctx->probes;
+    const host_t *host = find_host(ctx, ip);
+    if (!ps || !host) return;
+    for (unsigned p = 0; p < ps->count; ++p) {
+        if (ps->probes[p].port != port) continue;
+        probe_pair_t *pair = &ps->pairs[host - ctx->hosts][p];
+        if (!(pair->flags & PROBE_SENT) || (pair->flags & PROBE_ANSWERED)) return;
+        // The first matched datagram wins even when the budget drops it. Later smaller answers
+        // cannot replace it, and a received answer never triggers a resend.
+        pair->flags |= PROBE_ANSWERED;
+        ps->answered++;
+        size_t keep = len < CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER ? len : CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER;
+        if (keep > CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET - ps->used) {
+            ld_mark_probes_truncated(ctx);
+            return;
+        }
+        pair->offset = (uint16_t)ps->used;
+        pair->len = (uint16_t)keep;
+        pair->flags |= PROBE_STORED;
+        if (keep < len) {
+            pair->flags |= PROBE_CUT;
+            ld_mark_probes_truncated(ctx);
+        }
+        if (keep) memcpy(ps->answers + ps->used, data, keep);
+        ps->used += keep;
+        return;
+    }
+}
+
+void ld_probes_finish(ld_ctx_t *ctx)
+{
+    const probe_state_t *ps = ctx->probes;
+    if (!ps) return;
+    for (int h = 0; h < ctx->nhosts; ++h) {
+        if (!(ctx->hosts[h].sources & LD_SRC_ARP) || !probe_ip(ctx, ctx->hosts[h].ip)) continue;
+        for (unsigned p = 0; p < ps->count; ++p) {
+            const probe_pair_t *pair = &ps->pairs[h][p];
+            if (!pair->attempts || (pair->attempts < 2 && !(pair->flags & PROBE_ANSWERED))) {
+                ld_mark_probes_truncated(ctx);
+            }
+        }
+    }
+}
+
+void ld_probe_counts(const ld_ctx_t *ctx, int *sent, int *answered, int *resent)
+{
+    *sent = ctx->probes ? ctx->probes->sent : 0;
+    *answered = ctx->probes ? ctx->probes->answered : 0;
+    *resent = ctx->probes ? ctx->probes->resent : 0;
+}
+
+// Encode directly into the bounded JSON builder: no temporary answer string on the task stack.
+static void write_probe_bytes(ld_sb_t *b, const uint8_t *data, size_t n)
+{
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = ((uint32_t)data[i] << 16) | (i + 1 < n ? (uint32_t)data[i + 1] << 8 : 0) |
+                     (i + 2 < n ? data[i + 2] : 0);
+        char enc[4] = {PROBE_B64[v >> 18], PROBE_B64[(v >> 12) & 63],
+                       i + 1 < n ? PROBE_B64[(v >> 6) & 63] : '=', i + 2 < n ? PROBE_B64[v & 63] : '='};
+        ld_sb_add(b, enc, sizeof(enc));
+    }
+}
+
+static void write_probes(const ld_ctx_t *ctx, ld_sb_t *b, const host_t *host)
+{
+    const probe_state_t *ps = ctx->probes;
+    if (!ps) return;
+    bool open = false;
+    for (unsigned p = 0; p < ps->count; ++p) {
+        const probe_pair_t *pair = &ps->pairs[host - ctx->hosts][p];
+        if (!(pair->flags & PROBE_STORED)) continue;
+        ld_sb_str(b, open ? "," : ",\"probes\":[");
+        open = true;
+        ld_sb_str(b, "{\"id\":");
+        ld_sb_json(b, ps->probes[p].id);
+        ld_sb_str(b, ",\"payload_b64\":\"");
+        write_probe_bytes(b, ps->answers + pair->offset, pair->len);
+        ld_sb_str(b, pair->flags & PROBE_CUT ? "\",\"cut\":true}" : "\"}");
+    }
+    if (open) ld_sb_str(b, "]");
+}
+
+// NULL on success, or the error for the caller.
+const char *ld_parse_params(const cJSON *params, unsigned *sources, int *timeout_ms)
+{
+    *sources = LD_SRC_ARP | LD_SRC_MDNS | LD_SRC_SSDP;
+    *timeout_ms = LAN_DISCOVER_TIMEOUT_DEFAULT_MS;
+    if (!params || cJSON_IsNull(params)) {
+        return NULL;
+    }
+    if (!cJSON_IsObject(params)) {
+        return "params must be an object";
+    }
+    const cJSON *src = cJSON_GetObjectItemCaseSensitive(params, "sources");
+    if (src && !cJSON_IsNull(src)) {
+        if (!cJSON_IsArray(src) || cJSON_GetArraySize(src) == 0) {
+            return "'sources' must be a non-empty array of \"arp\", \"mdns\" and \"ssdp\"";
+        }
+        *sources = 0;
+        const cJSON *item;
+        cJSON_ArrayForEach(item, src)
+        {
+            const char *s = cJSON_IsString(item) ? item->valuestring : "";
+            if (strcmp(s, "arp") == 0) {
+                *sources |= LD_SRC_ARP;
+            } else if (strcmp(s, "mdns") == 0) {
+                *sources |= LD_SRC_MDNS;
+            } else if (strcmp(s, "ssdp") == 0) {
+                *sources |= LD_SRC_SSDP;
+            } else {
+                return "'sources' may only contain \"arp\", \"mdns\" and \"ssdp\"";
+            }
+        }
+    }
+    const cJSON *t = cJSON_GetObjectItemCaseSensitive(params, "timeout_ms");
+    if (t && !cJSON_IsNull(t)) {
+        if (!cJSON_IsNumber(t)) {
+            return "'timeout_ms' must be a number (1000-8000)";
+        }
+        const double v = t->valuedouble;
+        *timeout_ms = v < LAN_DISCOVER_TIMEOUT_MIN_MS   ? LAN_DISCOVER_TIMEOUT_MIN_MS
+                      : v > LAN_DISCOVER_TIMEOUT_MAX_MS ? LAN_DISCOVER_TIMEOUT_MAX_MS
+                                                        : (int)v;
+    }
+    return validate_probes(params, *sources);
+}
+
 // ---- ARP ---------------------------------------------------------------------------------------
 
 void ld_add_arp(ld_ctx_t *ctx, uint32_t ip, const uint8_t mac[6])
 {
     host_t *h = host_for(ctx, ip);
     if (!h) {
+        if (probe_ip(ctx, ip)) ld_mark_probes_truncated(ctx);
         return;
     }
     if (!(h->sources & LD_SRC_ARP)) {
@@ -889,6 +1201,7 @@ static void write_host(ld_ctx_t *ctx, ld_sb_t *b, const host_t *h)
         }
         ld_sb_str(b, "]");
     }
+    write_probes(ctx, b, h);
     ld_sb_str(b, "}");
 }
 
@@ -923,18 +1236,21 @@ char *ld_result_json(ld_ctx_t *ctx)
             ld_sb_str(&b, ",");
         }
         write_host(ctx, &b, &ctx->hosts[order[i]]);
-        if (b.full || b.len + 32 > LD_MAX_JSON) {
+        if (b.full || b.len + (ctx->probes ? 64 : 32) > LD_MAX_JSON) {
             b.len = before;
             b.full = false; // roll back the whole host, then append the result footer
             if (b.p) {
                 b.p[before] = 0;
             }
             ctx->truncated = true;
+            ld_mark_probes_truncated(ctx);
             break;
         }
         written++;
     }
-    ld_sb_str(&b, ctx->truncated ? "],\"truncated\":true}" : "],\"truncated\":false}");
+    ld_sb_str(&b, ctx->truncated ? "],\"truncated\":true" : "],\"truncated\":false");
+    if (ctx->probes && ctx->probes->truncated) ld_sb_str(&b, ",\"probes_truncated\":true");
+    ld_sb_str(&b, "}");
     if (b.oom) {
         ld_sb_free(&b);
     }

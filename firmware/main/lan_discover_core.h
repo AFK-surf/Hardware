@@ -1,16 +1,18 @@
 #pragma once
 
-// The part of `lan_discover` that needs no network: parsing mDNS and SSDP answers, merging them with
+// The part of `lan_discover` that needs no network: params, UDP probe state, mDNS/SSDP parsing and merging with
 // the ARP table into one entry per host, the caps, and the result JSON. lan_discover.c feeds it;
 // tools/lan_discover_test runs it on the Mac.
 //
-// Every string here comes from other hosts on the LAN, so it is sanitised as it is parsed (printable
-// ASCII only; tab, CR and LF become spaces) and cut to LD_STR_MAX bytes.
+// Announcement text comes from other hosts on the LAN, so it is sanitised as it is parsed (printable
+// ASCII only; tab, CR and LF become spaces) and cut to LD_STR_MAX bytes. Probe bytes remain binary
+// until base64 encoding; they never pass through the text sanitizer.
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "firmware_config.h"
+#include "cJSON.h"
 
 // The caps agreed with the backend (docs/prompts/A5-firmware-lan-discovery.md). Anything cut sets
 // "truncated": true.
@@ -32,6 +34,31 @@ typedef struct ld_ctx ld_ctx_t;
 // self_ip and netmask in network byte order; answers from self are ignored. NULL when out of memory.
 ld_ctx_t *ld_create(uint32_t self_ip, uint32_t netmask);
 void ld_free(ld_ctx_t *ctx);
+
+// Validate all params before any network use. Missing/null probes preserve the old result bytes.
+const char *ld_parse_params(const cJSON *params, unsigned *sources, int *timeout_ms);
+// Call once, on a fresh context, after successful ld_parse_params. False only on allocation failure.
+bool ld_probes_init(ld_ctx_t *ctx, const cJSON *params);
+bool ld_has_probes(const ld_ctx_t *ctx);
+void ld_mark_probes_truncated(ld_ctx_t *ctx);
+#define LD_PROBE_RETRY_MS 500
+
+typedef struct {
+    uint32_t ip; // network byte order, ARP-confirmed on the own subnet
+    uint16_t port;
+    const uint8_t *payload;
+    size_t len;
+    unsigned host_index, probe_index; // opaque pair identity, pass unchanged to ld_probe_sent
+} ld_probe_send_t;
+// Runner owns the pacing/deadline. Complete each returned send before asking for another.
+bool ld_probe_next(ld_ctx_t *ctx, uint32_t elapsed_ms, ld_probe_send_t *out);
+void ld_probe_sent(ld_ctx_t *ctx, const ld_probe_send_t *send, uint32_t elapsed_ms, bool success);
+// len may be answer-cap+1 when the socket cut a larger datagram. Data is binary, never a string.
+void ld_add_probe_answer(ld_ctx_t *ctx, uint32_t ip, uint16_t port, const uint8_t *data, size_t len);
+// After the final ARP harvest, mark pairs whose initial send/retry did not fit the time window.
+void ld_probes_finish(ld_ctx_t *ctx);
+// sent includes successful resends; answered includes first matched datagrams dropped by the budget.
+void ld_probe_counts(const ld_ctx_t *ctx, int *sent, int *answered, int *resent);
 
 // An ARP table entry. ip in network byte order.
 void ld_add_arp(ld_ctx_t *ctx, uint32_t ip, const uint8_t mac[6]);

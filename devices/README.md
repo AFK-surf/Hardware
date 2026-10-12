@@ -23,7 +23,10 @@ buffers, an 8 KiB text cap, 4 KiB HTTP chunks and 16 KiB incoming JSON frames. D
 16 KiB string arena but caps result JSON and buffer growth at 12 KiB (plus one NUL byte); excess
 hosts set `truncated=true`. Heap diagnostics are off; turn `CONFIG_COMMA_HEAP_DIAGNOSTICS` on in a
 test build when measuring a change. See [H1](../docs/reports/H1-report.md) for the hardware
-measurements and build/host validation.
+measurements and build/host validation. H2 adds up to four UDP discovery probes with 256-byte
+payloads, 1024-byte answers and a shared 4096-byte answer budget (T-Circle: 8 / 512 / 1024 / 16384).
+Both builds and host tests pass; probe heap recovery, real device replies and voice coexistence
+await the [H2 hardware plan](../docs/reports/H2-report.md).
 
 The shared defaults load first, then the board overlay. Generated config and objects live in
 `firmware/build-<board>/`. ESP-IDF keeps existing config choices when defaults change: delete that
@@ -47,7 +50,9 @@ tools/board.sh esp32-devkit build -DCOMMA_CONNECT_URL_OVERRIDE= -DCOMMA_CONNECT_
 For local WSS measurements, `-DCOMMA_CONNECT_TEST_CA=/absolute/path/test-ca.pem` embeds a test CA only
 when the URL override is set; certificate verification stays enabled. Do not distribute test images.
 The fake Connector supports `--tls-cert`, `--tls-key`, `--text-limit`, `--discover`, `--tunnel`, and
-`--loop 3`. It skips methods the board does not advertise and keeps the server's 32 KiB tunnel frames.
+`--loop 3`. H2 adds `--discover-probes [JSON_FILE]` (Gree/miIO by default) and
+`--discover-timeout 5000`; probe limits come from metadata. Binary answers are saved as base64 JSON
+under `--out`, while logs show only ids, byte counts and cut flags. It skips methods the board does not advertise and keeps the server's 32 KiB tunnel frames.
 
 Build targets sequentially: managed components are shared. The DevKit uses its own lockfile and the
 manifest's esp32s3 target rule excludes ESP-SR on esp32. T-Circle's package versions and hashes are

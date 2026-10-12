@@ -54,6 +54,8 @@
 #define ARP_BATCH_MAX 16
 #define LOOP_TICK_MS 25
 #define RECV_BUF 2048
+#define PROBE_BATCH_MAX 4
+#define DRAIN_BATCH_MAX 16
 
 #define MDNS_PORT 5353
 #define SSDP_PORT 1900
@@ -88,51 +90,6 @@ static char *error_frame(const char *id, const char *message)
         ld_sb_free(&b);
     }
     return b.p;
-}
-
-// NULL on success, or the error for the caller.
-static const char *parse_params(const cJSON *params, unsigned *sources, int *timeout_ms)
-{
-    *sources = SRC_ARP | SRC_MDNS | SRC_SSDP;
-    *timeout_ms = LAN_DISCOVER_TIMEOUT_DEFAULT_MS;
-    if (!params || cJSON_IsNull(params)) {
-        return NULL;
-    }
-    if (!cJSON_IsObject(params)) {
-        return "params must be an object";
-    }
-    const cJSON *src = cJSON_GetObjectItemCaseSensitive(params, "sources");
-    if (src && !cJSON_IsNull(src)) {
-        if (!cJSON_IsArray(src) || cJSON_GetArraySize(src) == 0) {
-            return "'sources' must be a non-empty array of \"arp\", \"mdns\" and \"ssdp\"";
-        }
-        *sources = 0;
-        const cJSON *item;
-        cJSON_ArrayForEach(item, src)
-        {
-            const char *s = cJSON_IsString(item) ? item->valuestring : "";
-            if (strcmp(s, "arp") == 0) {
-                *sources |= SRC_ARP;
-            } else if (strcmp(s, "mdns") == 0) {
-                *sources |= SRC_MDNS;
-            } else if (strcmp(s, "ssdp") == 0) {
-                *sources |= SRC_SSDP;
-            } else {
-                return "'sources' may only contain \"arp\", \"mdns\" and \"ssdp\"";
-            }
-        }
-    }
-    const cJSON *t = cJSON_GetObjectItemCaseSensitive(params, "timeout_ms");
-    if (t && !cJSON_IsNull(t)) {
-        if (!cJSON_IsNumber(t)) {
-            return "'timeout_ms' must be a number (1000-8000)";
-        }
-        const double v = t->valuedouble;
-        *timeout_ms = v < LAN_DISCOVER_TIMEOUT_MIN_MS   ? LAN_DISCOVER_TIMEOUT_MIN_MS
-                      : v > LAN_DISCOVER_TIMEOUT_MAX_MS ? LAN_DISCOVER_TIMEOUT_MAX_MS
-                                                        : (int)v;
-    }
-    return NULL;
 }
 
 // ---- ARP (on the tcpip thread: no core locking in this build) ----------------------------------
@@ -297,10 +254,10 @@ static void ssdp_search(int ssdp, int yeelight, int timeout_ms)
     }
 }
 
-// Read everything waiting on s.
+// Bound each drain so a noisy peer cannot hold the worker past its deadline.
 static void drain(int s, int kind, ld_ctx_t *ctx, uint8_t *buf)
 {
-    for (;;) {
+    for (int i = 0; i < DRAIN_BATCH_MAX; ++i) {
         struct sockaddr_in from;
         socklen_t fl = sizeof(from);
         const int n = recvfrom(s, buf, RECV_BUF - 1, MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
@@ -317,6 +274,20 @@ static void drain(int s, int kind, ld_ctx_t *ctx, uint8_t *buf)
     }
 }
 
+static void drain_probes(int s, ld_ctx_t *ctx, uint8_t *buf)
+{
+    for (int i = 0; i < DRAIN_BATCH_MAX; ++i) {
+        struct sockaddr_in from;
+        socklen_t fl = sizeof(from);
+        // One extra byte distinguishes an exact-cap answer from an oversized datagram, even
+        // when recvfrom discards the rest. This fits the existing RECV_BUF; no answer allocation.
+        const int n = recvfrom(s, buf, CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER + 1, MSG_DONTWAIT,
+                               (struct sockaddr *)&from, &fl);
+        if (n < 0) return;
+        ld_add_probe_answer(ctx, from.sin_addr.s_addr, ntohs(from.sin_port), buf, (size_t)n);
+    }
+}
+
 static int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
@@ -328,7 +299,7 @@ char *lan_discover_run(const char *id, const cJSON *params)
 {
     unsigned sources;
     int timeout_ms;
-    const char *bad = parse_params(params, &sources, &timeout_ms);
+    const char *bad = ld_parse_params(params, &sources, &timeout_ms);
     if (bad) {
         return error_frame(id, bad);
     }
@@ -341,7 +312,7 @@ char *lan_discover_run(const char *id, const cJSON *params)
     ld_ctx_t *ctx = ld_create(self_ip, netmask);
     uint8_t *buf = heap_caps_malloc(RECV_BUF, COMMA_BUFFER_CAPS);
     arp_dump_t *dump = heap_caps_malloc(sizeof(arp_dump_t), COMMA_BUFFER_CAPS);
-    if (!ctx || !buf || !dump) {
+    if (!ctx || !buf || !dump || !ld_probes_init(ctx, params)) {
         ld_free(ctx);
         free(buf);
         free(dump);
@@ -370,6 +341,7 @@ char *lan_discover_run(const char *id, const cJSON *params)
         sweep_count = ARP_SWEEP_MAX;
         if (sources & SRC_ARP) {
             ld_mark_truncated(ctx);  // the rest of a large subnet isn't swept
+            ld_mark_probes_truncated(ctx);
         }
     }
     // Spread the sweep over the first ~55 % of the time, so replies have time to land.
@@ -384,6 +356,11 @@ char *lan_discover_run(const char *id, const cJSON *params)
     int mdns = (sources & SRC_MDNS) ? udp_socket(MDNS_PORT, true) : -1;
     int ssdp = (sources & SRC_SSDP) ? udp_socket(0, false) : -1;
     int yeelight = (sources & SRC_SSDP) ? udp_socket(0, false) : -1;
+    int probes = ld_has_probes(ctx) ? udp_socket(0, false) : -1;
+    if (ld_has_probes(ctx) && probes < 0) {
+        ESP_LOGW(TAG, "out of sockets for discovery probes");
+        ld_mark_probes_truncated(ctx);
+    }
     if (((sources & SRC_MDNS) && mdns < 0) || ((sources & SRC_SSDP) && (ssdp < 0 || yeelight < 0))) {
         ESP_LOGW(TAG, "out of sockets (mdns %d, ssdp %d, yeelight %d)", mdns, ssdp, yeelight);
         ld_mark_truncated(ctx);
@@ -402,6 +379,7 @@ char *lan_discover_run(const char *id, const cJSON *params)
     // Questions asked later than this wouldn't get answers in time.
     const int64_t last_query = deadline - (timeout_ms / 4 < 400 ? timeout_ms / 4 : 400);
 
+    int64_t next_probe_send = start;
     for (;;) {
         const int64_t now = now_ms();
         if (now >= deadline) {
@@ -439,11 +417,30 @@ char *lan_discover_run(const char *id, const cJSON *params)
             ssdp_again = 0;
         }
 
+        if (probes >= 0) {
+            // Read before scheduling retries so an already queued answer suppresses its resend.
+            drain_probes(probes, ctx, buf);
+            const int64_t send_at = now_ms();
+            if (send_at >= next_probe_send && send_at < last_query) {
+                next_probe_send = send_at + LOOP_TICK_MS;
+                for (int i = 0; i < PROBE_BATCH_MAX; ++i) {
+                    const int64_t at = now_ms();
+                    ld_probe_send_t send;
+                    if (at >= last_query || !ld_probe_next(ctx, (uint32_t)(at - start), &send)) break;
+                    struct sockaddr_in to = {.sin_family = AF_INET, .sin_port = htons(send.port),
+                                             .sin_addr.s_addr = send.ip};
+                    const int n = sendto(probes, send.payload, send.len, MSG_DONTWAIT,
+                                         (struct sockaddr *)&to, sizeof(to));
+                    ld_probe_sent(ctx, &send, (uint32_t)(at - start), n == (int)send.len);
+                }
+            }
+        }
+
         fd_set fds;
         FD_ZERO(&fds);
         int maxfd = -1;
-        const int socks[] = {mdns, ssdp, yeelight};
-        for (int i = 0; i < 3; ++i) {
+        const int socks[] = {mdns, ssdp, yeelight, probes};
+        for (int i = 0; i < 4; ++i) {
             if (socks[i] >= 0) {
                 FD_SET(socks[i], &fds);
                 maxfd = socks[i] > maxfd ? socks[i] : maxfd;
@@ -472,6 +469,8 @@ char *lan_discover_run(const char *id, const cJSON *params)
     if (sources & SRC_ARP) {
         arp_harvest(ctx, dump);
     }
+    ld_probes_finish(ctx);
+    if (probes >= 0) close(probes);
     if (mdns >= 0) {
         struct ip_mreq mr = {.imr_multiaddr.s_addr = inet_addr("224.0.0.251"), .imr_interface.s_addr = INADDR_ANY};
         setsockopt(mdns, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mr, sizeof(mr));
@@ -486,14 +485,17 @@ char *lan_discover_run(const char *id, const cJSON *params)
 
     int hosts, n_arp, n_mdns, n_ssdp;
     bool truncated;
-    ld_counts(ctx, &hosts, &n_arp, &n_mdns, &n_ssdp, &truncated);
     char *result = ld_result_json(ctx);
+    // Serialization can roll back a host at the JSON cap; include that in the log.
+    ld_counts(ctx, &hosts, &n_arp, &n_mdns, &n_ssdp, &truncated);
+    int probe_sent, probe_answered, probe_resent;
+    ld_probe_counts(ctx, &probe_sent, &probe_answered, &probe_resent);
     comma_heap_log("discovery_peak");
     ld_free(ctx);
     free(buf);
     free(dump);
-    ESP_LOGI(TAG, "%s: %d hosts (arp %d of %u swept, %d failed; mdns %d answers; ssdp %d answers)%s, %d ms, %u B",
-             id, hosts, n_arp, (unsigned)arp_sent, arp_failed, n_mdns, n_ssdp, truncated ? ", truncated" : "",
+    ESP_LOGI(TAG, "%s: %d hosts (arp %d of %u swept, %d failed; mdns %d answers; ssdp %d answers; probes %d sent, %d answered, %d resent)%s, %d ms, %u B",
+             id, hosts, n_arp, (unsigned)arp_sent, arp_failed, n_mdns, n_ssdp, probe_sent, probe_answered, probe_resent, truncated ? ", truncated" : "",
              (int)(now_ms() - start), result ? (unsigned)strlen(result) : 0);
     if (!result) {
         return error_frame(id, "the T-Circle is out of memory for the discovery result");

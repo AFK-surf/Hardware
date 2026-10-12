@@ -424,7 +424,7 @@ static void send_metadata(void)
         return;
     }
     // Connector task only, so static keeps it off the task stack.
-    static char json[1024];
+    static char json[1280]; // includes probe limits and a maximally JSON-escaped device name
     int n = snprintf(json, sizeof(json),
                      "{\"type\":\"metadata\","
                      "\"capabilities\":{\"scope\":\"%s\",\"device_access\":true,\"execution_boundary\":\"lan-gateway\","
@@ -440,13 +440,23 @@ static void send_metadata(void)
 #endif
                      "],\"max_bytes\":%d,"
                      "\"max_timeout_seconds\":%d,"
-                     "\"response_chunks\":{\"max_total_bytes\":%d,\"chunk_bytes\":%d}},"
+                     "\"response_chunks\":{\"max_total_bytes\":%d,\"chunk_bytes\":%d}"
+#if CONFIG_COMMA_LAN_DISCOVER && CONFIG_COMMA_LAN_DISCOVER_PROBES > 0
+                     ",\"discover_probes\":{\"max_probes\":%d,\"max_payload_bytes\":%d,"
+                     "\"max_answer_bytes\":%d,\"max_total_answer_bytes\":%d}"
+#endif
+                     "},"
                      "\"component_versions\":{\"" CONFIG_COMMA_CLIENT_SOURCE "\":\"" FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
                      "\"system_info\":{\"client_source\":\"" CONFIG_COMMA_CLIENT_SOURCE "\",\"hostname\":%s,\"os_type\":\"esp-idf\","
                      "\"arch\":\"xtensa\"%s}}",
                      current_scope(), LAN_HTTP_MAX_BYTES, LAN_HTTP_TIMEOUT_MAX_S, LAN_HTTP_CHUNK_MAX_TOTAL,
-                     LAN_HTTP_CHUNK_BYTES, hostname, collected_at);
+                     LAN_HTTP_CHUNK_BYTES,
+#if CONFIG_COMMA_LAN_DISCOVER && CONFIG_COMMA_LAN_DISCOVER_PROBES > 0
+                     CONFIG_COMMA_LAN_DISCOVER_PROBES, CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD,
+                     CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER, CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET,
+#endif
+                     hostname, collected_at);
     cJSON_free(hostname);
     if (n <= 0 || (size_t)n >= sizeof(json)) {
         ESP_LOGE(TAG, "metadata does not fit");

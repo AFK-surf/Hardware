@@ -22,6 +22,13 @@ Anything on the LAN (the camera's snapshot may answer 401: its auth is the backe
 
     python3 tools/fake_connector.py --fetch 'http://192.168.5.33/...'
 
+UDP discovery (H2), Gree and miIO hellos selected within the board's advertised limits:
+
+    python3 firmware/tools/fake_connector.py --discover-probes --discover-timeout 5000 --loop 3
+
+Pass --discover-probes FILE.json for an array of {id, port, payload_b64} objects, e.g. a maximum-load
+lab test. Results are saved under --out; logs contain only host/probe ids, byte counts and cut flags.
+
 TCP tunnels (lan_tcp_dial, G3): echo through a TCP echo server on this Mac (a short line, then
 1 MB), pull 1 MB from a source server on this Mac, and a dial to a closed port (must be refused):
 
@@ -75,6 +82,74 @@ TEST_FILES = {
     "5m.bin": 5 * 1024 * 1024,
     "allbytes.bin": 256 * 1024,
 }
+
+
+# The harness builds protocol bytes; the firmware remains protocol-agnostic.
+DISCOVERY_PROBES = [
+    {"id": "gree", "port": 7000, "payload_b64": base64.b64encode(b'{"t":"scan"}').decode()},
+    {"id": "miio", "port": 54321, "payload_b64": base64.b64encode(bytes.fromhex("21310020") + b"\xff" * 28).decode()},
+]
+
+
+def discovery_params(gateway, requested=None, timeout_ms=3000):
+    """Keep within all advertised limits; omit probes on old/disabled firmware."""
+    params = {"timeout_ms": timeout_ms}
+    limits = gateway.get("discover_probes") or {}
+    keys = ("max_probes", "max_payload_bytes", "max_answer_bytes", "max_total_answer_bytes")
+    if requested is None or any(type(limits.get(k)) is not int or limits[k] < 1 for k in keys):
+        return params
+    selected, ids, ports = [], set(), set()
+    for probe in requested:
+        if not isinstance(probe, dict):
+            raise ValueError("each probe must be an object")
+        pid, port = probe.get("id"), probe.get("port")
+        if not isinstance(pid, str) or not 1 <= len(pid) <= 16 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in pid):
+            raise ValueError("probe id must be 1..16 characters of [a-z0-9_]")
+        if type(port) is not int or not 1 <= port <= 65535 or pid in ids or port in ports:
+            raise ValueError("probe ids/ports must be unique; ports must be integers in 1..65535")
+        payload = probe.get("payload_b64")
+        if not isinstance(payload, str):
+            raise ValueError("probe payload_b64 must be standard base64")
+        raw = base64.b64decode(payload, validate=True)
+        if not raw or base64.b64encode(raw).decode() != payload:
+            raise ValueError("probe payload_b64 must be nonempty, canonical standard base64")
+        ids.add(pid)
+        ports.add(port)
+        if len(raw) <= limits["max_payload_bytes"] and len(selected) < limits["max_probes"]:
+            selected.append({"id": pid, "port": port, "payload_b64": payload})
+    if selected:
+        params["udp_probes"] = selected
+    return params
+
+
+def check_discovery(result, params, gateway):
+    """Check transport bounds, without interpreting or logging answer bytes."""
+    problems, summaries = [], []
+    if not isinstance(result, dict) or not isinstance(result.get("hosts"), list):
+        return ["missing discovery hosts array"], summaries
+    sent = [p["id"] for p in params.get("udp_probes", [])]
+    limits = gateway.get("discover_probes") or {}
+    total = 0
+    for host in result["hosts"]:
+        last = -1
+        for answer in host.get("probes", []):
+            try:
+                index = sent.index(answer.get("id"))
+                if index <= last:
+                    raise ValueError("answer ids repeated or out of request order")
+                last = index
+                raw = base64.b64decode(answer["payload_b64"], validate=True)
+                total += len(raw)
+                if len(raw) > limits["max_answer_bytes"]:
+                    problems.append("answer exceeds advertised max_answer_bytes")
+                summaries.append(f"{host.get('ip')} {answer['id']}: {len(raw)} B, cut={answer.get('cut', False)}")
+            except (ValueError, TypeError, KeyError, AttributeError):
+                problems.append("invalid or unsolicited probe answer")
+    if total > limits.get("max_total_answer_bytes", 0):
+        problems.append("answers exceed advertised max_total_answer_bytes")
+    if result.get("probes_truncated") and not result.get("truncated"):
+        problems.append("probes_truncated requires truncated")
+    return problems, summaries
 
 
 def log(msg):
@@ -349,7 +424,7 @@ class Session:
         host = frame.get("system_info", {}).get("hostname")
         log(
             f"metadata: hostname={host!r} scope={caps.get('scope')!r} methods={gw.get('methods')} "
-            f"response_chunks={gw.get('response_chunks')}"
+            f"response_chunks={gw.get('response_chunks')} discover_probes={gw.get('discover_probes')}"
         )
         self.metadata_event.set()
 
@@ -761,6 +836,29 @@ class Session:
             h, _, port = target.partition(":")
             await self.tunnel_rtsp(h, int(port or 554))
 
+    async def discover(self, gateway):
+        params = discovery_params(gateway, self.args.probe_definitions, self.args.discover_timeout)
+        if self.args.probe_definitions is not None and "udp_probes" not in params:
+            log("SKIP probes: no compatible discover_probes capability/payload; running plain discovery")
+        log(f"→ lan_discover timeout_ms={params['timeout_ms']} probes={[p['id'] for p in params.get('udp_probes', [])]}")
+        p = await self.request("lan_discover", params, 15)
+        res = (p.final or {}).get("result")
+        problems, summaries = check_discovery(res, params, gateway)
+        problems.extend(p.problems)
+        if (p.final or {}).get("type") != "response":
+            problems.append(f"discovery failed: {(p.final or {}).get('error')}")
+        if res is not None:
+            # Keep base64 available for a local verifier, but never print payloads in the log.
+            path = os.path.join(self.args.out, f"discovery.{p.id}.json")
+            with open(path, "w") as f:
+                json.dump(res, f, separators=(",", ":"))
+            log(f"  hosts={len(res.get('hosts', []))} truncated={res.get('truncated')} "
+                f"probes_truncated={res.get('probes_truncated', False)} result={path}")
+        for summary in summaries:
+            log(f"  {summary}")
+        log(f"{'FAIL' if problems else 'PASS'} discovery" + (f": {problems}" if problems else ""))
+        self.failures += bool(problems)
+
     async def plan(self):
         args = self.args
         try:
@@ -800,10 +898,7 @@ class Session:
                 await self.tunnel_plan()
             if args.discover:
                 if "lan_discover" in methods:
-                    p = await self.request("lan_discover", {"timeout_ms": 3000}, 15)
-                    ok = bool(p.final) and p.final.get("type") == "response"
-                    log(f"{'PASS' if ok else 'FAIL'} discovery: {p.final}")
-                    self.failures += 0 if ok else 1
+                    await self.discover(gateway)
                 else:
                     log("SKIP discovery: board does not advertise lan_discover")
             if args.text_limit and args.serve and http_enabled:
@@ -891,10 +986,25 @@ async def main():
     ap.add_argument("--ack-timeout", type=float, default=15, help="seconds to wait for a tcp_ack before failing")
     ap.add_argument("--allow-ops", action="store_true", help="send device_access true if the board is read-only")
     ap.add_argument("--discover", action="store_true", help="test advertised LAN discovery each round")
+    ap.add_argument("--discover-probes", nargs="?", const="builtin", metavar="JSON_FILE",
+                    help="discover with Gree/miIO hellos, or probes from a JSON array; honors metadata limits")
+    ap.add_argument("--discover-timeout", type=int, default=3000, metavar="MS", help="discovery window (1000..8000)")
     ap.add_argument("--text-limit", action="store_true", help="test text at advertised limit (--make-files/--serve)")
     ap.add_argument("--tls-cert", help="PEM certificate for local WSS tests")
     ap.add_argument("--tls-key", help="PEM key for local WSS tests")
     args = ap.parse_args()
+    if not 1000 <= args.discover_timeout <= 8000:
+        ap.error("--discover-timeout must be 1000..8000")
+    args.probe_definitions = None
+    if args.discover_probes:
+        args.discover = True
+        if args.discover_probes == "builtin":
+            args.probe_definitions = DISCOVERY_PROBES
+        else:
+            with open(args.discover_probes) as f:
+                args.probe_definitions = json.load(f)
+            if not isinstance(args.probe_definitions, list) or not args.probe_definitions:
+                ap.error("probe JSON file must contain a nonempty array")
     tls = None
     if args.tls_cert or args.tls_key:
         if not (args.tls_cert and args.tls_key):

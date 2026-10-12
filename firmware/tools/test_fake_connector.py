@@ -389,5 +389,91 @@ class FakeConnectorTest(unittest.TestCase):
         self.assertIn("done: 0 failure(s)", log, log)
 
 
+class DiscoveryProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def run_discovery(self, limits, requested=None, reply=None):
+        from types import SimpleNamespace
+        import contextlib
+        import io
+        import fake_connector as fc
+
+        class Wire:
+            closed = False
+
+            async def send_json(wire, frame):
+                wire.request = frame
+                pending = session.pending[frame["id"]]
+                pending.final = {"type": "response", "result": reply or {"hosts": [], "truncated": False}}
+                pending.done.set()
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(out=directory, discover_timeout=5000,
+                                   probe_definitions=fc.DISCOVERY_PROBES if requested is None else requested)
+            wire = Wire()
+            session = fc.Session(wire, args, "192.168.1.2")
+            log = io.StringIO()
+            with contextlib.redirect_stdout(log):
+                await session.discover({"discover_probes": limits})
+            files = os.listdir(directory)
+            self.assertEqual(len(files), 1)
+            with open(os.path.join(directory, files[0])) as f:
+                saved = json.load(f)
+            return wire.request["params"], session.failures, saved, log.getvalue()
+
+    async def test_probe_requests_follow_both_board_metadata(self):
+        for max_probes, payload, budget in [(8, 512, 16384), (4, 256, 4096)]:
+            limits = dict(max_probes=max_probes, max_payload_bytes=payload,
+                          max_answer_bytes=1024, max_total_answer_bytes=budget)
+            params, failed, _, _ = await self.run_discovery(limits)
+            self.assertEqual(failed, 0)
+            self.assertEqual(params["timeout_ms"], 5000)
+            self.assertEqual([p["id"] for p in params["udp_probes"]], ["gree", "miio"])
+            self.assertEqual(base64.b64decode(params["udp_probes"][0]["payload_b64"]), b'{"t":"scan"}')
+            self.assertEqual(base64.b64decode(params["udp_probes"][1]["payload_b64"]), bytes.fromhex("21310020") + b"\xff" * 28)
+            for key, cap in [("max_probes", 1), ("max_payload_bytes", 16)]:
+                params, failed, _, _ = await self.run_discovery({**limits, key: cap})
+                self.assertEqual([p["id"] for p in params["udp_probes"]], ["gree"])
+                self.assertEqual(failed, 0)
+
+    async def test_old_disabled_or_incomplete_metadata_omits_probes(self):
+        for limits in [None, {}, {"max_probes": 0}, {"max_probes": 8, "max_payload_bytes": 512}]:
+            params, failed, _, log = await self.run_discovery(limits)
+            self.assertNotIn("udp_probes", params)
+            self.assertEqual(failed, 0)
+            self.assertIn("SKIP probes", log)
+
+    async def test_answer_bytes_saved_but_not_logged(self):
+        raw = b"\x00\xffsecret-binary-envelope\r\n"
+        encoded = base64.b64encode(raw).decode()
+        reply = {"hosts": [{"ip": "192.168.1.40", "probes": [{"id": "gree", "payload_b64": encoded}]}],
+                 "truncated": False}
+        limits = dict(max_probes=4, max_payload_bytes=256, max_answer_bytes=1024, max_total_answer_bytes=4096)
+        _, failed, saved, log = await self.run_discovery(limits, reply=reply)
+        self.assertEqual(failed, 0)
+        self.assertEqual(saved, reply)
+        self.assertNotIn(encoded, log)
+        self.assertNotIn("secret-binary-envelope", log)
+        self.assertIn(f"gree: {len(raw)} B, cut=False", log)
+
+    async def test_harness_detects_answer_and_total_budget_violations(self):
+        limits = dict(max_probes=4, max_payload_bytes=256, max_answer_bytes=4, max_total_answer_bytes=6)
+        for sizes, reason in [([5], "max_answer_bytes"), ([4, 4], "max_total_answer_bytes")]:
+            hosts = [{"ip": f"192.168.1.{40+i}", "probes": [
+                {"id": "gree", "payload_b64": base64.b64encode(b"x" * size).decode()}]} for i, size in enumerate(sizes)]
+            _, failed, _, log = await self.run_discovery(limits, reply={"hosts": hosts, "truncated": False})
+            self.assertEqual(failed, 1)
+            self.assertIn(reason, log)
+
+    async def test_custom_maximum_probe_list_and_validation(self):
+        import fake_connector as fc
+        probes = [{"id": f"lab_{i}", "port": 62000+i, "payload_b64": "AA=="} for i in range(8)]
+        limits = dict(max_probes=4, max_payload_bytes=256, max_answer_bytes=1024, max_total_answer_bytes=4096)
+        params, failed, _, _ = await self.run_discovery(limits, probes)
+        self.assertEqual(params["udp_probes"], probes[:4])
+        self.assertEqual(failed, 0)
+        for bad in [[probes[0], probes[0]], [{**probes[0], "payload_b64": "AA-_"}], [{**probes[0], "id": "BAD"}]]:
+            with self.assertRaises(ValueError):
+                fc.discovery_params({"discover_probes": limits}, bad)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

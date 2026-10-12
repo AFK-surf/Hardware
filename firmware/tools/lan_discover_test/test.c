@@ -13,6 +13,12 @@ static int g_checks, g_failed;
 static size_t g_alloc_limit, g_alloc_peak;
 static int g_alloc_rejected;
 static bool g_alloc_fail;
+static bool g_malloc_fail;
+
+void *ld_test_malloc(size_t n)
+{
+    return g_malloc_fail ? NULL : malloc(n);
+}
 
 void *ld_test_realloc(void *p, size_t n)
 {
@@ -198,7 +204,7 @@ static bool truncated(cJSON *r)
     return cJSON_IsTrue(cJSON_GetObjectItem(r, "truncated"));
 }
 
-static int count(cJSON *arr)
+static int count(const cJSON *arr)
 {
     return arr ? cJSON_GetArraySize(arr) : 0;
 }
@@ -700,8 +706,379 @@ static void test_merge(void)
     CHECK(ld_dns_question(q, 10, "_hap._tcp.local", 12, 0x8001) == 0, "question too long for buffer");
 }
 
+// ---- UDP probes -------------------------------------------------------------------------------
+
+static const uint8_t PROBE_MAC[6] = {1, 2, 3, 4, 5, 6};
+
+static cJSON *probe_params(unsigned n)
+{
+    cJSON *params = cJSON_CreateObject(), *list = cJSON_AddArrayToObject(params, "udp_probes");
+    for (unsigned i = 0; i < n; ++i) {
+        cJSON *p = cJSON_CreateObject();
+        char id[17];
+        snprintf(id, sizeof(id), "p%u", i);
+        cJSON_AddStringToObject(p, "id", id);
+        cJSON_AddNumberToObject(p, "port", 7000 + i);
+        cJSON_AddStringToObject(p, "payload_b64", "AAH+/w==");
+        cJSON_AddItemToArray(list, p);
+    }
+    return params;
+}
+
+static void params_check(const char *json, const char *error)
+{
+    cJSON *p = cJSON_Parse(json);
+    assert(p);
+    unsigned sources;
+    int timeout;
+    const char *bad = ld_parse_params(p, &sources, &timeout);
+    CHECK(error ? bad && strstr(bad, error) : !bad, "params %s: expected %s, got %s", json,
+          error ? error : "success", bad ? bad : "success");
+    cJSON_Delete(p);
+}
+
+static ld_ctx_t *probing(unsigned count)
+{
+    ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
+    cJSON *params = probe_params(count);
+    unsigned sources;
+    int timeout;
+    assert(!ld_parse_params(params, &sources, &timeout));
+    assert(ld_probes_init(ctx, params));
+    cJSON_Delete(params);
+    return ctx;
+}
+
+static unsigned send_ready(ld_ctx_t *ctx, uint32_t ms)
+{
+    unsigned n = 0;
+    ld_probe_send_t send;
+    while (ld_probe_next(ctx, ms, &send)) {
+        ld_probe_sent(ctx, &send, ms, true);
+        assert(++n <= LD_MAX_HOSTS * PROBE_SLOTS);
+    }
+    return n;
+}
+
+static void test_probe_params(void)
+{
+    params_check("null", NULL);
+    params_check("{}", NULL);
+    params_check("{\"udp_probes\":null,\"sources\":[\"mdns\"]}", NULL);
+    params_check("[]", "params must be an object");
+    params_check("{\"sources\":[]}", "sources");
+    params_check("{\"sources\":[\"wrong\"]}", "sources");
+    params_check("{\"timeout_ms\":\"3\"}", "timeout_ms");
+    if (CONFIG_COMMA_LAN_DISCOVER_PROBES == 0) {
+        params_check("{\"udp_probes\":[{\"id\":\"gree\",\"port\":7000,\"payload_b64\":\"eyJ0Ijoic2NhbiJ9\"}]}", "disabled");
+        params_check("{\"udp_probes\":[]}", "disabled");
+        return;
+    }
+    params_check("{\"udp_probes\":[]}", "max_probes");
+    params_check("{\"udp_probes\":{}}", "max_probes");
+    params_check("{\"udp_probes\":false}", "max_probes");
+    params_check("{\"udp_probes\":[null]}", "object");
+    params_check("{\"udp_probes\":[1]}", "object");
+    params_check("{\"udp_probes\":[{}]}", "id");
+    params_check("{\"sources\":[\"mdns\"],\"udp_probes\":[{}]}", "requires 'arp'");
+    const char *ids[] = {"\"\"", "null", "1", "\"A\"", "\"a-b\"", "\"a b\"", "\"abcdefghijklmnopq\"", "\"é\""};
+    for (unsigned i = 0; i < sizeof(ids)/sizeof(ids[0]); ++i) {
+        char json[256];
+        snprintf(json, sizeof(json), "{\"udp_probes\":[{\"id\":%s,\"port\":1,\"payload_b64\":\"AA==\"}]}", ids[i]);
+        params_check(json, "id");
+    }
+    const char *ports[] = {"null", "\"1\"", "false", "0", "-1", "65536", "1.5", "1e300", "-1e300"};
+    for (unsigned i = 0; i < sizeof(ports)/sizeof(ports[0]); ++i) {
+        char json[256];
+        snprintf(json, sizeof(json), "{\"udp_probes\":[{\"id\":\"a\",\"port\":%s,\"payload_b64\":\"AA==\"}]}", ports[i]);
+        params_check(json, "port");
+    }
+    const char *payloads[] = {"", "AA", "====", "=AAA", "A===", "AA=A", "AA==AAAA", "AA-_", "AA== ", "AB==", "AAB="};
+    for (unsigned i = 0; i < sizeof(payloads)/sizeof(payloads[0]); ++i) {
+        char json[256];
+        snprintf(json, sizeof(json), "{\"udp_probes\":[{\"id\":\"a\",\"port\":1,\"payload_b64\":\"%s\"}]}", payloads[i]);
+        params_check(json, "payload_b64");
+    }
+    params_check("{\"udp_probes\":[{\"id\":\"a\",\"payload_b64\":\"AA==\"}]}", "port");
+    params_check("{\"udp_probes\":[{\"id\":\"a\",\"port\":1}]}", "payload_b64");
+    params_check("{\"udp_probes\":[{\"id\":\"a\",\"port\":1,\"payload_b64\":null}]}", "payload_b64");
+    params_check("{\"udp_probes\":[{\"id\":\"a\",\"port\":1,\"payload_b64\":3}]}", "payload_b64");
+    params_check("{\"udp_probes\":[{\"id\":\"a\",\"port\":1,\"payload_b64\":\"AA==\"},{\"id\":\"a\",\"port\":2,\"payload_b64\":\"AA==\"}]}", "id' must be unique");
+    params_check("{\"udp_probes\":[{\"id\":\"a\",\"port\":1,\"payload_b64\":\"AA==\"},{\"id\":\"b\",\"port\":1,\"payload_b64\":\"AA==\"}]}", "port' must be unique");
+    params_check("{\"sources\":[\"arp\"],\"udp_probes\":[{\"id\":\"abcdefghijklmn_9\",\"port\":65535,\"payload_b64\":\"AA==\"}]}", NULL);
+    params_check("{\"udp_probes\":[{\"id\":\"gree\",\"port\":7000,\"payload_b64\":\"eyJ0Ijoic2NhbiJ9\"},{\"id\":\"miio\",\"port\":54321,\"payload_b64\":\"ITEAIP////////////////////////////////////8=\"}]}", NULL);
+    for (unsigned n = CONFIG_COMMA_LAN_DISCOVER_PROBES; n <= CONFIG_COMMA_LAN_DISCOVER_PROBES + 1; ++n) {
+        cJSON *p = probe_params(n);
+        unsigned sources;
+        int timeout;
+        const char *bad = ld_parse_params(p, &sources, &timeout);
+        CHECK(n > CONFIG_COMMA_LAN_DISCOVER_PROBES ? bad && strstr(bad, "max_probes") : !bad, "probe count %u", n);
+        cJSON_Delete(p);
+    }
+    for (int n = CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD - 2; n <= CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD + 1; ++n) {
+        uint8_t bytes[CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD + 1];
+        memset(bytes, 0xFE, sizeof(bytes));
+        ld_sb_t b = {0};
+        write_probe_bytes(&b, bytes, (size_t)n);
+        cJSON *p = probe_params(1);
+        cJSON *entry = cJSON_GetArrayItem(cJSON_GetObjectItem(p, "udp_probes"), 0);
+        cJSON_ReplaceItemInObject(entry, "payload_b64", cJSON_CreateString(b.p));
+        unsigned sources;
+        int timeout;
+        const char *bad = ld_parse_params(p, &sources, &timeout);
+        CHECK(n > CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD ? bad != NULL : !bad, "decoded payload boundary %d", n);
+        if (!bad) {
+            ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
+            CHECK(ld_probes_init(ctx, p), "payload allocation");
+            ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+            ld_probe_send_t send;
+            CHECK(ld_probe_next(ctx, 0, &send) && send.len == (size_t)n && !memcmp(send.payload, bytes, n), "decoded payload bytes");
+            ld_free(ctx);
+        }
+        ld_sb_free(&b);
+        cJSON_Delete(p);
+    }
+}
+
+static void test_no_probes(void)
+{
+    const char *params[] = {"{}", "{\"udp_probes\":null}"};
+    for (unsigned i = 0; i < 2; ++i) {
+        ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
+        cJSON *p = cJSON_Parse(params[i]);
+        CHECK(ld_probes_init(ctx, p) && !ld_has_probes(ctx), "no probe allocation for missing/null");
+        ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+        ld_mark_probes_truncated(ctx);
+        ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, (const uint8_t *)"noise", 5);
+        ld_probes_finish(ctx);
+        char *raw = ld_result_json(ctx);
+        CHECK(!strcmp(raw, "{\"hosts\":[{\"ip\":\"192.168.5.40\",\"mac\":\"01:02:03:04:05:06\",\"sources\":[\"arp\"],\"services\":[]}],\"truncated\":false}"), "legacy result bytes unchanged: %s", raw);
+        free(raw);
+        ld_free(ctx);
+        cJSON_Delete(p);
+    }
+}
+
+static void test_probe_matching(void)
+{
+    ld_ctx_t *oom = ld_create(ip(SELF), ip(MASK));
+    cJSON *params = probe_params(1);
+    g_malloc_fail = true;
+    CHECK(!ld_probes_init(oom, params) && !ld_has_probes(oom), "probe table OOM leaves context safely freeable");
+    g_malloc_fail = false;
+    CHECK(ld_probes_init(oom, params), "probe table recovers after OOM");
+    cJSON_Delete(params);
+    ld_free(oom);
+    ld_ctx_t *ctx = probing(2);
+    const uint8_t bytes[] = {0, 1, 254, 255};
+    const char ssdp[] = "HTTP/1.1 200 OK\r\nST: x\r\nLOCATION: http://x/\r\n\r\n";
+    ld_add_ssdp(ctx, ip("192.168.5.40"), ssdp, sizeof(ssdp)-1, NULL);
+    ld_probe_send_t send;
+    CHECK(!ld_probe_next(ctx, 0, &send), "mDNS/SSDP alone never authorizes probes");
+    const char *invalid[] = {SELF, "192.168.5.255", "255.255.255.255", "224.1.2.3", "192.168.5.0", "10.0.0.1", "127.0.0.1", "0.0.0.0"};
+    for (unsigned i=0; i < sizeof(invalid)/sizeof(invalid[0]); ++i) ld_add_arp(ctx, ip(invalid[i]), PROBE_MAC);
+    CHECK(!ld_probe_next(ctx, 0, &send), "self, multicast, broadcast, network and other subnets excluded");
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, bytes, sizeof(bytes)); // before send
+    CHECK(ld_probe_next(ctx, 0, &send) && send.port == 7000 && send.ip == ip("192.168.5.40"), "first probe on ARP confirmation");
+    CHECK(send.len == sizeof(bytes) && !memcmp(send.payload, bytes, sizeof(bytes)), "binary payload preserved");
+    ld_probe_sent(ctx, &send, 0, true);
+    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7001, bytes, sizeof(bytes)); // this port not sent yet
+    ld_add_probe_answer(ctx, ip("192.168.5.41"), 7000, bytes, sizeof(bytes));
+    ld_add_probe_answer(ctx, ip("192.168.5.40"), 9000, bytes, sizeof(bytes));
+    CHECK(ctx->probes->answered == 0, "only a sent host/port pair can answer");
+    CHECK(send_ready(ctx, 0) == 1, "second probe sent once");
+    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7001, (const uint8_t *)"hi", 2);
+    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, bytes, sizeof(bytes));
+    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, (const uint8_t *)"replace", 7);
+    CHECK(send_ready(ctx, 1000) == 0, "answered pairs never resent");
+    ld_probes_finish(ctx);
+    cJSON *r = result(ctx, NULL), *h = host_in(r, "192.168.5.40");
+    cJSON *arr = cJSON_GetObjectItem(h, "probes");
+    CHECK(count(arr) == 2 && !strcmp(str(cJSON_GetArrayItem(arr, 0), "id"), "p0") &&
+          !strcmp(str(cJSON_GetArrayItem(arr, 1), "id"), "p1"), "answers in request order");
+    CHECK(!strcmp(str(cJSON_GetArrayItem(arr, 0), "payload_b64"), "AAH+/w==") &&
+          !strcmp(str(cJSON_GetArrayItem(arr, 1), "payload_b64"), "aGk="), "first binary answer retained");
+    CHECK(!cJSON_GetObjectItem(r, "probes_truncated") && !truncated(r), "complete probes add no truncation");
+    cJSON_Delete(r);
+    ld_free(ctx);
+}
+
+static void test_probe_retry_and_caps(void)
+{
+    ld_ctx_t *ctx = probing(1);
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    CHECK(send_ready(ctx, 20) == 1 && send_ready(ctx, 519) == 0 && send_ready(ctx, 520) == 1 &&
+          send_ready(ctx, 5000) == 0, "one retry, no earlier than 500 ms");
+    ld_probes_finish(ctx);
+    cJSON *r = result(ctx, NULL);
+    int sent, answered, resent;
+    ld_probe_counts(ctx, &sent, &answered, &resent);
+    CHECK(sent == 2 && resent == 1 && answered == 0 && !truncated(r), "unanswered after two sends isn't truncation");
+    CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.5.40"), "probes"), "unanswered host has no probes key");
+    cJSON_Delete(r);
+    ld_add_arp(ctx, ip("192.168.5.41"), PROBE_MAC); // final harvest, no time to send
+    ld_probes_finish(ctx);
+    r = result(ctx, NULL);
+    CHECK(truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "late host flags both truncations");
+    cJSON_Delete(r);
+    ld_free(ctx);
+
+    ctx = probing(1);
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    CHECK(send_ready(ctx, 0) == 1, "send before short tail");
+    ld_probes_finish(ctx);
+    r = result(ctx, NULL);
+    CHECK(truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "retry missing at tail flags truncation");
+    cJSON_Delete(r);
+    ld_free(ctx);
+
+    ctx = probing(1);
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_probe_send_t send;
+    assert(ld_probe_next(ctx, 0, &send));
+    ld_probe_sent(ctx, &send, 0, false);
+    ld_add_probe_answer(ctx, send.ip, send.port, (const uint8_t *)"x", 1);
+    CHECK(ctx->probes->answered == 0 && ctx->probes->truncated, "failed send authorizes no answers and flags loss");
+    CHECK(send_ready(ctx, 500) == 1 && send_ready(ctx, 1000) == 0, "failed first attempt gets only one retry");
+    ld_add_probe_answer(ctx, send.ip, send.port, NULL, 0);
+    r = result(ctx, NULL);
+    cJSON *a = cJSON_GetArrayItem(cJSON_GetObjectItem(host_in(r, "192.168.5.40"), "probes"), 0);
+    CHECK(a && !strcmp(str(a, "payload_b64"), ""), "zero-byte answer is a valid datagram");
+    cJSON_Delete(r);
+    ld_free(ctx);
+
+    ctx = probing(CONFIG_COMMA_LAN_DISCOVER_PROBES);
+    for (int i = 30; i < 30 + LD_MAX_HOSTS + 1; ++i) {
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", i);
+        ld_add_arp(ctx, ip(addr), PROBE_MAC);
+    }
+    CHECK(send_ready(ctx, 0) == LD_MAX_HOSTS * CONFIG_COMMA_LAN_DISCOVER_PROBES, "all capped hosts get each probe once");
+    CHECK(send_ready(ctx, 500) == LD_MAX_HOSTS * CONFIG_COMMA_LAN_DISCOVER_PROBES, "worst-case resend count");
+    ld_probes_finish(ctx);
+    r = result(ctx, NULL);
+    CHECK(count(cJSON_GetObjectItem(r, "hosts")) == 64 && truncated(r) &&
+          cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "host cap also flags probes");
+    cJSON_Delete(r);
+    ld_free(ctx);
+}
+
+static void test_probe_answer_budget(void)
+{
+    ld_ctx_t *ctx = probing(CONFIG_COMMA_LAN_DISCOVER_PROBES);
+    uint8_t data[CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER + 1];
+    memset(data, 0xFF, sizeof(data));
+    for (int h = 30; h < 40; ++h) {
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        ld_add_arp(ctx, ip(addr), PROBE_MAC);
+    }
+    send_ready(ctx, 0);
+    size_t expected = 0;
+    int retained = 0;
+    for (int h = 30; h < 40; ++h) {
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        for (int p = 0; p < CONFIG_COMMA_LAN_DISCOVER_PROBES; ++p) {
+            // The first answer is oversized, the second exact-cap, the rest fill the shared budget.
+            ld_add_probe_answer(ctx, ip(addr), 7000 + p, data,
+                                CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER + (h == 30 && p == 0));
+            if (expected + CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER <= CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET) {
+                expected += CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER;
+                retained++;
+            }
+        }
+    }
+    // A dropped answer must not be replaced with a later smaller one that would fit.
+    ld_add_probe_answer(ctx, ip("192.168.5.39"), 7000, NULL, 0);
+    ld_probes_finish(ctx);
+    cJSON *r = result(ctx, NULL);
+    cJSON *first = cJSON_GetObjectItem(host_in(r, "192.168.5.30"), "probes");
+    cJSON *a = cJSON_GetArrayItem(first, 0), *b = cJSON_GetArrayItem(first, 1);
+    CHECK(a && cJSON_IsTrue(cJSON_GetObjectItem(a, "cut")), "oversized answer cut");
+    CHECK(b && !cJSON_GetObjectItem(b, "cut"), "exact-cap answer not cut");
+    CHECK(strlen(str(a, "payload_b64")) == 4 * ((CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER + 2)/3), "cut base64 length");
+    int count_answers = 0;
+    cJSON *host;
+    cJSON_ArrayForEach(host, cJSON_GetObjectItem(r, "hosts")) count_answers += count(cJSON_GetObjectItem(host, "probes"));
+    CHECK(count_answers == retained && ctx->probes->used == expected, "decoded run budget: %d answers, %zu bytes", count_answers, ctx->probes->used);
+    CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.5.39"), "probes"), "budget drops the whole first answer");
+    CHECK(truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "answer loss flags both");
+    cJSON_Delete(r);
+    ld_free(ctx);
+}
+
+static void test_probe_json_budget(void)
+{
+    ld_ctx_t *ctx = probing(1);
+    uint8_t data[CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER]; memset(data, 0, sizeof(data));
+    char value[LD_STR_MAX + 1]; memset(value, '"', LD_STR_MAX); value[LD_STR_MAX] = 0;
+    for (int h = 30; h < 35; ++h) {
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        ld_add_arp(ctx, ip(addr), PROBE_MAC);
+        send_ready(ctx, 0);
+        ld_add_probe_answer(ctx, ip(addr), 7000, data, sizeof(data));
+        // Many escaped service fields plus probe base64 force the result cap on both profiles.
+        for (int e = 0; e < LD_MAX_SSDP; ++e) {
+            char pkt[1024];
+            int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %02d%s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n", e, value, value, value);
+            ld_add_ssdp(ctx, ip(addr), pkt, (size_t)n, NULL);
+        }
+    }
+    char *raw;
+    cJSON *r = result(ctx, &raw);
+    CHECK(strlen(raw) <= LD_MAX_JSON && truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "probe JSON cap preserves footer");
+    const int kept = count(cJSON_GetObjectItem(r, "hosts"));
+    CHECK(kept < 5, "whole-host rollback with probes");
+    if (LD_MAX_JSON == 12288) CHECK(kept == 0, "oversized DevKit host omitted with its probes");
+    cJSON *host;
+    cJSON_ArrayForEach(host, cJSON_GetObjectItem(r, "hosts")) {
+        CHECK(count(cJSON_GetObjectItem(host, "probes")) == 1 && count(cJSON_GetObjectItem(host, "ssdp")) == LD_MAX_SSDP, "retained host complete");
+    }
+    free(raw);
+    cJSON_Delete(r);
+    ld_free(ctx);
+}
+
+static void test_probe_fuzz(void)
+{
+    srand(22);
+    for (int run = 0; run < 500; ++run) {
+        ld_ctx_t *ctx = probing(CONFIG_COMMA_LAN_DISCOVER_PROBES);
+        for (int h = 30; h < 34; ++h) {
+            char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+            ld_add_arp(ctx, ip(addr), PROBE_MAC);
+        }
+        send_ready(ctx, 0);
+        for (int i = 0; i < 40; ++i) {
+            size_t n = (size_t)(rand() % 2200);
+            uint8_t *bytes = malloc(n ? n : 1); // exact allocation makes overreads visible to ASan
+            for (size_t j = 0; j < n; ++j) bytes[j] = (uint8_t)rand();
+            char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", 30 + rand() % 6);
+            ld_add_probe_answer(ctx, ip(addr), 7000 + rand() % (CONFIG_COMMA_LAN_DISCOVER_PROBES + 2), bytes, n);
+            free(bytes);
+        }
+        send_ready(ctx, 500);
+        ld_probes_finish(ctx);
+        char *raw;
+        cJSON *r = result(ctx, &raw);
+        CHECK(strlen(raw) <= LD_MAX_JSON && ctx->probes->used <= CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET, "fuzz caps");
+        free(raw);
+        cJSON_Delete(r);
+        ld_free(ctx);
+    }
+}
+
 int main(void)
 {
+    test_probe_params();
+    test_no_probes();
+    if (CONFIG_COMMA_LAN_DISCOVER_PROBES > 0) {
+        test_probe_matching();
+        test_probe_retry_and_caps();
+        test_probe_answer_budget();
+        test_probe_json_budget();
+        test_probe_fuzz();
+    }
+    printf("probe table allocation: %zu B; pair: %zu B\n", sizeof(probe_state_t), sizeof(probe_pair_t));
     test_mdns_full_answer();
     test_mdns_split_and_compressed();
     test_mdns_hostile();

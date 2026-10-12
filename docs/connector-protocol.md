@@ -148,6 +148,85 @@ For bodies that are binary or bigger than the text cap, e.g. a camera snapshot (
 
 Same gates as text mode: access (read-only → `error`, no network), LAN destinations only, no redirects. **While a voice call is active, T-Circle refuses chunk mode** with `error` `busy: voice call active` without touching the network, and a call that starts mid-transfer ends the transfer with that `error`; text mode is unaffected. `timeout_seconds` is capped at 110 s in chunk mode (30 s in text mode) and covers the whole transfer.
 
+### `lan_discover` (A5, H2)
+
+Find IPv4 hosts on the board's own network with ARP, mDNS/DNS-SD, SSDP and Yeelight's search.
+The Connector's existing read-only gate refuses this method before network work, with or without
+probes; it is checked again when the queued job starts.
+
+**Params:** missing/null params use defaults. `sources` is a nonempty array containing only
+`"arp"`, `"mdns"`, `"ssdp"`; missing/null means all three. `timeout_ms` defaults to 3000 and is
+clamped to 1000..8000. H2 adds optional, caller-built UDP datagrams:
+
+```json
+{"sources":["arp","mdns","ssdp"],"timeout_ms":5000,
+ "udp_probes":[{"id":"gree","port":7000,"payload_b64":"eyJ0Ijoic2NhbiJ9"},
+               {"id":"miio","port":54321,"payload_b64":"ITEAIP////////////////////////////////////8="}]}
+```
+
+- Missing/null `udp_probes` sends no probes and preserves the pre-H2 result bytes.
+- Otherwise, it must be an array of 1..`max_probes` objects, and `sources` must include ARP.
+- Each `id` is 1..16 characters of `[a-z0-9_]`, unique within the request. Each `port` is an integer
+  1..65535, also unique: answers are matched by source port.
+- Each `payload_b64` is standard padded base64 (canonical pad bits, no whitespace or URL alphabet),
+  decoding to 1..`max_payload_bytes` bytes. Invalid fields produce an `error` naming the rule.
+- A build with `COMMA_LAN_DISCOVER_PROBES=0` rejects non-null `udp_probes`, including an empty array.
+  Missing/null still means no probes.
+
+**Probe capability:** `capabilities.lan_gateway.discover_probes` advertises the board's actual limits.
+It is omitted when discovery is disabled or the probe count is zero. The backend must check it
+before sending `udp_probes`; pre-H2 firmware silently ignores that parameter.
+
+```json
+"discover_probes":{"max_probes":8,"max_payload_bytes":512,"max_answer_bytes":1024,"max_total_answer_bytes":16384}
+```
+
+| Capability field | Kconfig (`CONFIG_` prefix omitted) | T-Circle | DevKit |
+| --- | --- | ---: | ---: |
+| `max_probes` | `COMMA_LAN_DISCOVER_PROBES` | 8 | 4 |
+| `max_payload_bytes` | `COMMA_LAN_DISCOVER_PROBE_PAYLOAD` | 512 | 256 |
+| `max_answer_bytes` | `COMMA_LAN_DISCOVER_PROBE_ANSWER` | 1024 | 1024 |
+| `max_total_answer_bytes` | `COMMA_LAN_DISCOVER_PROBE_BUDGET` | 16384 | 4096 |
+
+The shared defaults are T-Circle's; the DevKit overlay reduces payloads/count/total memory while
+keeping answers at 1024 bytes so a Gree envelope is not cut merely at 512 bytes.
+
+**Transport:** each ARP-confirmed host in the board's own subnet gets each probe once, unicast.
+The caller cannot name destinations; self, network/broadcast, multicast, loopback and off-subnet
+addresses never receive probes. Hosts discovered only through mDNS/SSDP are not eligible. All probe
+traffic shares one ephemeral UDP socket, closed at the end of the run. Only an answer from a host
+and source port successfully sent that probe counts; the first such datagram wins. Unknown sources,
+wrong ports and duplicates are discarded. Payloads and answers are opaque binary; the firmware
+neither interprets protocols nor logs their bytes.
+
+First sends take priority. Unanswered pairs get one retry at least 500 ms after the first attempt,
+if it fits before the listen-only tail (the final `min(timeout_ms / 4, 400)` ms). At most four send
+attempts occur per 25 ms; no catch-up burst is accumulated. Failed sends, unsent pairs, omitted
+retries, ARP/host coverage caps and lost probe results set both truncation flags. Silence after two
+successful sends does not. See [H2](reports/H2-report.md) for timing and pending hardware tests.
+
+**Result:** hosts are sorted by IP; at most 64 hosts, 16 services and 16 SSDP entries per host,
+16 TXT keys per service. Text from network announcements is printable ASCII, at most 255 bytes per
+string (tab/CR/LF become spaces, other control/non-ASCII bytes are dropped).
+
+```json
+{"hosts":[{"ip":"192.168.1.40","mac":"01:02:03:04:05:06","sources":["arp"],"services":[],
+           "probes":[{"id":"gree","payload_b64":"AAH+/w=="}]}],"truncated":false}
+```
+
+A host can also carry `hostname` and `ssdp:[{server,location,st}]`; services contain
+`{type,name,port,txt?}`. A host's `probes` is omitted when it has no stored answer, otherwise entries
+are in request order and contain only `id`, `payload_b64` and optional `cut:true`. Empty answer
+datagrams are valid and encode as `""`. An oversized answer is cut to `max_answer_bytes` and marked
+`cut`; base64 is exempt from the 255-byte text limit.
+
+Stored decoded answers share `max_total_answer_bytes`. An answer that would exceed it is dropped
+whole; a later duplicate cannot replace it. `truncated:true` and `probes_truncated:true` report cuts
+or lost probing coverage/results. `probes_truncated` is omitted when false or when probes were not
+requested. The whole result stays within 48 KiB on T-Circle / 12 KiB on DevKit: a host that does not
+fit is rolled back whole, including its probe answers; remaining hosts are omitted and truncation
+is reported. Backend Cue `f0a91d861` discards cut/over-limit answers and interprets the remaining bytes.
+
 ### `lan_tcp_dial` (G3)
 
 A raw TCP tunnel from the gateway to a LAN host, the same protocol as salix-connect (`systems/connector/salix-connect/lan_tunnel.go`) and station (`systems/station/src/connector/lan-tunnel.ts`). The backend uses it for SSH through a gateway, and G3 for RTSP to the camera. Advertised as `"lan_tcp_dial"` in `capabilities.lan_gateway.methods`.
@@ -203,7 +282,8 @@ and no TCP tunnels. `lan_tcp_dial` cannot be supported on DevKit until the backe
 device's `max_frame` and the smaller-frame path passes hardware tests.
 `client_source` and `component_versions` use `esp32-devkit`; T-Circle keeps `t-circle`. Disabled
 methods disappear from `lan_gateway.methods`. See [H1](reports/H1-report.md) before relying on DevKit
-capacity. Local WSS text/chunk runs passed 3/3; the reduced discovery result cap awaits a hardware retest.
+capacity. H1 local-WSS discovery/text/chunk runs passed 3/3 with the 12 KiB discovery cap;
+H2 UDP probe heap/voice/device tests are pending (see [H2](reports/H2-report.md)).
 
 
 | Item | Value |

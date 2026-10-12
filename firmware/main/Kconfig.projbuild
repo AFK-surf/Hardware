@@ -60,6 +60,24 @@ config COMMA_LAN_DISCOVER_MAX_JSON
     help
         Limit the result and its buffer growth (plus one byte for the NUL).
         Hosts that do not fit are omitted and set truncated=true.
+config COMMA_LAN_DISCOVER_PROBES
+    int "Maximum UDP discovery probes per call"
+    range 0 8
+    default 8
+    help
+        Zero disables probes and omits discover_probes from metadata.
+config COMMA_LAN_DISCOVER_PROBE_PAYLOAD
+    int "Maximum decoded discovery probe payload"
+    range 1 512
+    default 512
+config COMMA_LAN_DISCOVER_PROBE_ANSWER
+    int "Maximum stored bytes per discovery probe answer"
+    range 1 1024
+    default 1024
+config COMMA_LAN_DISCOVER_PROBE_BUDGET
+    int "Total decoded discovery probe answer budget"
+    range 1 16384
+    default 16384
 config COMMA_LAN_UDP_MAX_ANSWER
     int "Maximum UDP answer"
     range 512 4096

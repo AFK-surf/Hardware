@@ -3,9 +3,11 @@
 #include "cJSON.h"
 
 // The Connector's `lan_discover` (contract in docs/prompts/A5-firmware-lan-discovery.md):
-//   params {sources?: ["arp","mdns","ssdp"], timeout_ms?: 1000..8000}
+//   params {sources?: ["arp","mdns","ssdp"], timeout_ms?: 1000..8000,
+//           udp_probes?: [{id, port, payload_b64}]}
 //   result {hosts: [{ip, mac?, hostname?, sources, services: [{type, name, port, txt?}],
-//                    ssdp?: [{server, location, st}]}], truncated}
+//                    ssdp?: [{server, location, st}], probes?: [{id, payload_b64, cut?}]}],
+//           truncated, probes_truncated?}
 // ARP sweep of the own subnet, mDNS (a fixed list of service types plus whatever the DNS-SD meta
 // query turns up, then reverse lookups for hosts still without a name), SSDP ssdp:all and Yeelight's
 // own search (port 1982, reported as ST "wifi_bulb"). All of them run at once for timeout_ms.

@@ -107,6 +107,9 @@ credentials, and set `COMMA_DEV_SECRETS` to `1`. That overrides BLE/NVS settings
 credentials in the firmware. `secrets.h` and build directories are ignored by Git. Ordinary builds
 and shared firmware should use BLE provisioning instead.
 
+H2 adds caller-supplied UDP discovery probes on both boards; build/host checks pass and hardware
+acceptance is pending. See the [H2 report](docs/reports/H2-report.md) for limits and the test plan.
+
 ## Development tools and tests
 
 The following commands are for macOS/Linux shells, from the repository root. Keep tool dependencies
