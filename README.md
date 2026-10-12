@@ -10,7 +10,7 @@ Comma hardware firmware: one ESP-IDF project, shared gateway code, and per-board
 | `devices/` | Board configurations and [porting instructions](devices/README.md) |
 | `tools/board.sh` | Build and flash one board with its own generated config and build directory |
 
-### Planned boards
+### Boards
 
 A supported ESP32 board with Wi-Fi and BLE can serve as a home Connector. Voice requires a microphone
 and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB tunnel frames
@@ -21,13 +21,13 @@ and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB 
 | LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Running: HTTP, UDP, discovery | 2, board-tested in G3 | Yes | On-screen passkey, MITM |
 | ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Planned, not added | Expected; unverified | Planned | Planned spoken passkey |
 | M5Stack Stick (model to confirm) | Depends on model | Planned, not added | Unverified | Depends on hardware | Depends on hardware |
-| ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Local WSS: 8 KiB text and 1 MiB chunks passed 3/3; discovery retest pending | **Unsupported: `lan_tcp_dial` disabled** | No | Secure Connections Just Works, no MITM |
+| ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Board-tested: HTTP (8 KiB text, 1 MiB in chunks), UDP, discovery (12 KiB result cap), 3/3 each | **Unsupported: `lan_tcp_dial` disabled** | No | Secure Connections Just Works, no MITM |
 
 DevKit uses an 8 KiB text cap, 4 KiB HTTP chunks, 16 KiB incoming JSON frames, a 16 KiB discovery
-arena and a 12 KiB discovery JSON cap. Reported hardware runs with local WSS left about 130 KB free
-at idle (49 KB largest block) and at least 81 KB during 1 MiB chunks. Discovery passed only 1/3
-with the old 48 KiB result budget; the new 12 KiB cap still needs a hardware retest. Heap diagnostics
-remain enabled.
+arena and a 12 KiB discovery JSON cap. On the board with local WSS, the Connector idles at about
+130 KB free internal RAM (57 KB largest block) and never dropped below 57 KB during three rounds of
+discovery, 8 KiB text and 1 MiB chunk transfers, with no crash or reconnect. Physical BOOT pairing,
+factory reset and unplug/replug were also checked.
 
 DevKit does not support `lan_tcp_dial`: the server's 32 KiB raw frames need about 43.7 KB of base64
 buffer plus JSON, which does not reliably fit the measured 36–49 KB largest blocks after TLS.

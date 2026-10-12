@@ -596,7 +596,29 @@ including the default and DevKit discovery/HTTP/UDP profiles, and all 21 Python 
 `git diff --check` passed. Only this report and `devices/sdkconfig.esp32-devkit` were changed.
 Neither board was flashed; no merge or push was performed.
 
-## Still open
+## Final hardware checks — 2026-10-12
 
-- Physical BOOT button test and unplug/replug test: the user will perform these by hand.
-- T-Circle hardware smoke test: Claude will perform it once the user authorizes it.
+Both remaining checks passed on `ab8b5ea`. H1 is accepted and merged into main.
+
+**DevKit, physical controls** (final build with diagnostics off, provisioned on the home network
+with an unreachable test Connector URL, so no real backend was contacted):
+
+| Check | Result |
+| --- | --- |
+| Hold BOOT 3–10 s | `prov: provisioning started (pairing mode)`, LED slow blink, advertising `Comma-6AD8` |
+| Unplug, wait, replug | `POWERON_RESET`; saved config loaded; Wi-Fi associated within 5 s; BLE stayed off |
+| Hold BOOT just under 10 s | Countdown reached 1, release entered pairing mode, no reset (correct) |
+| Hold BOOT over 10 s | `main: factory reset`, `NVS erased: ESP_OK`, reboot to `no stored credentials`; BOOT still held at boot was ignored until released |
+
+The board is left unprovisioned on the normal build.
+
+**T-Circle smoke test** (`app-flash` only; NVS and the ESP-SR model partition kept; partition table
+identical to `0fe245a`; no secrets file, URL or CA override in the build):
+
+- Boot: 8 MB PSRAM found, saved config loaded, ESP-SR models loaded.
+- Connector: connected to staging 12 s after boot, no reconnects before, during or after the call.
+- Voice call: session started 3 s after the tap; agent greeting played; caller speech transcribed
+  and answered; `mic_dropped=0` throughout; CPU about 40% per core; caller hangup recorded
+  (17.4 s). Internal heap during the call stayed above 88 KB and recovered to 128 KB after.
+- The `websocket_client` close warnings after hangup come from unchanged voice code: on T-Circle the
+  only `cue_voice.c` change is `COMMA_BUFFER_CAPS`, which equals the previous SPIRAM caps.
