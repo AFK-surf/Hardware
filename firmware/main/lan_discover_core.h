@@ -14,8 +14,9 @@
 #include "firmware_config.h"
 #include "cJSON.h"
 
-// The caps agreed with the backend (docs/prompts/A5-firmware-lan-discovery.md). Anything cut sets
-// "truncated": true.
+// The caps agreed with the backend (docs/prompts/A5-firmware-lan-discovery.md). A dropped host,
+// service, SSDP entry or string sets "truncated": true. Probe coverage or answers that were lost
+// (unsent, not resent, cut, over the answer budget) set only "probes_truncated": true.
 #define LD_MAX_HOSTS 64
 #define LD_MAX_SERVICES CONFIG_COMMA_LAN_DISCOVER_MAX_SERVICES  // per host
 #define LD_MAX_SSDP CONFIG_COMMA_LAN_DISCOVER_MAX_SSDP          // per host
@@ -40,8 +41,11 @@ const char *ld_parse_params(const cJSON *params, unsigned *sources, int *timeout
 // Call once, on a fresh context, after successful ld_parse_params. False only on allocation failure.
 bool ld_probes_init(ld_ctx_t *ctx, const cJSON *params);
 bool ld_has_probes(const ld_ctx_t *ctx);
+// Sets probes_truncated only. A no-op without probes.
 void ld_mark_probes_truncated(ld_ctx_t *ctx);
 #define LD_PROBE_RETRY_MS 500
+// A failed sendto is retried no sooner than this, and only while the runner's send window lasts.
+#define LD_PROBE_FAIL_RETRY_MS 50
 
 typedef struct {
     uint32_t ip; // network byte order, ARP-confirmed on the own subnet
@@ -57,8 +61,14 @@ void ld_probe_sent(ld_ctx_t *ctx, const ld_probe_send_t *send, uint32_t elapsed_
 void ld_add_probe_answer(ld_ctx_t *ctx, uint32_t ip, uint16_t port, const uint8_t *data, size_t len);
 // After the final ARP harvest, mark pairs whose initial send/retry did not fit the time window.
 void ld_probes_finish(ld_ctx_t *ctx);
-// sent includes successful resends; answered includes first matched datagrams dropped by the budget.
-void ld_probe_counts(const ld_ctx_t *ctx, int *sent, int *answered, int *resent);
+// sent includes successful resends; answered includes first matched datagrams dropped by the budget;
+// send_failed counts failed sendto attempts (each retried later); unsent counts host/probe pairs
+// still without a successful send at ld_probes_finish.
+typedef struct {
+    int sent, answered, resent, send_failed, unsent;
+    bool truncated; // probes_truncated
+} ld_probe_counts_t;
+void ld_probe_counts(const ld_ctx_t *ctx, ld_probe_counts_t *out);
 
 // An ARP table entry. ip in network byte order.
 void ld_add_arp(ld_ctx_t *ctx, uint32_t ip, const uint8_t mac[6]);
@@ -86,6 +96,9 @@ void ld_counts(ld_ctx_t *ctx, int *hosts, int *arp, int *mdns, int *ssdp, bool *
 // The result object, {"hosts":[...],"truncated":bool}, hosts sorted by address. NUL-terminated, in
 // PSRAM; the caller frees it. NULL when out of memory.
 char *ld_result_json(ld_ctx_t *ctx);
+// The same object between prefix and suffix (the reply envelope), measured first and written into
+// one exactly sized allocation. The object alone stays within LD_MAX_JSON.
+char *ld_result_frame(ld_ctx_t *ctx, const char *prefix, const char *suffix);
 
 // Append a JSON string literal of s (any bytes; control characters escaped) to a PSRAM buffer that
 // ld_sb_* manage. Exposed for the reply envelope.
@@ -96,11 +109,24 @@ typedef struct {
     size_t limit; // maximum content bytes, excluding NUL; zero means unbounded (envelopes)
     bool oom;
     bool full; // content limit reached, distinct from allocation failure
+    bool measure; // count len only; p stays NULL
 } ld_sb_t;
 void ld_sb_add(ld_sb_t *b, const char *s, size_t n);
 void ld_sb_str(ld_sb_t *b, const char *s);
 void ld_sb_json(ld_sb_t *b, const char *s);
 void ld_sb_free(ld_sb_t *b);
+
+// Boards without PSRAM (CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY) wait for setup BLE to end before
+// discovery allocates. The backend gives a lan_discover request 15 s (salix_env protocol.ex); the
+// wait leaves the scan and a reply margin inside that, and is never longer than 10 s.
+#define LD_BLE_WAIT_MAX_MS 10000
+#define LD_REQUEST_DEADLINE_MS 15000
+#define LD_REPLY_MARGIN_MS 2000
+uint32_t ld_ble_wait_limit(int timeout_ms);
+// Sleep in step_ms steps while busy() is true, at most limit_ms. Returns the time slept and sets
+// *still_busy when it gave up.
+uint32_t ld_wait_while(bool (*busy)(void), void (*sleep_ms)(uint32_t), uint32_t limit_ms, uint32_t step_ms,
+                       bool *still_busy);
 
 // Encode a DNS question for name ("a.b.local"), type and class into buf. Returns its length, or 0
 // when it doesn't fit.

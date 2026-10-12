@@ -30,6 +30,15 @@ config COMMA_PAIRING_PASSKEY
 config COMMA_LAN_DISCOVER
     bool "LAN discovery"
     default y
+config COMMA_FREE_BLE_FOR_DISCOVERY
+    bool "End setup BLE soon after connector_up; discovery waits for BLE off"
+    default n
+    help
+        For boards without PSRAM, where setup BLE holds the memory a discovery result needs.
+        After connector_up has been notified over BLE, setup ends BLE 3 s later instead of
+        waiting for the app to disconnect. A lan_discover that arrives while BLE is still on
+        waits for it to end (at most 10 s, within the backend's request deadline) before it
+        allocates anything; then it runs either way.
 config COMMA_HEAP_DIAGNOSTICS
     bool "Log heap and task stack measurements"
     default n

@@ -24,6 +24,10 @@ void provisioning_stop(void);
 
 bool provisioning_active(void);
 
+// NimBLE is up and holds its memory: from provisioning_start until BLE is shut down (before the
+// "All set" screen finishes, so earlier than provisioning_active turns false).
+bool provisioning_ble_on(void);
+
 // Draw the current pairing screen again (after something else used the display).
 void provisioning_redraw(void);
 

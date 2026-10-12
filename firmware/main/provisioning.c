@@ -43,6 +43,10 @@ void ble_store_config_init(void);
 #define WIFI_TRIAL_TIMEOUT_US (30LL * 1000000)
 // After the credentials are saved, BLE stays up until the app disconnects, at most this long.
 #define SAVED_LINGER_US (30LL * 1000000)
+// CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY: BLE ends this long after connector_up was notified. The app
+// has heard `saved` by then and waits for the device to come online through the server; it
+// ignores the link dropping from that point (AddDeviceFlow, COMING_ONLINE).
+#define CONNECTOR_UP_LINGER_US (3LL * 1000000)
 // A provisioned device leaves pairing mode after this long without a connection.
 #define PAIRING_MODE_TIMEOUT_US (5LL * 60 * 1000000)
 #define CHR_VALUE_MAX 512
@@ -95,6 +99,7 @@ static const char *TAG = "prov";
 static QueueHandle_t s_events;
 static atomic_bool s_active;
 static atomic_bool s_task_running;
+static atomic_bool s_ble_on;  // NimBLE holds its memory: from ble_up until ble_down has finished
 static char s_name[16];   // Comma-XXXX
 static char s_mac[18];
 static uint8_t s_short_id[2];  // Wi-Fi MAC suffix, in the same order as XXXX
@@ -548,6 +553,7 @@ static esp_err_t ble_up(void)
         ESP_LOGE(TAG, "nimble init: %s", esp_err_to_name(err));
         return err;
     }
+    s_ble_on = true;
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
@@ -567,6 +573,7 @@ static esp_err_t ble_up(void)
     if (rc != 0) {
         ESP_LOGE(TAG, "GATT services: %d", rc);
         nimble_port_deinit();
+        s_ble_on = false;
         return ESP_FAIL;
     }
     ble_svc_gap_device_name_set(s_name);
@@ -592,6 +599,7 @@ static void ble_down(void)
     }
     s_conn = BLE_HS_CONN_HANDLE_NONE;
     s_secure = false;
+    s_ble_on = false;
     wifi_set_power_save(false);
     comma_heap_log("ble_off");
     ESP_LOGI(TAG, "BLE off");
@@ -622,6 +630,7 @@ typedef struct {
     int64_t wifi_since_us;
     device_config_t *creds;  // waiting for Wi-Fi
     int64_t saved_us;
+    int64_t connector_up_us; // connector_up notified after saving (CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY)
     int64_t idle_since_us;   // no connection since
     bool was_provisioned;
 } session_t;
@@ -954,6 +963,12 @@ static void handle(const event_t *ev)
         if (s_connector_state[0]) {
             publish_status(s_connector_state, NULL);
         }
+#if CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY
+        if (s_saved && !s.connector_up_us && strcmp(s_connector_state, "connector_up") == 0) {
+            s.connector_up_us = esp_timer_get_time();
+            ESP_LOGI(TAG, "connector_up sent, BLE ends in %lld s", CONNECTOR_UP_LINGER_US / 1000000);
+        }
+#endif
         break;
     case EV_STOP:
         break;
@@ -1021,6 +1036,10 @@ static void prov_task(void *arg)
         poll_wifi();
         const int64_t now = esp_timer_get_time();
         if (s_saved && (s_conn == BLE_HS_CONN_HANDLE_NONE || now - s.saved_us > SAVED_LINGER_US)) {
+            stop = true;
+        }
+        if (s.connector_up_us && now - s.connector_up_us >= CONNECTOR_UP_LINGER_US) {
+            ESP_LOGI(TAG, "ending BLE after connector_up to free memory for discovery");
             stop = true;
         }
         if (!s_saved && s.was_provisioned && s.idle_since_us && now - s.idle_since_us > PAIRING_MODE_TIMEOUT_US) {
@@ -1105,6 +1124,11 @@ void provisioning_stop(void)
 bool provisioning_active(void)
 {
     return s_active;
+}
+
+bool provisioning_ble_on(void)
+{
+    return s_ble_on;
 }
 
 void provisioning_redraw(void)

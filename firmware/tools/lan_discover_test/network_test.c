@@ -1,4 +1,6 @@
 // Execute the real runner with a virtual clock/ARP cache/socket layer. No boards or LAN traffic.
+// Built with the DevKit's wait for BLE off, so the wait runs against the same virtual clock.
+#define CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY 1
 #include "../../main/lan_discover.c"
 #include <assert.h>
 
@@ -7,12 +9,16 @@ static int64_t clock_ms;
 static int checks, opened, closed, probe_socket, socket_fail_at, hosts;
 static int sends[256][8], first_at[256][8], bucket_count[400];
 static bool sockets[20], answer_pending, echo_answers, flood, send_failure;
-static int answer_len, recv_calls, max_sends, latest_send;
+static int answer_len, recv_calls, max_sends, latest_send, fail_next, failed_sends, expected_wait;
 static struct sockaddr_in pending_from;
 
 #define CHECK(c) do { ++checks; if (!(c)) { fprintf(stderr, "runner line %d: %s\n", __LINE__, #c); abort(); } } while (0)
 
+static int64_t ble_off_at;  // provisioning_ble_on() until this virtual time
+static bool log_allocs;
 void *ld_test_malloc(size_t n) { return malloc(n); }
+bool provisioning_ble_on(void) { return clock_ms < ble_off_at; }
+void comma_log_failed_allocs(bool on) { log_allocs = on; }
 void *ld_test_realloc(void *p, size_t n) { return realloc(p, n); }
 
 esp_netif_t *esp_netif_get_handle_from_ifkey(const char *key) { return &netif; }
@@ -67,13 +73,14 @@ ssize_t test_sendto(int s, const void *data, size_t len, int flags, const struct
     probe_socket = s;
     unsigned h = ntohl(dest->sin_addr.s_addr) & 255, p = port - 7000;
     CHECK(h >= 30 && h < 30 + (unsigned)hosts);
-    CHECK(++sends[h][p] <= 2);
-    if (sends[h][p] == 1) first_at[h][p] = (int)clock_ms;
-    else CHECK(clock_ms - first_at[h][p] >= 500);
     CHECK(++bucket_count[clock_ms / 25] <= 4);
     if (bucket_count[clock_ms / 25] > max_sends) max_sends = bucket_count[clock_ms / 25];
     latest_send = (int)clock_ms;
-    if (send_failure) { errno = ENOMEM; return -1; }
+    // Failed attempts are retried; only successful datagrams count against the two-send limit.
+    if (send_failure || fail_next > 0) { fail_next--; failed_sends++; errno = ENOMEM; return -1; }
+    CHECK(++sends[h][p] <= 2);
+    if (sends[h][p] == 1) first_at[h][p] = (int)clock_ms;
+    else CHECK(clock_ms - first_at[h][p] >= 500);
     if (echo_answers) { pending_from = *dest; answer_pending = true; }
     return (ssize_t)len;
 }
@@ -94,7 +101,8 @@ ssize_t test_recvfrom(int s, void *data, size_t len, int flags, struct sockaddr 
 static void reset(void)
 {
     CHECK(opened == closed);
-    clock_ms = opened = closed = recv_calls = max_sends = latest_send = 0;
+    clock_ms = opened = closed = recv_calls = max_sends = latest_send = fail_next = failed_sends = expected_wait = 0;
+    ble_off_at = 0;
     probe_socket = socket_fail_at = -1;
     hosts = 1;
     echo_answers = flood = send_failure = answer_pending = false;
@@ -119,7 +127,8 @@ static cJSON *run(int ms, unsigned probes, bool arp_only)
     CHECK(raw != NULL);
     cJSON *frame = cJSON_Parse(raw);
     CHECK(frame && cJSON_GetObjectItem(frame, "result"));
-    CHECK(opened == closed && clock_ms >= ms && clock_ms <= ms + 25);
+    CHECK(opened == closed && clock_ms >= ms + expected_wait && clock_ms <= ms + expected_wait + 25);
+    CHECK(!log_allocs);  // failed-allocation logging is off again after every run
     free(raw); cJSON_Delete(params);
     return frame;
 }
@@ -142,12 +151,14 @@ int main(void)
     frame = run(1000, CONFIG_COMMA_LAN_DISCOVER_PROBES, true);
     CHECK(opened == 1 && latest_send < 750);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "probes_truncated")));
+    CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "truncated")));  // no host dropped
     cJSON_Delete(frame);
 
     reset(); socket_fail_at = 3;
     frame = run(1000, 1, false);
     CHECK(opened == 3 && probe_socket == -1);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "probes_truncated")));
+    CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "truncated")));
     cJSON_Delete(frame);
 
     reset(); echo_answers = true; answer_len = 4096;
@@ -170,11 +181,34 @@ int main(void)
     CHECK(sends[30][0] == 2 && recv_calls <= 16 * 40);
     cJSON_Delete(frame);
 
+    // Every send fails: retried every 50 ms until the listen-only tail, then unsent.
     reset(); send_failure = true;
     frame = run(1000, 1, true);
-    CHECK(sends[30][0] == 2 && cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "probes_truncated")));
+    CHECK(sends[30][0] == 0 && failed_sends == 15 && latest_send < 750);
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "probes_truncated")));
+    CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "truncated")));
+    cJSON_Delete(frame);
+
+    // One failed send, retried on a later tick: nothing lost, no flag.
+    reset(); fail_next = 1;
+    frame = run(1000, 1, true);
+    CHECK(sends[30][0] == 2 && failed_sends == 1 && first_at[30][0] >= 50);
+    CHECK(!cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "probes_truncated"));
+    CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "truncated")));
     cJSON_Delete(frame);
 #endif
+
+    // BLE still on: discovery waits for it (100 ms steps), then runs normally.
+    reset(); ble_off_at = 2950; expected_wait = 3000;
+    frame = run(1000, 0, true);
+    CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "hosts")) == 1);
+    cJSON_Delete(frame);
+
+    // BLE never ends: give up at the deadline-bounded limit (15 s - 2 s - 5 s) and run anyway.
+    reset(); ble_off_at = 1000000; expected_wait = 8000;
+    frame = run(5000, 0, true);
+    CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "hosts")) == 1);
+    cJSON_Delete(frame);
     printf("runner: %d checks, 0 failed\n", checks);
     return 0;
 }

@@ -200,11 +200,12 @@ and source port successfully sent that probe counts; the first such datagram win
 wrong ports and duplicates are discarded. Payloads and answers are opaque binary; the firmware
 neither interprets protocols nor logs their bytes.
 
-First sends take priority. Unanswered pairs get one retry at least 500 ms after the first attempt,
-if it fits before the listen-only tail (the final `min(timeout_ms / 4, 400)` ms). At most four send
-attempts occur per 25 ms; no catch-up burst is accumulated. Failed sends, unsent pairs, omitted
-retries, ARP/host coverage caps and lost probe results set both truncation flags. Silence after two
-successful sends does not. See [H2](reports/H2-report.md) for timing and pending hardware tests.
+First sends take priority. Unanswered pairs get one retry at least 500 ms after the first
+successful send, if it fits before the listen-only tail (the final `min(timeout_ms / 4, 400)` ms).
+At most four send attempts occur per 25 ms; no catch-up burst is accumulated. A failed `sendto` is
+not final: the pair is tried again no sooner than 50 ms later, after untried pairs, for as long as
+the send window lasts. Silence after two successful sends is not truncation. See
+[H2](reports/H2-report.md) for timing and pending hardware tests.
 
 **Result:** hosts are sorted by IP; at most 64 hosts. Per-host service and SSDP caps are configured by
 `COMMA_LAN_DISCOVER_MAX_SERVICES` and `COMMA_LAN_DISCOVER_MAX_SSDP`: 16/16 on T-Circle, 6/6 on DevKit.
@@ -224,11 +225,20 @@ datagrams are valid and encode as `""`. An oversized answer is cut to `max_answe
 `cut`; base64 is exempt from the 255-byte text limit.
 
 Stored decoded answers share `max_total_answer_bytes`. An answer that would exceed it is dropped
-whole; a later duplicate cannot replace it. `truncated:true` and `probes_truncated:true` report cuts
-or lost probing coverage/results. `probes_truncated` is omitted when false or when probes were not
-requested. The whole result stays within 48 KiB on T-Circle / 12 KiB on DevKit: a host that does not
-fit is rolled back whole, including its probe answers; remaining hosts are omitted and truncation
-is reported. Backend Cue `f0a91d861` discards cut/over-limit answers and interprets the remaining bytes.
+whole; a later duplicate cannot replace it. The two flags mean different things (H2b):
+
+- `truncated:true` — something of the host list was dropped: a host (64-host cap, ARP sweep not
+  covering a large subnet), a service, an SSDP entry, a TXT key or part of a string, or a host rolled
+  back at the result cap. Same meaning as before probes existed.
+- `probes_truncated:true` — probing was incomplete: a probe pair still unsent when the send window
+  ended (including after failed sends and hosts found too late), an unanswered pair whose retry did
+  not fit, no socket for probes, an answer cut to `max_answer_bytes` or dropped by
+  `max_total_answer_bytes`. These never set `truncated`.
+
+A host rolled back at the result cap, or dropped at the host cap, sets both. `probes_truncated` is
+omitted when false or when probes were not requested. The whole result stays within 48 KiB on
+T-Circle / 12 KiB on DevKit: a host that does not fit is rolled back whole, including its probe
+answers; remaining hosts are omitted and both flags are set. Backend Cue `f0a91d861` discards cut/over-limit answers and interprets the remaining bytes.
 
 ### `lan_tcp_dial` (G3)
 

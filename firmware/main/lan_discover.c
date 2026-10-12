@@ -24,7 +24,9 @@
 
 #include "lan_discover.h"
 
+#include "connector_json.h"
 #include "lan_discover_core.h"
+#include "provisioning.h"
 #include "wifi.h"
 
 #include <errno.h>
@@ -293,6 +295,31 @@ static int64_t now_ms(void)
     return esp_timer_get_time() / 1000;
 }
 
+#if CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY
+static void sleep_ms(uint32_t ms)
+{
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
+// Without PSRAM, setup BLE holds the memory the result needs, and provisioning ends it a few seconds
+// after connector_up. Wait for that before allocating anything, within the backend's deadline.
+static void wait_for_ble_off(const char *id, int timeout_ms)
+{
+    if (!provisioning_ble_on()) {
+        return;
+    }
+    const uint32_t limit = ld_ble_wait_limit(timeout_ms);
+    ESP_LOGI(TAG, "%s: waiting up to %u ms for BLE to end", id, (unsigned)limit);
+    bool still_on;
+    const uint32_t waited = ld_wait_while(provisioning_ble_on, sleep_ms, limit, 100, &still_on);
+    if (still_on) {
+        ESP_LOGW(TAG, "%s: BLE still on after %u ms, discovering anyway", id, (unsigned)waited);
+    } else {
+        ESP_LOGI(TAG, "%s: BLE off after %u ms", id, (unsigned)waited);
+    }
+}
+#endif
+
 // ---- Run ---------------------------------------------------------------------------------------
 
 char *lan_discover_run(const char *id, const cJSON *params)
@@ -303,12 +330,16 @@ char *lan_discover_run(const char *id, const cJSON *params)
     if (bad) {
         return error_frame(id, bad);
     }
+#if CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY
+    wait_for_ble_off(id, timeout_ms);
+#endif
     uint32_t self_ip, netmask;
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     struct netif *nif = netif ? esp_netif_get_netif_impl(netif) : NULL;
     if (!wifi_ip_info(&self_ip, &netmask) || !nif) {
         return error_frame(id, "the T-Circle is not connected to Wi-Fi right now");
     }
+    comma_log_failed_allocs(true);
     ld_ctx_t *ctx = ld_create(self_ip, netmask);
     uint8_t *buf = heap_caps_malloc(RECV_BUF, COMMA_BUFFER_CAPS);
     arp_dump_t *dump = heap_caps_malloc(sizeof(arp_dump_t), COMMA_BUFFER_CAPS);
@@ -316,6 +347,7 @@ char *lan_discover_run(const char *id, const cJSON *params)
         ld_free(ctx);
         free(buf);
         free(dump);
+        comma_log_failed_allocs(false);
         return error_frame(id, "the T-Circle is out of memory for discovery");
     }
     memset(dump, 0, sizeof(*dump));
@@ -380,6 +412,7 @@ char *lan_discover_run(const char *id, const cJSON *params)
     const int64_t last_query = deadline - (timeout_ms / 4 < 400 ? timeout_ms / 4 : 400);
 
     int64_t next_probe_send = start;
+    int send_errno = 0;  // the first failed sendto, for the log
     for (;;) {
         const int64_t now = now_ms();
         if (now >= deadline) {
@@ -431,6 +464,9 @@ char *lan_discover_run(const char *id, const cJSON *params)
                                              .sin_addr.s_addr = send.ip};
                     const int n = sendto(probes, send.payload, send.len, MSG_DONTWAIT,
                                          (struct sockaddr *)&to, sizeof(to));
+                    if (n != (int)send.len && !send_errno) {
+                        send_errno = n < 0 ? errno : -1;  // -1: a short send
+                    }
                     ld_probe_sent(ctx, &send, (uint32_t)(at - start), n == (int)send.len);
                 }
             }
@@ -482,34 +518,44 @@ char *lan_discover_run(const char *id, const cJSON *params)
     if (yeelight >= 0) {
         close(yeelight);
     }
+    // The scan buffers are done; free them before the result needs its one allocation.
+    free(buf);
+    free(dump);
 
     int hosts, n_arp, n_mdns, n_ssdp;
     bool truncated;
-    char *result = ld_result_json(ctx);
+    // The reply envelope is written around the result in the same buffer: no second copy.
+    // Copied to the stack (a 64-byte id escapes to at most 386) so its builder is freed first.
+    char prefix[448];
+    char *frame = NULL;
+    ld_sb_t head = {.limit = sizeof(prefix) - 1};
+    ld_sb_str(&head, "{\"id\":");
+    ld_sb_json(&head, id);
+    ld_sb_str(&head, ",\"type\":\"response\",\"result\":");
+    const bool head_ok = !head.oom && !head.full;
+    if (head_ok) {
+        memcpy(prefix, head.p, head.len + 1);
+    }
+    ld_sb_free(&head);
+    if (head_ok) {
+        frame = ld_result_frame(ctx, prefix, "}");
+    }
     // Serialization can roll back a host at the JSON cap; include that in the log.
     ld_counts(ctx, &hosts, &n_arp, &n_mdns, &n_ssdp, &truncated);
-    int probe_sent, probe_answered, probe_resent;
-    ld_probe_counts(ctx, &probe_sent, &probe_answered, &probe_resent);
+    ld_probe_counts_t pc;
+    ld_probe_counts(ctx, &pc);
     comma_heap_log("discovery_peak");
     ld_free(ctx);
-    free(buf);
-    free(dump);
-    ESP_LOGI(TAG, "%s: %d hosts (arp %d of %u swept, %d failed; mdns %d answers; ssdp %d answers; probes %d sent, %d answered, %d resent)%s, %d ms, %u B",
-             id, hosts, n_arp, (unsigned)arp_sent, arp_failed, n_mdns, n_ssdp, probe_sent, probe_answered, probe_resent, truncated ? ", truncated" : "",
-             (int)(now_ms() - start), result ? (unsigned)strlen(result) : 0);
-    if (!result) {
+    comma_log_failed_allocs(false);
+    ESP_LOGI(TAG, "%s: %d hosts (arp %d of %u swept, %d failed; mdns %d answers; ssdp %d answers; probes %d sent, %d answered, %d resent, %d send_failed, %d unsent)%s%s, %d ms, %u B",
+             id, hosts, n_arp, (unsigned)arp_sent, arp_failed, n_mdns, n_ssdp, pc.sent, pc.answered, pc.resent,
+             pc.send_failed, pc.unsent, truncated ? ", truncated" : "", pc.truncated ? ", probes_truncated" : "",
+             (int)(now_ms() - start), frame ? (unsigned)strlen(frame) : 0);
+    if (send_errno) {
+        ESP_LOGW(TAG, "%s: first failed probe sendto: errno %d", id, send_errno);
+    }
+    if (!frame) {
         return error_frame(id, "the T-Circle is out of memory for the discovery result");
     }
-    ld_sb_t b = {0};
-    ld_sb_str(&b, "{\"id\":");
-    ld_sb_json(&b, id);
-    ld_sb_str(&b, ",\"type\":\"response\",\"result\":");
-    ld_sb_str(&b, result);
-    ld_sb_str(&b, "}");
-    free(result);
-    if (b.oom) {
-        ld_sb_free(&b);
-        return error_frame(id, "the T-Circle is out of memory for the discovery result");
-    }
-    return b.p;
+    return frame;
 }

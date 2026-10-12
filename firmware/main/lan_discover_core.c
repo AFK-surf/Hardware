@@ -99,6 +99,7 @@ typedef struct {
 #define PROBE_ANSWERED 2
 #define PROBE_STORED 4
 #define PROBE_CUT 8
+#define PROBE_FAILED 16 // a send attempt failed; retried after LD_PROBE_FAIL_RETRY_MS
 
 typedef struct {
     char id[17];
@@ -108,15 +109,16 @@ typedef struct {
 } probe_t;
 
 typedef struct {
-    uint32_t first_ms; // elapsed time in this run, including a failed first attempt
+    uint32_t first_ms; // elapsed time of the first successful send
     uint16_t offset, len;
-    uint8_t attempts, flags;
+    uint16_t next_ms;  // after a failed send: not before this elapsed time
+    uint8_t sends, flags; // sends counts successful datagrams only
 } probe_pair_t;
 
 typedef struct {
     unsigned count;
     size_t used;
-    int sent, answered, resent;
+    int sent, answered, resent, send_failed, unsent;
     bool truncated;
     probe_t probes[PROBE_SLOTS];
     probe_pair_t pairs[LD_MAX_HOSTS][PROBE_SLOTS];
@@ -214,6 +216,10 @@ void ld_sb_add(ld_sb_t *b, const char *s, size_t n)
     }
     if (b->limit && n > b->limit - b->len) {
         b->full = true;
+        return;
+    }
+    if (b->measure) {
+        b->len += n;
         return;
     }
     if (b->len + n + 1 > b->cap) {
@@ -446,10 +452,10 @@ bool ld_has_probes(const ld_ctx_t *ctx)
     return ctx->probes != NULL;
 }
 
+// Probe coverage or answers only; `truncated` (hosts/entries/strings dropped) is set separately.
 void ld_mark_probes_truncated(ld_ctx_t *ctx)
 {
     if (ctx->probes) {
-        ctx->truncated = true;
         ctx->probes->truncated = true;
     }
 }
@@ -460,19 +466,31 @@ static bool probe_ip(const ld_ctx_t *ctx, uint32_t ip)
            ip != (ctx->self_ip & ctx->netmask) && ip != (ctx->self_ip | ~ctx->netmask);
 }
 
+// Priority: untried first sends, then first sends whose attempt failed, then resends. Failed pairs
+// wait LD_PROBE_FAIL_RETRY_MS so they neither repeat within one batch nor starve untried pairs.
+static bool probe_due(const probe_pair_t *pair, int level, uint32_t elapsed_ms)
+{
+    if ((pair->flags & PROBE_ANSWERED) || elapsed_ms < pair->next_ms) return false;
+    const bool failed = pair->flags & PROBE_FAILED;
+    switch (level) {
+    case 0: return pair->sends == 0 && !failed;
+    case 1: return pair->sends == 0 && failed;
+    default: return pair->sends == 1 && elapsed_ms - pair->first_ms >= LD_PROBE_RETRY_MS;
+    }
+}
+
 bool ld_probe_next(ld_ctx_t *ctx, uint32_t elapsed_ms, ld_probe_send_t *out)
 {
     probe_state_t *ps = ctx->probes;
     if (!ps) return false;
-    // First attempts take priority. A bounded scan (64 * 8 * 2) needs no queue or per-send allocation.
-    for (int retry = 0; retry < 2; ++retry) {
+    // A bounded scan (64 * 8 * 3) needs no queue or per-send allocation.
+    for (int level = 0; level < 3; ++level) {
         for (int h = 0; h < ctx->nhosts; ++h) {
             const host_t *host = &ctx->hosts[h];
             if (!(host->sources & LD_SRC_ARP) || !probe_ip(ctx, host->ip)) continue;
             for (unsigned p = 0; p < ps->count; ++p) {
                 probe_pair_t *pair = &ps->pairs[h][p];
-                if (pair->attempts != retry || (pair->flags & PROBE_ANSWERED) ||
-                    (retry && elapsed_ms - pair->first_ms < LD_PROBE_RETRY_MS)) continue;
+                if (!probe_due(pair, level, elapsed_ms)) continue;
                 *out = (ld_probe_send_t){.ip = host->ip, .port = ps->probes[p].port,
                                         .payload = ps->probes[p].payload, .len = ps->probes[p].payload_len,
                                         .host_index = (unsigned)h, .probe_index = p};
@@ -487,14 +505,18 @@ void ld_probe_sent(ld_ctx_t *ctx, const ld_probe_send_t *send, uint32_t elapsed_
 {
     probe_state_t *ps = ctx->probes;
     probe_pair_t *pair = &ps->pairs[send->host_index][send->probe_index];
-    if (!pair->attempts) pair->first_ms = elapsed_ms;
-    pair->attempts++;
     if (success) {
+        if (!pair->sends) pair->first_ms = elapsed_ms;
+        pair->sends++;
         pair->flags |= PROBE_SENT;
         ps->sent++;
-        if (pair->attempts == 2) ps->resent++;
+        if (pair->sends == 2) ps->resent++;
     } else {
-        ld_mark_probes_truncated(ctx);
+        // Not lost yet: tried again on a later tick while the send window lasts.
+        pair->flags |= PROBE_FAILED;
+        const uint32_t next = elapsed_ms + LD_PROBE_FAIL_RETRY_MS;
+        pair->next_ms = next > UINT16_MAX ? UINT16_MAX : (uint16_t)next;
+        ps->send_failed++;
     }
 }
 
@@ -531,24 +553,51 @@ void ld_add_probe_answer(ld_ctx_t *ctx, uint32_t ip, uint16_t port, const uint8_
 
 void ld_probes_finish(ld_ctx_t *ctx)
 {
-    const probe_state_t *ps = ctx->probes;
+    probe_state_t *ps = ctx->probes;
     if (!ps) return;
+    ps->unsent = 0;
     for (int h = 0; h < ctx->nhosts; ++h) {
         if (!(ctx->hosts[h].sources & LD_SRC_ARP) || !probe_ip(ctx, ctx->hosts[h].ip)) continue;
         for (unsigned p = 0; p < ps->count; ++p) {
             const probe_pair_t *pair = &ps->pairs[h][p];
-            if (!pair->attempts || (pair->attempts < 2 && !(pair->flags & PROBE_ANSWERED))) {
+            if (!pair->sends) ps->unsent++;
+            if (!pair->sends || (pair->sends < 2 && !(pair->flags & PROBE_ANSWERED))) {
                 ld_mark_probes_truncated(ctx);
             }
         }
     }
 }
 
-void ld_probe_counts(const ld_ctx_t *ctx, int *sent, int *answered, int *resent)
+void ld_probe_counts(const ld_ctx_t *ctx, ld_probe_counts_t *out)
 {
-    *sent = ctx->probes ? ctx->probes->sent : 0;
-    *answered = ctx->probes ? ctx->probes->answered : 0;
-    *resent = ctx->probes ? ctx->probes->resent : 0;
+    const probe_state_t *ps = ctx->probes;
+    *out = ps ? (ld_probe_counts_t){.sent = ps->sent, .answered = ps->answered, .resent = ps->resent,
+                                    .send_failed = ps->send_failed, .unsent = ps->unsent,
+                                    .truncated = ps->truncated}
+              : (ld_probe_counts_t){0};
+}
+
+uint32_t ld_ble_wait_limit(int timeout_ms)
+{
+    const int left = LD_REQUEST_DEADLINE_MS - LD_REPLY_MARGIN_MS - timeout_ms;
+    return left <= 0 ? 0 : (left > LD_BLE_WAIT_MAX_MS ? LD_BLE_WAIT_MAX_MS : (uint32_t)left);
+}
+
+uint32_t ld_wait_while(bool (*busy)(void), void (*sleep_ms)(uint32_t), uint32_t limit_ms, uint32_t step_ms,
+                       bool *still_busy)
+{
+    uint32_t waited = 0;
+    while (busy()) {
+        if (waited >= limit_ms) {
+            *still_busy = true;
+            return waited;
+        }
+        const uint32_t step = limit_ms - waited < step_ms ? limit_ms - waited : step_ms;
+        sleep_ms(step);
+        waited += step;
+    }
+    *still_busy = false;
+    return waited;
 }
 
 // Encode directly into the bounded JSON builder: no temporary answer string on the task stack.
@@ -1211,7 +1260,39 @@ static uint32_t host_order(uint32_t ip)
     return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
 }
 
-char *ld_result_json(ld_ctx_t *ctx)
+// {"hosts":[...],"truncated":...} for at most max hosts of order. A host that would take the object
+// past LD_MAX_JSON is rolled back whole and ends the list. Returns the hosts written. Writing again
+// with max = that count reproduces the same bytes: nothing written depends on the builder.
+static int write_result(ld_ctx_t *ctx, ld_sb_t *b, const int *order, int max)
+{
+    const size_t base = b->len;
+    ld_sb_str(b, "{\"hosts\":[");
+    int written = 0;
+    for (int i = 0; i < max; ++i) {
+        const size_t before = b->len;
+        if (written) {
+            ld_sb_str(b, ",");
+        }
+        write_host(ctx, b, &ctx->hosts[order[i]]);
+        if (b->full || b->len - base + (ctx->probes ? 64 : 32) > LD_MAX_JSON) {
+            b->len = before;
+            b->full = false; // roll back the whole host, then append the result footer
+            if (b->p) {
+                b->p[before] = 0;
+            }
+            ctx->truncated = true;
+            ld_mark_probes_truncated(ctx);
+            break;
+        }
+        written++;
+    }
+    ld_sb_str(b, ctx->truncated ? "],\"truncated\":true" : "],\"truncated\":false");
+    if (ctx->probes && ctx->probes->truncated) ld_sb_str(b, ",\"probes_truncated\":true");
+    ld_sb_str(b, "}");
+    return written;
+}
+
+char *ld_result_frame(ld_ctx_t *ctx, const char *prefix, const char *suffix)
 {
     resolve_mdns(ctx);
     int order[LD_MAX_HOSTS];
@@ -1227,32 +1308,27 @@ char *ld_result_json(ld_ctx_t *ctx)
         }
         order[j] = v;
     }
-    ld_sb_t b = {.limit = LD_MAX_JSON};
-    ld_sb_str(&b, "{\"hosts\":[");
-    int written = 0;
-    for (int i = 0; i < ctx->nhosts; ++i) {
-        const size_t before = b.len;
-        if (written) {
-            ld_sb_str(&b, ",");
-        }
-        write_host(ctx, &b, &ctx->hosts[order[i]]);
-        if (b.full || b.len + (ctx->probes ? 64 : 32) > LD_MAX_JSON) {
-            b.len = before;
-            b.full = false; // roll back the whole host, then append the result footer
-            if (b.p) {
-                b.p[before] = 0;
-            }
-            ctx->truncated = true;
-            ld_mark_probes_truncated(ctx);
-            break;
-        }
-        written++;
+    // Measure first, then write once into an exactly sized buffer: no growth by doubling, no
+    // realloc holding old and new copies at once, and no second copy for the reply envelope.
+    ld_sb_t m = {.limit = LD_MAX_JSON, .measure = true};
+    const int kept = write_result(ctx, &m, order, ctx->nhosts);
+    const size_t need = strlen(prefix) + m.len + strlen(suffix);
+    ld_sb_t b = {.limit = need};
+    b.p = heap_caps_realloc(NULL, need + 1, COMMA_BUFFER_CAPS);
+    if (!b.p) {
+        return NULL;
     }
-    ld_sb_str(&b, ctx->truncated ? "],\"truncated\":true" : "],\"truncated\":false");
-    if (ctx->probes && ctx->probes->truncated) ld_sb_str(&b, ",\"probes_truncated\":true");
-    ld_sb_str(&b, "}");
-    if (b.oom) {
+    b.cap = need + 1;
+    ld_sb_str(&b, prefix);
+    write_result(ctx, &b, order, kept);
+    ld_sb_str(&b, suffix);
+    if (b.oom || b.full || b.len != need) {
         ld_sb_free(&b);
     }
     return b.p;
+}
+
+char *ld_result_json(ld_ctx_t *ctx)
+{
+    return ld_result_frame(ctx, "", "");
 }

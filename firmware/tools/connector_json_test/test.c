@@ -23,6 +23,17 @@ int heap_caps_register_failed_alloc_callback(esp_alloc_failed_hook_t callback)
 
 bool xPortInIsrContext(void) { return in_isr; }
 
+// Each failure logged by the hook asks for the free and largest block of the failed caps.
+static int largest_queries;
+static uint32_t largest_caps;
+size_t heap_caps_get_free_size(uint32_t caps) { (void)caps; return 45904; }
+size_t heap_caps_get_largest_free_block(uint32_t caps)
+{
+    ++largest_queries;
+    largest_caps = caps;
+    return 7168;
+}
+
 static void *other_task(void *arg)
 {
     (void)arg;
@@ -124,6 +135,21 @@ int main(void)
     CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(root, "id")->valuestring, "r1") == 0);
     cJSON_Delete(root);
     CHECK(live == 0);
+    // Failed allocations are logged only while this task asked for it, never from an interrupt.
+    CHECK(largest_queries == 0);
+    comma_log_failed_allocs(true);
+    failed_hook(12289, 0x1804, "heap_caps_realloc");
+    CHECK(largest_queries == 1 && largest_caps == 0x1804);
+    fail_other_task = true;
+    ignored("{\"id\":\"bad\",}");
+    CHECK(largest_queries == 1);
+    in_isr = true;
+    failed_hook(64, 0, "malloc");
+    in_isr = false;
+    CHECK(largest_queries == 1);
+    comma_log_failed_allocs(false);
+    failed_hook(64, 0, "malloc");
+    CHECK(largest_queries == 1);
     cJSON_InitHooks(NULL);
     printf("%d checks, 0 failed\n", checks);
     return 0;

@@ -71,6 +71,9 @@ CONFIG_COMMA_LAN_DISCOVER_MAX_SSDP=6
 CONFIG_COMMA_LAN_DISCOVER_MAX_JSON=12288
 CONFIG_COMMA_LAN_UDP_MAX_ANSWER=2048
 CONFIG_COMMA_LAN_DISCOVER=y
+# H2b: with BLE up (phone still connected after setup), internal 8-bit RAM was too short for
+# the discovery result. End BLE 3 s after connector_up; lan_discover waits for BLE off.
+CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY=y
 # TLS leaves 36-49 KB largest blocks, insufficient for the server's 32 KiB
 # raw tunnel frames (~43.7 KB base64 plus JSON). Backend must honor max_frame
 # before DevKit tunnels can be reconsidered and retested.

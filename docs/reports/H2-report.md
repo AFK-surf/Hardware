@@ -112,8 +112,9 @@ See [Connector protocol](../connector-protocol.md#lan_discover-a5-h2) for the co
   Answers exceeding the remaining total budget are dropped whole. Binary bytes never enter the
   text sanitizer or firmware logs; JSON contains base64 only.
 - `probes` is omitted for hosts without stored answers and otherwise follows request order.
-  `probes_truncated:true` accompanies `truncated:true` for cut/dropped answers, failed sends,
-  unsent first attempts/retries, socket shortage, ARP sweep/host caps and JSON host rollback.
+  *Superseded by H2b (below):* `probes_truncated` alone now reports cut/dropped answers, unsent
+  pairs, omitted retries and socket shortage; `truncated` keeps its pre-H2 meaning, and both are
+  set only for ARP sweep/host caps and JSON host rollback.
   The optional flag is omitted when false. Two successful sends followed by silence do not mark
   truncation. The final ARP harvest catches hosts discovered too late to probe.
 - The 48/12 KiB result budgets remain unchanged. A host that cannot fit is rolled back whole,
@@ -163,8 +164,9 @@ failure and send failure paths. Physical post-discovery HTTP/UDP/tunnel checks r
 ## Pacing and retry policy
 
 - At most **4 nonblocking send attempts per 25 ms**, at priority 2 below voice tasks; no catch-up
-  bursts. Initial attempts take priority over retries. Every pair gets at most two attempts,
-  including send failures; retry eligibility starts 500 ms after its first attempt.
+  bursts. Initial attempts take priority over retries. Every pair gets at most two successful
+  sends; retry eligibility starts 500 ms after its first successful send. (H2b: a failed send no
+  longer consumes an attempt; it is retried 50 ms later, after untried pairs.)
 - No probe sends in the final `min(timeout_ms / 4, 400)` ms. Receive before retry selection so queued
   answers suppress retries. Each socket drain handles at most 16 datagrams per loop, preventing
   a noisy discovery socket from indefinitely holding the worker past the deadline.
@@ -181,8 +183,10 @@ failure and send failure paths. Physical post-discovery HTTP/UDP/tunnel checks r
 One summary line per run now looks like:
 
 ```text
-lan_discover: req_…: H hosts (arp A of S swept, F failed; mdns M answers; ssdp D answers; probes P sent, Q answered, R resent), [truncated, ]T ms, B B
+lan_discover: req_…: H hosts (arp A of S swept, F failed; mdns M answers; ssdp D answers; probes P sent, Q answered, R resent, X send_failed, U unsent)[, truncated][, probes_truncated], T ms, B B
 ```
+
+(H2b format; `send_failed`, `unsent` and `probes_truncated` were added.)
 
 `sent` is successful datagrams including successful resends; `resent` is that subset; `answered`
 counts first matched datagrams, including answers dropped by the storage budget. Counts contain
@@ -340,8 +344,208 @@ simulator or H1 measurements.
 ## Clarifications from initial implementation (`bc883dd`)
 
 No requested field, limit, access rule or board feature changed. Standard base64 validation also
-checks canonical pad bits. A failed send consumes an attempt and marks truncation; a skipped retry
-also marks truncation, while two unanswered successful sends do not. JSON rollback during a
+checks canonical pad bits. (Initial behavior, changed in H2b: a failed send consumed an attempt and
+marked both flags.) A skipped retry marks probe truncation, while two unanswered successful sends
+do not. JSON rollback during a
 probing run conservatively marks probe truncation too. Limiting legacy socket drains to 16 packets
 per loop prevents them from starving probe pacing/deadlines; normal no-probe result bytes remain
 unchanged. The metadata buffer increase is the only static RAM growth.
+
+## H2b — DevKit discovery during BLE setup, and honest `truncated`
+
+2026-10-12, on `b0c3d9b`, same branch and worktree, IDF 6.0.2. Neither board was flashed. No
+protocol change beyond the meaning of the two flags, and no app or backend change.
+
+### 1. The failing allocation
+
+The failure was inside `ld_result_json`. The old log printed `0 B` because `result` was NULL, and
+the only allocation in that function is the result builder's `heap_caps_realloc` growth
+(1024 → 2048 → 4096 → 8192 → 12289 bytes, `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` on the DevKit).
+Nothing was cut by the 12 KiB cap. That realloc found no 8-bit-capable block, and the "36 KB free"
+was never usable for it:
+
+- `comma_heap_log` reported `MALLOC_CAP_INTERNAL`. On the classic ESP32 that includes the
+  **IRAM heap**, which is 32-bit-only, executable memory (`MALLOC_CAP_INTERNAL|EXEC|32BIT`, IDF
+  `heap/port/esp32/memory_layout.c`). Byte buffers cannot come from it.
+- In the DevKit map, `_iram_end = 0x40096838`. The IRAM heap is therefore `0x400A0000 − 0x40096838 =
+  38,856` bytes, which TLSF's fit-size reports as a **36,864**-byte largest block. That is exactly the
+  `largest=36864` seen in every round, with BLE on and off, because nothing ever allocates there.
+- So at round 1's `discovery_peak` (`free=45904`), only about **7 KB** of the free memory was
+  8-bit-capable DRAM. Discovery itself was still holding about 46 KB at that point: the context with
+  its mDNS tables (~5.6 KB), hosts (13,568), arena (16,384), probe table (8,312), receive buffer
+  (2,048) and ARP dump. The builder's next growth step (to 8 or 12 KiB) could not fit. With BLE off
+  (round 3), DRAM had about 46 KB 8-bit free and the same steps succeeded.
+
+The exact failing step was not captured on hardware. The new hook records it (see below), so the
+retest will show it if it still happens.
+
+### 2. What changed
+
+**Diagnostics.** `comma_heap_log` now also prints `free8=` / `largest8=`
+(`MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT`) and explains the IRAM caveat. The failed-allocation hook
+in `connector_json.c` logs each failure while `comma_log_failed_allocs(true)` is set for the
+calling task. `lan_discover_run` turns this on from context creation until the result is built.
+It uses the ROM printer, so the hook never allocates. Format:
+`W (…) heap: heap_caps_realloc(12289) failed, caps 0x1804: free N, largest M for those caps`.
+This works with heap diagnostics off.
+
+**Memory, a real fix independent of BLE (`ld_result_frame`).** The old path built the result by
+doubling (needing 8 KiB + 12 KiB at once during the last realloc), then copied it into a separate
+reply envelope that doubled again to 16 KiB. For round 3's 10,322-byte result, the peak just for the
+reply was about **36.9 KB** (12,289 result + 8,192 old + 16,384 new envelope buffer), with a 16 KiB
+contiguous block required. Now:
+- the receive buffer and ARP dump are freed before the result is built;
+- the result is **measured first** (a counting builder), then written **once** into **one exactly
+  sized allocation** that also holds the reply envelope (`{"id":…,"type":"response","result":` +
+  result + `}`). Round 3's reply would need one ~10.4 KB block and no transient copy;
+- the envelope prefix is built in a ≤448-byte stack buffer (a 64-byte id escapes to at most 386),
+  so its builder is freed before the result allocation.
+The 12 KiB cap still applies to the result object alone, and output bytes are unchanged.
+
+**BLE timing (`CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY`).** Off by default; T-Circle is unchanged. The
+DevKit overlay enables it.
+- (a) After `saved`, when provisioning notifies `connector_up` over BLE, it records the time and
+  ends BLE **3 s later** (`ble_down`, which terminates the link) instead of waiting up to 30 s for
+  the phone to disconnect. The setup order is unchanged: the Connector still starts while BLE is
+  up, so `connector_failed` is still reported, and only `connector_up` ends BLE early.
+- (b) `lan_discover_run` checks `provisioning_ble_on()` before allocating anything. That flag is
+  true from `nimble_port_init` until `ble_down` has finished, which is earlier than
+  `provisioning_active()` (that one waits out the 2 s "All set" screen). If BLE is on, discovery
+  waits in 100 ms steps, at most `min(10 s, 15 s − 2 s − timeout_ms)`. The backend gives a
+  `lan_discover` request 15 s (Cue `salix_env/protocol.ex`, `"lan_discover" => 15_000`), and so does
+  `fake_connector.py`. With the default 3 s window it waits up to 10 s; with 5 s, 8 s; with 8 s, 5 s.
+  If BLE is still on after that, discovery runs anyway and fails as before.
+
+**Why ending BLE after `connector_up` is safe for the app** (`comma-android`, branch
+`codex/add-device-ble` at `bc50372`, `AddDeviceFlow.kt`; `main` has no BLE setup flow yet). After
+`saved`, the flow is in `SetupPhase.COMING_ONLINE`. In that phase only `connector_failed` (→ failure)
+and `Online` are handled. `Online` comes from `WatchOnline`, which polls the server's device list, not
+BLE. `LinkLost` and `connector_up` fall through to `else -> none`, and the code comment there already
+says "the device closes it within 30 s". If `saved` was never heard, the 20 s `SAVE` timer also
+moves to `COMING_ONLINE`, and `LinkLost` in `SAVING` does the same. Because `connector_up` is only
+sent after a successful dial with the saved token, `connector_failed` cannot follow it within the
+3 s window, so no refused token goes unreported. The device simply leaves after the app has
+everything it needs, and the app finishes with `Done(online = true)` once the server sees the
+device.
+
+### 3. Flag semantics and send failures
+
+- `truncated` keeps its pre-H2 meaning: a host (64 cap or ARP sweep of a large subnet), service,
+  SSDP entry, TXT key or string was dropped, or a host was rolled back at the result cap.
+- `probes_truncated` alone covers: a pair still unsent at the end (including hosts found only in the
+  final ARP harvest), an unanswered pair whose retry did not fit, no probe socket, a cut answer, or
+  an answer over the total budget. `ld_mark_probes_truncated` no longer sets `truncated`.
+- Both are set when a host is dropped at the host cap or rolled back at the result cap.
+- A failed `sendto` no longer consumes an attempt. The pair is marked failed and retried no sooner
+  than 50 ms later (`LD_PROBE_FAIL_RETRY_MS`), on a later tick, for as long as the send window lasts.
+  Untried first sends go before failed first sends, which go before resends, so a pair that keeps
+  failing cannot starve the others. The 500 ms resend delay counts from the first *successful*
+  send. Each pair still gets at most two successful datagrams. Pacing (4 per 25 ms) and the
+  listen-only tail are unchanged.
+- `docs/connector-protocol.md` now defines both flags this way.
+
+Round 3's 22 expected first sends with only 20 sent is now visible directly. Either sends failed
+(`send_failed > 0`, plus the first errno), or hosts arrived too late to probe (`unsent > 0` with
+`send_failed = 0`, typically ARP replies seen only at the final harvest). Only `probes_truncated`
+is set for those.
+
+New summary and error lines:
+
+```text
+lan_discover: <id>: H hosts (arp A of S swept, F failed; mdns M answers; ssdp D answers; probes P sent, Q answered, R resent, X send_failed, U unsent)[, truncated][, probes_truncated], T ms, B B
+lan_discover: <id>: first failed probe sendto: errno E        (only when X > 0; -1 = short send)
+```
+
+`B` is now the whole reply frame (about 50 bytes more than the old result-only figure).
+
+### Memory numbers
+
+The probe table grows by 8 bytes (two counters): 8,312 B on DevKit, 26,832 B on T-Circle (target).
+The pair state stays at 12 bytes; a 16-bit `next_ms` replaces the old attempt-time meaning. The
+reply peak drops as described in section 2. No other buffer or cap changed.
+
+### Tests and builds
+
+| Suite | Result |
+| --- | --- |
+| `lan_discover_test/run.sh` (default) | 2387 checks + runner 7574 checks, 0 failed (ASan/UBSan) |
+| `lan_discover_test/run.sh --devkit` | 2386 + runner 4502, 0 failed |
+| `lan_discover_test/run.sh --no-probes` | 1276 + runner 24, 0 failed |
+| `connector_json_test` | 133 checks, 0 failed |
+| `lan_http_test` default / `--devkit` | 263 / 263 passed |
+| `lan_udp_test` default / `--devkit` | 747 / 747 checks |
+| `lan_tunnel_test` default / `--devkit` | 1367 / 1368 checks |
+| Python `unittest discover -s firmware/tools` | 26 tests OK (interpreter: the main checkout's `tools/.venv`; this worktree has none) |
+| `tools/board.sh t-circle-s3 build` / `esp32-devkit build` | both OK |
+
+New host checks:
+- failed send: retried after 50 ms, never twice in one tick, resend timed from the successful
+  send, failed resend retried, a send failing until the window ends gives `unsent = 1` and only
+  `probes_truncated`;
+- fairness: untried before failed before resends, and two always-failing hosts do not stop eight
+  others from getting both sends;
+- `truncated` vs `probes_truncated` for: late host, missing retry, cut/over-budget answers, socket
+  shortage (`probes_truncated` only); host cap and JSON rollback (both); two unanswered sends
+  (neither);
+- result frame: exactly one allocation of exactly `strlen + 1`, bytes equal prefix + result +
+  suffix, the cap applies to the result and not the envelope, and an allocation failure gives NULL;
+- BLE wait: the deadline-bounded limit, return as soon as BLE is off, give up exactly at the limit,
+  and a zero limit never sleeps. In the runner, with the option compiled in: BLE ending at 2.95 s
+  gives a 3.0 s wait and then a normal scan; BLE never ending with `timeout_ms` 5000 gives an 8 s
+  wait and then a scan. Failed-allocation logging is off again after every run.
+- the failed-allocation hook logs only for the task that enabled it, never from an interrupt or
+  another task, and queries free/largest for the failed caps.
+
+Generated config: the T-Circle `sdkconfig` differs from before only by
+`# CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY is not set`. The DevKit build directory gains
+`CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY=y` (it needed `board.sh esp32-devkit reconfigure` to pick up the
+new key). That local build directory still carries `CONFIG_COMMA_HEAP_DIAGNOSTICS=y` from the
+previous hardware test; the overlay keeps it `n`.
+
+### Hardware retest steps (for Claude)
+
+Build the DevKit test image as for the `b0c3d9b` test: local WSS URL/CA overrides and
+`CONFIG_COMMA_HEAP_DIAGNOSTICS=y` in the generated config only. Check that the generated config
+has `CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY=y`, then flash.
+
+**A. Setup from the app, then discovery right away (BLE up).** Factory reset (hold BOOT 10 s) and
+set up from the app. Have the fake Connector call `lan_discover` with `gree` + `miio` and
+`timeout_ms` 5000 as soon as the board connects (as before, e.g.
+`fake_connector.py --discover-probes --discover-timeout 5000 --loop 3 --pause 10`). Expect, in
+this order:
+
+```text
+prov: status {"state":"connector_up",...}
+prov: connector_up sent, BLE ends in 3 s
+heap: lan_begin free=… largest=… free8=… largest8=…        (still BLE-up numbers)
+lan_discover: <id>: waiting up to 8000 ms for BLE to end
+prov: ending BLE after connector_up to free memory for discovery
+prov: disconnected, reason 0x216                            (local terminate)
+heap: ble_off …
+prov: BLE off
+lan_discover: <id>: BLE off after ~2000-3000 ms
+heap: discovery_peak … free8≈ BLE-off level
+lan_discover: <id>: 11-12 hosts (…; probes N sent, 3 answered, R resent, X send_failed, U unsent)…, ~5000 ms, ~10400 B
+```
+
+There should be no `out of memory for the discovery result` and no `heap: … failed` line. The app
+should finish setup normally (device online), with no failure screen and no "disconnected" error.
+If a `heap: … failed` line does appear, record its size, caps and largest: that identifies the
+allocation.
+
+**B. Three rounds with BLE off** (the next two rounds of the same loop, or a fresh run 30 s after
+boot): three PASS, the Gree answer uncut (`t == "pack"`), sizes about 10.4 KB, and
+`discovery_peak` `largest8` comfortably above the frame size. Record `free8`/`largest8` at
+`lan_begin`, `discovery_peak` and `lan_reply_freed`.
+
+**C. New counts and flags.** In every summary, `sent = first sends + resent`. Expect `truncated` to
+be absent unless a real cap was hit: 64 hosts, or a host with 6 services or 6 SSDP entries
+(DevKit caps). Check the saved JSON before calling it a bug. `probes_truncated` may appear: if so,
+`unsent > 0` (hosts too late, or sends still failing at the end) or a pair was answered neither
+time with its retry outside the window. When `send_failed > 0`, the
+`first failed probe sendto: errno E` line follows; record `E` (12 = ENOMEM, 11 = EAGAIN). In the
+saved result, `"truncated":false` with `"probes_truncated":true` is now a valid combination, and
+the backend still reads both.
+
+**D. T-Circle** behavior is unchanged except for the flag meanings and the log fields; one home
+Gree round is enough to confirm.

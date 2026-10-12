@@ -8,15 +8,24 @@
 
 static _Thread_local bool s_parsing;
 static _Thread_local bool s_failed;
+static _Thread_local bool s_log_failures;
+
+void comma_log_failed_allocs(bool on)
+{
+    s_log_failures = on;
+}
 
 static void allocation_failed(size_t size, uint32_t caps, const char *function)
 {
-    (void)size;
-    (void)caps;
-    (void)function;
     // Another task or an interrupt must not turn a syntax error into an OOM error.
     if (!xPortInIsrContext() && s_parsing) {
         s_failed = true;
+    }
+    if (!xPortInIsrContext() && s_log_failures) {
+        // The ROM printer allocates nothing, so this cannot fail again inside the hook.
+        ESP_EARLY_LOGW("heap", "%s(%u) failed, caps 0x%x: free %u, largest %u for those caps", function,
+                       (unsigned)size, (unsigned)caps, (unsigned)heap_caps_get_free_size(caps),
+                       (unsigned)heap_caps_get_largest_free_block(caps));
     }
 }
 

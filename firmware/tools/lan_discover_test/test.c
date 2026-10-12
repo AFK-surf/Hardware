@@ -10,8 +10,8 @@
 #include "cJSON.h"
 
 static int g_checks, g_failed;
-static size_t g_alloc_limit, g_alloc_peak;
-static int g_alloc_rejected;
+static size_t g_alloc_limit, g_alloc_peak, g_alloc_last;
+static int g_alloc_rejected, g_alloc_calls;
 static bool g_alloc_fail;
 static bool g_malloc_fail;
 
@@ -23,6 +23,8 @@ void *ld_test_malloc(size_t n)
 void *ld_test_realloc(void *p, size_t n)
 {
     if (n > g_alloc_peak) g_alloc_peak = n;
+    g_alloc_calls++;
+    g_alloc_last = n;
     if (g_alloc_fail || (g_alloc_limit && n > g_alloc_limit)) {
         ++g_alloc_rejected;
         return NULL;
@@ -985,6 +987,18 @@ static void test_probe_matching(void)
     ld_free(ctx);
 }
 
+static bool probes_truncated(cJSON *r)
+{
+    return cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated"));
+}
+
+static ld_probe_counts_t counts_of(ld_ctx_t *ctx)
+{
+    ld_probe_counts_t c;
+    ld_probe_counts(ctx, &c);
+    return c;
+}
+
 static void test_probe_retry_and_caps(void)
 {
     ld_ctx_t *ctx = probing(1);
@@ -993,15 +1007,18 @@ static void test_probe_retry_and_caps(void)
           send_ready(ctx, 5000) == 0, "one retry, no earlier than 500 ms");
     ld_probes_finish(ctx);
     cJSON *r = result(ctx, NULL);
-    int sent, answered, resent;
-    ld_probe_counts(ctx, &sent, &answered, &resent);
-    CHECK(sent == 2 && resent == 1 && answered == 0 && !truncated(r), "unanswered after two sends isn't truncation");
+    ld_probe_counts_t c = counts_of(ctx);
+    CHECK(c.sent == 2 && c.resent == 1 && c.answered == 0 && c.send_failed == 0 && c.unsent == 0,
+          "counts after two sends");
+    CHECK(!truncated(r) && !probes_truncated(r), "unanswered after two sends isn't truncation");
     CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.5.40"), "probes"), "unanswered host has no probes key");
     cJSON_Delete(r);
     ld_add_arp(ctx, ip("192.168.5.41"), PROBE_MAC); // final harvest, no time to send
     ld_probes_finish(ctx);
     r = result(ctx, NULL);
-    CHECK(truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "late host flags both truncations");
+    CHECK(!truncated(r) && probes_truncated(r) && counts_of(ctx).unsent == 1,
+          "late host: unsent, probes_truncated only");
+    CHECK(host_in(r, "192.168.5.41") != NULL, "the unprobed host itself is kept");
     cJSON_Delete(r);
     ld_free(ctx);
 
@@ -1010,22 +1027,8 @@ static void test_probe_retry_and_caps(void)
     CHECK(send_ready(ctx, 0) == 1, "send before short tail");
     ld_probes_finish(ctx);
     r = result(ctx, NULL);
-    CHECK(truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "retry missing at tail flags truncation");
-    cJSON_Delete(r);
-    ld_free(ctx);
-
-    ctx = probing(1);
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
-    ld_probe_send_t send;
-    assert(ld_probe_next(ctx, 0, &send));
-    ld_probe_sent(ctx, &send, 0, false);
-    ld_add_probe_answer(ctx, send.ip, send.port, (const uint8_t *)"x", 1);
-    CHECK(ctx->probes->answered == 0 && ctx->probes->truncated, "failed send authorizes no answers and flags loss");
-    CHECK(send_ready(ctx, 500) == 1 && send_ready(ctx, 1000) == 0, "failed first attempt gets only one retry");
-    ld_add_probe_answer(ctx, send.ip, send.port, NULL, 0);
-    r = result(ctx, NULL);
-    cJSON *a = cJSON_GetArrayItem(cJSON_GetObjectItem(host_in(r, "192.168.5.40"), "probes"), 0);
-    CHECK(a && !strcmp(str(a, "payload_b64"), ""), "zero-byte answer is a valid datagram");
+    CHECK(!truncated(r) && probes_truncated(r) && counts_of(ctx).unsent == 0,
+          "retry missing at tail: probes_truncated only, not unsent");
     cJSON_Delete(r);
     ld_free(ctx);
 
@@ -1038,10 +1041,181 @@ static void test_probe_retry_and_caps(void)
     CHECK(send_ready(ctx, 500) == LD_MAX_HOSTS * CONFIG_COMMA_LAN_DISCOVER_PROBES, "worst-case resend count");
     ld_probes_finish(ctx);
     r = result(ctx, NULL);
-    CHECK(count(cJSON_GetObjectItem(r, "hosts")) == 64 && truncated(r) &&
-          cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "host cap also flags probes");
+    CHECK(count(cJSON_GetObjectItem(r, "hosts")) == 64 && truncated(r) && probes_truncated(r),
+          "a dropped host sets both flags");
     cJSON_Delete(r);
     ld_free(ctx);
+}
+
+// A failed sendto is not lost: it waits LD_PROBE_FAIL_RETRY_MS, then is tried again.
+static void test_probe_failed_sends(void)
+{
+    ld_ctx_t *ctx = probing(1);
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_probe_send_t send;
+    assert(ld_probe_next(ctx, 0, &send));
+    ld_probe_sent(ctx, &send, 0, false);
+    ld_add_probe_answer(ctx, send.ip, send.port, (const uint8_t *)"x", 1);
+    CHECK(ctx->probes->answered == 0 && !ctx->probes->truncated, "failed send authorizes no answers, flags nothing yet");
+    CHECK(send_ready(ctx, 0) == 0 && send_ready(ctx, LD_PROBE_FAIL_RETRY_MS - 1) == 0,
+          "no retry within the same tick or before the failure delay");
+    CHECK(send_ready(ctx, LD_PROBE_FAIL_RETRY_MS) == 1, "failed first send retried");
+    CHECK(send_ready(ctx, LD_PROBE_FAIL_RETRY_MS + LD_PROBE_RETRY_MS - 1) == 0 &&
+          send_ready(ctx, LD_PROBE_FAIL_RETRY_MS + LD_PROBE_RETRY_MS) == 1,
+          "resend 500 ms after the first successful send, not the failed attempt");
+    CHECK(send_ready(ctx, 5000) == 0, "two successful sends at most");
+    ld_add_probe_answer(ctx, send.ip, send.port, NULL, 0);
+    ld_probes_finish(ctx);
+    ld_probe_counts_t c = counts_of(ctx);
+    CHECK(c.sent == 2 && c.resent == 1 && c.send_failed == 1 && c.unsent == 0 && c.answered == 1, "failed-then-sent counts");
+    cJSON *r = result(ctx, NULL);
+    cJSON *a = cJSON_GetArrayItem(cJSON_GetObjectItem(host_in(r, "192.168.5.40"), "probes"), 0);
+    CHECK(a && !strcmp(str(a, "payload_b64"), ""), "zero-byte answer is a valid datagram");
+    CHECK(!truncated(r) && !probes_truncated(r), "a failed send that was retried in time flags nothing");
+    cJSON_Delete(r);
+    ld_free(ctx);
+
+    // A failed resend is retried as well.
+    ctx = probing(1);
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    send_ready(ctx, 0);
+    assert(ld_probe_next(ctx, 500, &send));
+    ld_probe_sent(ctx, &send, 500, false);
+    CHECK(send_ready(ctx, 500 + LD_PROBE_FAIL_RETRY_MS - 1) == 0 && send_ready(ctx, 500 + LD_PROBE_FAIL_RETRY_MS) == 1,
+          "failed resend retried after the failure delay");
+    ld_probes_finish(ctx);
+    r = result(ctx, NULL);
+    CHECK(!probes_truncated(r) && counts_of(ctx).resent == 1 && counts_of(ctx).send_failed == 1, "failed resend recovered");
+    cJSON_Delete(r);
+    ld_free(ctx);
+
+    // Still failing when the window ends: unsent, probes_truncated only.
+    ctx = probing(1);
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    int attempts = 0;
+    for (uint32_t ms = 0; ms < 750; ms += 25) {
+        while (ld_probe_next(ctx, ms, &send)) {
+            ld_probe_sent(ctx, &send, ms, false);
+            attempts++;
+        }
+    }
+    ld_probes_finish(ctx);
+    c = counts_of(ctx);
+    CHECK(attempts == 15 && c.send_failed == 15 && c.sent == 0 && c.unsent == 1,
+          "one attempt per failure delay, then unsent (%d attempts)", attempts);
+    r = result(ctx, NULL);
+    CHECK(!truncated(r) && probes_truncated(r) && host_in(r, "192.168.5.40"), "unsent pair: host kept, probes_truncated only");
+    cJSON_Delete(r);
+    ld_free(ctx);
+}
+
+// Untried pairs go before failed ones, so a pair that keeps failing cannot starve the rest.
+static void test_probe_fairness(void)
+{
+    ld_ctx_t *ctx = probing(1);
+    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.5.41"), PROBE_MAC);
+    ld_probe_send_t send;
+    assert(ld_probe_next(ctx, 0, &send) && send.ip == ip("192.168.5.40"));
+    ld_probe_sent(ctx, &send, 0, false);
+    CHECK(ld_probe_next(ctx, 0, &send) && send.ip == ip("192.168.5.41"), "the next host is not held up by a failure");
+    ld_probe_sent(ctx, &send, 0, true);
+    ld_add_arp(ctx, ip("192.168.5.42"), PROBE_MAC);
+    CHECK(ld_probe_next(ctx, 60, &send) && send.ip == ip("192.168.5.42"), "untried first send before a failed one");
+    ld_probe_sent(ctx, &send, 60, true);
+    CHECK(ld_probe_next(ctx, 60, &send) && send.ip == ip("192.168.5.40"), "failed first send before any resend");
+    ld_probe_sent(ctx, &send, 60, true);
+    ld_free(ctx);
+
+    // Pairs that always fail, ahead of every other host, still leave the others their sends.
+    ctx = probing(1);
+    for (int h = 30; h < 40; ++h) {
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        ld_add_arp(ctx, ip(addr), PROBE_MAC);
+    }
+    for (uint32_t ms = 0; ms < 750; ms += 25) {
+        for (int i = 0; i < 4; ++i) { // the runner's per-tick batch
+            if (!ld_probe_next(ctx, ms, &send)) break;
+            const bool bad = send.ip == ip("192.168.5.30") || send.ip == ip("192.168.5.31");
+            ld_probe_sent(ctx, &send, ms, !bad);
+        }
+    }
+    ld_probes_finish(ctx);
+    ld_probe_counts_t c = counts_of(ctx);
+    CHECK(c.unsent == 2 && c.sent == 16, "eight hosts get both sends despite two failing (%d sent, %d unsent)", c.sent, c.unsent);
+    ld_free(ctx);
+}
+
+// The reply frame is measured, then written once into an exactly sized buffer around the result.
+static void test_result_frame(void)
+{
+    ld_ctx_t *ctx = CONFIG_COMMA_LAN_DISCOVER_PROBES > 0 ? probing(1) : ld_create(ip(SELF), ip(MASK));
+    char value[LD_STR_MAX + 1]; memset(value, 'v', LD_STR_MAX); value[LD_STR_MAX] = 0;
+    for (int h = 30; h < 40; ++h) {
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        ld_add_arp(ctx, ip(addr), PROBE_MAC);
+        char pkt[1024];
+        int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n", value, value, value);
+        ld_add_ssdp(ctx, ip(addr), pkt, (size_t)n, NULL);
+    }
+    char *alone = ld_result_json(ctx);
+    const char *prefix = "{\"id\":\"req_\\\"1\",\"type\":\"response\",\"result\":";
+    g_alloc_calls = 0;
+    char *frame = ld_result_frame(ctx, prefix, "}");
+    CHECK(frame && g_alloc_calls == 1 && g_alloc_last == strlen(frame) + 1,
+          "one exactly sized allocation: %d calls, %zu bytes for %zu", g_alloc_calls, g_alloc_last, frame ? strlen(frame) + 1 : 0);
+    CHECK(frame && !strncmp(frame, prefix, strlen(prefix)) && !strncmp(frame + strlen(prefix), alone, strlen(alone)) &&
+          !strcmp(frame + strlen(prefix) + strlen(alone), "}"), "frame = prefix + result + suffix");
+    cJSON *parsed = cJSON_Parse(frame);
+    CHECK(parsed && cJSON_GetObjectItem(parsed, "result"), "frame is valid JSON");
+    cJSON_Delete(parsed);
+    free(frame);
+    free(alone);
+    g_alloc_fail = true;
+    CHECK(ld_result_frame(ctx, prefix, "}") == NULL, "frame allocation failure returns NULL");
+    g_alloc_fail = false;
+    ld_free(ctx);
+
+    // The cap applies to the result object, not the envelope: same hosts kept with a long prefix.
+    ctx = ld_create(ip(SELF), ip(MASK));
+    char big[LD_STR_MAX + 1]; for (int i = 0; i < LD_STR_MAX; ++i) big[i] = i % 2 ? '\\' : '"'; big[LD_STR_MAX] = 0;
+    for (int h = 30; h < 94; ++h) {
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        for (int e = 0; e < 2; ++e) {
+            char pkt[1024];
+            int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %d%s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n", e, big, big, big);
+            ld_add_ssdp(ctx, ip(addr), pkt, (size_t)n, NULL);
+        }
+    }
+    alone = ld_result_json(ctx);
+    char long_prefix[400]; memset(long_prefix, ' ', sizeof(long_prefix) - 1); long_prefix[sizeof(long_prefix) - 1] = 0;
+    frame = ld_result_frame(ctx, long_prefix, "");
+    CHECK(strlen(alone) <= LD_MAX_JSON && frame && !strcmp(frame + strlen(long_prefix), alone),
+          "capped result identical inside an envelope");
+    free(frame);
+    free(alone);
+    ld_free(ctx);
+}
+
+static uint32_t g_busy_until, g_slept;
+static int g_sleeps;
+static bool busy_test(void) { return g_slept < g_busy_until; }
+static void sleep_test(uint32_t ms) { g_slept += ms; g_sleeps++; }
+
+static void test_ble_wait(void)
+{
+    CHECK(ld_ble_wait_limit(3000) == 10000 && ld_ble_wait_limit(5000) == 8000 && ld_ble_wait_limit(8000) == 5000 &&
+          ld_ble_wait_limit(1000) == 10000, "BLE wait bounded by 10 s and the 15 s request deadline");
+    bool still;
+    g_slept = 0; g_sleeps = 0; g_busy_until = 0;
+    CHECK(ld_wait_while(busy_test, sleep_test, 10000, 100, &still) == 0 && !still && g_sleeps == 0, "BLE already off: no wait");
+    g_slept = 0; g_sleeps = 0; g_busy_until = 2950;
+    CHECK(ld_wait_while(busy_test, sleep_test, 10000, 100, &still) == 3000 && !still && g_sleeps == 30, "returns once BLE is off");
+    g_slept = 0; g_sleeps = 0; g_busy_until = 100000;
+    CHECK(ld_wait_while(busy_test, sleep_test, 8050, 100, &still) == 8050 && still && g_slept == 8050,
+          "gives up exactly at the limit, BLE still on");
+    g_slept = 0; g_sleeps = 0;
+    CHECK(ld_wait_while(busy_test, sleep_test, 0, 100, &still) == 0 && still && g_sleeps == 0, "zero limit never sleeps");
 }
 
 static void test_probe_answer_budget(void)
@@ -1082,7 +1256,7 @@ static void test_probe_answer_budget(void)
     cJSON_ArrayForEach(host, cJSON_GetObjectItem(r, "hosts")) count_answers += count(cJSON_GetObjectItem(host, "probes"));
     CHECK(count_answers == retained && ctx->probes->used == expected, "decoded run budget: %d answers, %zu bytes", count_answers, ctx->probes->used);
     CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.5.39"), "probes"), "budget drops the whole first answer");
-    CHECK(truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "answer loss flags both");
+    CHECK(!truncated(r) && probes_truncated(r), "answer loss and cut answers set probes_truncated only");
     cJSON_Delete(r);
     ld_free(ctx);
 }
@@ -1151,9 +1325,13 @@ int main(void)
 {
     test_probe_params();
     test_no_probes();
+    test_result_frame();
+    test_ble_wait();
     if (CONFIG_COMMA_LAN_DISCOVER_PROBES > 0) {
         test_probe_matching();
         test_probe_retry_and_caps();
+        test_probe_failed_sends();
+        test_probe_fairness();
         test_probe_answer_budget();
         test_probe_json_budget();
         test_probe_fuzz();
