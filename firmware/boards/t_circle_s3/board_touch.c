@@ -1,7 +1,8 @@
 // LilyGO T-Circle-S3 V1.1. CST816D on I2C0, BOOT on GPIO0.
-// The screen is polled. FingerNum maps both press and release without an IRQ line.
+// The screen is polled. FingerNum maps both press and release without an IRQ line. A tap shorter
+// than 280 ms becomes BOARD_INPUT_TAP when the finger lifts; a longer press is not a tap.
 
-#include "board_touch.h"
+#include "board_input.h"
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -31,7 +32,6 @@ static i2c_master_dev_handle_t s_touch = NULL;
 static bool s_touch_ready = false;
 
 static bool s_screen_raw = false;
-static atomic_bool s_screen_held = false;
 static atomic_bool s_boot_held = false;
 static bool s_boot_raw = false;
 static int64_t s_boot_change_us = 0;
@@ -70,7 +70,7 @@ static bool read_screen(bool *down)
     return true;
 }
 
-void board_touch_init(void)
+void board_input_init(void)
 {
     gpio_config_t boot_cfg = {
         .pin_bit_mask = 1ULL << T_CIRCLE_BOOT_GPIO,
@@ -124,7 +124,7 @@ void board_touch_init(void)
     ESP_LOGI(TAG, "CST816D ready: id=0x%02x", device_id);
 }
 
-board_touch_gesture_t board_touch_poll(void)
+board_input_event_t board_input_poll(void)
 {
     const int64_t now = esp_timer_get_time();
 
@@ -139,13 +139,12 @@ board_touch_gesture_t board_touch_poll(void)
 
     bool screen = s_screen_raw;
     if (!read_screen(&screen)) {
-        return BOARD_TOUCH_NONE;
+        return BOARD_INPUT_NONE;
     }
 
     const bool pressed = screen && !s_screen_raw;
     const bool released = !screen && s_screen_raw;
     s_screen_raw = screen;
-    s_screen_held = screen;
 
     if (pressed) {
         s_down_us = now;
@@ -154,18 +153,13 @@ board_touch_gesture_t board_touch_poll(void)
     if (released && s_tap_armed) {
         s_tap_armed = false;
         if (now - s_down_us <= TAP_MAX_US) {
-            return BOARD_TOUCH_CLICK;
+            return BOARD_INPUT_TAP;
         }
     }
-    return BOARD_TOUCH_NONE;
+    return BOARD_INPUT_NONE;
 }
 
-bool board_touch_screen_held(void)
-{
-    return s_screen_held;
-}
-
-bool board_touch_boot_held(void)
+bool board_input_boot_held(void)
 {
     return s_boot_held;
 }

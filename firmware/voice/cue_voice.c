@@ -2,7 +2,6 @@
 #include "cue_voice.h"
 
 #include "board_audio.h"
-#include "board_touch.h"
 #include "device_config.h"
 #include "playback.h"
 #include "voice_clean.h"
@@ -888,7 +887,7 @@ static void uplink_task(void *arg)
     while (!s_stop) {
         if (!s_start_sent && s_ws_up) {
             const char *start =
-                "{\"type\":\"session.start\",\"audio_format\":\"" WIRE_FORMAT "\",\"client\":\"t-circle/0.1\"}";
+                "{\"type\":\"session.start\",\"audio_format\":\"" WIRE_FORMAT "\",\"client\":\"" CONFIG_COMMA_CLIENT_SOURCE "/0.1\"}";
             if (send_text(start, 2000) < 0) {
                 ESP_LOGE(TAG, "session.start send failed");
                 s_stop = true;

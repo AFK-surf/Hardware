@@ -18,8 +18,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define PAIRING_HOLD_US (3LL * 1000000)
-#define RESET_HOLD_US (10LL * 1000000)
+#define PAIRING_HOLD_US APP_PAIRING_HOLD_US
+#define RESET_HOLD_US APP_RESET_HOLD_US
 static const char *TAG = "main";
 static bool boot_tracking, boot_wait_release;
 static int64_t boot_down_us;

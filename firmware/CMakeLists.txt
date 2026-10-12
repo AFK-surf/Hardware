@@ -10,5 +10,14 @@ if(IDF_TARGET STREQUAL "esp32")
     idf_build_set_property(DEPENDENCIES_LOCK "dependencies.lock.esp32")
     set(EXCLUDE_COMPONENTS esp_lcd_gc9d01)
 endif()
+# Board-specific managed drivers: only the Waveshare AMOLED pulls the CO5300 panel component, with its
+# own lock, so the T-Circle lock never changes. tools/board.sh passes COMMA_BOARD; main/CMakeLists.txt
+# reads it as a build property, since requirements are collected before Kconfig.
+if(COMMA_BOARD STREQUAL "waveshare-amoled-1-32")
+    idf_build_set_property(DEPENDENCIES_LOCK "dependencies.lock.waveshare-amoled-1-32")
+    list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/boards/waveshare_amoled_1_32/waveshare_deps")
+    set(EXCLUDE_COMPONENTS esp_lcd_gc9d01)
+endif()
+idf_build_set_property(COMMA_BOARD "${COMMA_BOARD}")
 project(cue_logo)
 include(cmake/idf_patches.cmake)

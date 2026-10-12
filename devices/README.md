@@ -5,12 +5,14 @@ Run from the repository root after activating ESP-IDF 6.0.2:
 ```sh
 tools/board.sh t-circle-s3 build
 tools/board.sh esp32-devkit build
+tools/board.sh waveshare-amoled-1-32 build
 tools/board.sh esp32-devkit flash-monitor /dev/cu.usbserial-0001
 ```
 
 | Overlay | Target | Flash / PSRAM | Features | Status |
 | --- | --- | --- | --- | --- |
 | `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | Display, voice, passkey, HTTP/UDP/discovery, 2 tunnels | Supported; H1 smoke test on the board: boot, Connector online, voice call |
+| `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | Display + gateway, no voice (no speaker on board): AMOLED 466x466, passkey, tap or BOOT press wakes the screen, T-Circle limits, own partition table (no model partition) | Display, touch, passkey setup and BOOT press/hold board-tested on H3 B; this build not yet flashed ([H3](../docs/reports/H3-report.md)) |
 | `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 LED, Just Works, HTTP/UDP, discovery with 12 KiB result cap; no TCP tunnels | Supported; local WSS: discovery, 8 KiB text and 1 MiB chunks passed 3/3; BOOT and replug checked |
 
 DevKit does not support `lan_tcp_dial`. The backend currently sends 32 KiB raw frames regardless of

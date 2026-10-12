@@ -1,7 +1,10 @@
 # Adding or changing a board
 
 1. Read the current README, Connector protocol, BLE contract, and H1 report. Keep the shared gateway
-   in `firmware/main/`; put drivers and feedback in `firmware/boards/<board>/`.
+   in `firmware/main/`; put drivers and feedback in `firmware/boards/<board>/`. A voice/screen board
+   reuses `firmware/voice/` and `firmware/ui/` and implements only `voice/board_audio.h` (mic and
+   speaker at the pipeline's rates), `voice/board_input.h` (tap, BOOT) and `ui/board_display.h`
+   (panel, framebuffer, sleep); shared code never includes a board's own headers.
 2. Add a `COMMA_BOARD` choice in `firmware/main/Kconfig.projbuild`, its board ID and client source,
    and an overlay `devices/sdkconfig.<board>`. Select voice, display, pairing method, GPIOs and limits
    from actual hardware. Implement `board.h` and call the shared `app_poll()` for BOOT/startup logic.

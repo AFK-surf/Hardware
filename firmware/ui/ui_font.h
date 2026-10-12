@@ -19,7 +19,7 @@ typedef struct {
     int8_t ink_top, ink_bottom;   // rows of the line box that any glyph touches
 } ui_font_t;
 
-// Inter 14 px, weight 500.
+// Inter weight 500: 14 px on the 160 px screen, scaled with it.
 extern const ui_font_t ui_font_small;
-// Inter 36 px, weight 600.
+// Inter weight 600: 36 px on the 160 px screen, scaled with it.
 extern const ui_font_t ui_font_large;

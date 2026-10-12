@@ -1,11 +1,20 @@
+# Set by tools/board.sh (firmware/CMakeLists.txt); empty for a plain idf.py build.
+idf_build_get_property(comma_board COMMA_BOARD)
+if(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32 AND NOT comma_board STREQUAL "waveshare-amoled-1-32")
+    message(FATAL_ERROR "Build the Waveshare AMOLED with tools/board.sh waveshare-amoled-1-32: it adds the board's drivers")
+endif()
 if(CONFIG_COMMA_BOARD_ESP32_DEVKIT)
     set(board_dir "../boards/esp32_devkit")
+elseif(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32)
+    set(board_dir "../boards/waveshare_amoled_1_32")
 else()
     set(board_dir "../boards/t_circle_s3")
 endif()
+# A board folder holds only that board's pins and drivers; all of its sources are built.
+file(GLOB board_srcs "${CMAKE_CURRENT_LIST_DIR}/${board_dir}/*.c")
 set(srcs "main.c" "wifi.c" "connector.c" "connector_json.c" "net_watchdog.c" "lan_http.c"
          "lan_discover_core.c" "lan_dest.c" "lan_udp.c"
-         "device_config.c" "provisioning.c" "${board_dir}/board.c")
+         "device_config.c" "provisioning.c" ${board_srcs})
 if(CONFIG_COMMA_LAN_DISCOVER)
     list(APPEND srcs "lan_discover.c")
 endif()
@@ -15,23 +24,26 @@ endif()
 set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
          tcp_transport http_parser lwip)
-# Requirements are collected before Kconfig is available. The supported S3
-# board has voice/display; the classic ESP32 target has neither dependency.
-if(IDF_TARGET STREQUAL "esp32s3")
+# Requirements are collected before Kconfig is available, so they follow the target and the board
+# name from tools/board.sh. The T-Circle has voice and display; the Waveshare AMOLED display only (no
+# speaker); the classic ESP32 target neither.
+if(comma_board STREQUAL "waveshare-amoled-1-32")
+    list(APPEND reqs esp_driver_i2c esp_lcd esp_driver_spi waveshare_deps)
+elseif(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_lcd_gc9d01
          esp_driver_spi esp_driver_tsens)
 endif()
+# Shared voice (firmware/voice/) and screen (firmware/ui/) code, for boards that have them.
 if(CONFIG_COMMA_HAS_VOICE)
-    list(APPEND srcs "${board_dir}/board_audio.c" "${board_dir}/playback.c"
-         "${board_dir}/cue_voice.c" "${board_dir}/voice_clean.c")
-    set(ldfragments "${board_dir}/voice_clean.lf")
+    list(APPEND srcs "../voice/playback.c" "../voice/cue_voice.c" "../voice/voice_clean.c" "../voice/call.c"
+         "../voice/resample.c")
+    set(ldfragments "../voice/voice_clean.lf")
 endif()
 if(CONFIG_COMMA_HAS_DISPLAY)
-    list(APPEND srcs "${board_dir}/display.c" "${board_dir}/board_touch.c"
-         "${board_dir}/ui_card.c" "${board_dir}/ui_font.c")
-    set(assets "${board_dir}/cue_logo.bin")
+    list(APPEND srcs "../ui/display.c" "../ui/ui_card.c" "../ui/${CONFIG_COMMA_DISPLAY_SIZE}/ui_font.c")
+    set(assets "../ui/${CONFIG_COMMA_DISPLAY_SIZE}/cue_logo.bin")
 endif()
-idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}"
+idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../voice" "../ui"
                        PRIV_REQUIRES ${reqs} EMBED_FILES ${assets} LDFRAGMENTS ${ldfragments})
 
 # Dev only: `idf.py -B build-selftest -DCOMMA_LAN_DISCOVER_SELFTEST_S=20 build` runs lan_discover every
