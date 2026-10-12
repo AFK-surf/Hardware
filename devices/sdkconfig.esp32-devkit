@@ -74,5 +74,5 @@ CONFIG_COMMA_LAN_TUNNELS=0
 CONFIG_COMMA_LAN_TUNNEL_WINDOW=32768
 CONFIG_COMMA_LAN_TUNNEL_MAX_FRAME=4096
 CONFIG_COMMA_CONNECTOR_WS_BUFFER_SIZE=2048
-# Keep heap/stack measurements enabled for the follow-up hardware runs.
-CONFIG_COMMA_HEAP_DIAGNOSTICS=y
+# Hardware measurements are complete; see the e6ced9c retest in the H1 report.
+CONFIG_COMMA_HEAP_DIAGNOSTICS=n

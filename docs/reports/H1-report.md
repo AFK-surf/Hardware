@@ -2,10 +2,12 @@
 
 Date: 2026-10-11–12. Base: `0fe245a`. Worktree: `Hardware-h1`, branch `codex/multi-board`.
 
-**Latest status:** supplied DevKit local-WSS runs passed 8 KiB text and 1 MiB chunks 3/3. TCP tunnels
-are disabled; the new 12 KiB discovery JSON cap awaits hardware retesting. See
-[the hardware follow-up](#devkit-hardware-follow-up--2026-10-12) for the current profile, evidence
-source and remaining checks. Earlier sections below record the initial implementation and tests.
+**Latest status:** Claude's physical DevKit retest of `e6ced9c` passed discovery with the 12 KiB cap,
+8 KiB HTTP text and all three chunk-transfer workloads 3/3 over local WSS, with no panics, reboots
+or reconnects. Heap recovered each round and stayed flat through eight minutes of idle; diagnostics
+are now disabled. TCP tunnels remain disabled. See
+[the completed hardware retest](#hardware-retest-of-e6ced9c--2026-10-12) and the remaining manual
+checks at the end. Earlier sections record the initial implementation and tests.
 
 **Initial acceptance attempt:** implementation and build/host checks were ready, but hardware
 acceptance was incomplete.
@@ -13,10 +15,11 @@ The DevKit was flashed, its GPIO2 LED was confirmed by the user, and BOOT timing
 exercised through the USB UART control lines. BLE system pairing could not be completed while the
 Mac was locked. The Wi-Fi credentials from the specified gitignored file were also tried through
 a temporary NVS image; the ESP32 repeatedly reported reason 201 (`WIFI_REASON_NO_AP_FOUND`). No TLS
-session or LAN workload reached the device, so this report does not claim they fit.
+session or LAN workload reached the device during that initial attempt.
 
 No merge, push, backend/app modification, real backend token use or T-Circle flash was performed.
-The DevKit is left on the normal build, without the local URL/CA override, unprovisioned after reset.
+At the end of that initial attempt, the DevKit was left on the normal build, without the local
+URL/CA override, unprovisioned after reset. Claude subsequently ran the local-WSS tests below.
 
 ## Commits and layout
 
@@ -212,7 +215,9 @@ provisioning 4,876 bytes. These are IDF high-water marks, not transfer-load stac
 worker, WebSocket/TLS and watchdog workload watermarks still need the online run. No reboot or panic
 was observed other than the requested reset/flash operations.
 
-### Decisions still pending measurements
+### Initial decisions before hardware measurements
+
+These initial decisions were superseded by the hardware follow-up and completed retest below.
 
 - **Setup order unchanged:** Connector starts after credentials are saved while BLE is still up.
   There is no measured TLS failure to justify early BLE shutdown; no `connector_failed` notification
@@ -225,7 +230,7 @@ was observed other than the requested reset/flash operations.
   would reduce incoming base64, JSON-copy and decoded-block pressure, but would require a separate
   backend change and new measurements; it cannot be assumed today.
 
-## Current compiled limits and metadata
+## Initial compiled limits and metadata
 
 This is the configured output, **not an on-wire metadata capture** (no network session was reached).
 T-Circle values are the original defaults.
@@ -340,20 +345,11 @@ deleted; the reset erased them from the board. Final flash excludes the local UR
 strings are absent from the application binary. Its fresh setup radio-only heap is 172,808 free /
 110,592 largest / 172,336 minimum, then 176,424 free after main exits.
 
-## Remaining acceptance work
+## Initial acceptance gaps
 
-1. Unlock the Mac for system BLE pairing. Make the 2.4 GHz AP from the specified secrets file
-   reachable, or update that gitignored file with an available network. Do not print credentials.
-2. Build the local WSS test image, provision through `firmware/tools/ble_provision.py`, and record
-   secure pairing, `saved`, the three-second solid LED and TLS overlap before deciding setup order.
-3. Run the fake Connector with `--make-files/--serve`, `--only 1m.bin`, `--text-limit`, `--discover`,
-   `--tunnel`, `--loop 3`, a pause for idle sampling, and `--tls-cert/--tls-key`. Record on-wire metadata,
-   each verdict, all eight heap points and recovery. Only then choose final discovery/tunnel settings.
-4. Verify physical BOOT and unplug/replug; keep T-Circle hardware testing optional and separately
-   authorized. Repeat normal DevKit build after any tuning and clear cached local URL/CA overrides.
-
-The implementation and evidence are committed for review, but H1's full hardware acceptance remains
-open until these checks are completed.
+The initial attempt was blocked by BLE pairing and AP availability. Claude's subsequent local-WSS
+runs supplied the workload and memory evidence, including the completed `e6ced9c` retest below.
+The remaining physical checks are listed at the end of this report.
 
 ## H1 review follow-up — 2026-10-12
 
@@ -418,15 +414,15 @@ Python used the existing tools virtual environment with `bleak`. Existing socket
 messages in `test_fake_connector.py` and the existing C library deprecation warnings remain;
 neither caused a test failure. Both firmware builds used ESP-IDF 6.0.2.
 
-`CONFIG_COMMA_HEAP_DIAGNOSTICS=y` remains enabled for DevKit; T-Circle's existing setting is
-unchanged. No board overlay, shared sdkconfig default, Kconfig option, or tunnel limit changed.
-Generated configs still have `CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576` and
-`CONFIG_LWIP_TCP_WND_DEFAULT=65535` for both boards, with application tunnel windows of 32,768 bytes
-(DevKit) and 131,072 bytes (T-Circle).
+At this review commit, DevKit still had `CONFIG_COMMA_HEAP_DIAGNOSTICS=y`,
+`CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576` and `CONFIG_LWIP_TCP_WND_DEFAULT=65535`. In `e6ced9c`, both
+DevKit TCP values were changed to **16,384** and tunnels were disabled. Diagnostics were retained
+for that hardware retest and are now disabled after its completion. T-Circle's existing settings
+remain unchanged, including its 131,072-byte application tunnel window.
 
 This review follow-up performed host tests and builds only; it did not flash either board or add
-hardware heap measurements. The hardware acceptance items above remain open, and heap diagnostics
-and TCP window tuning still await those measurements. No merge or push was performed.
+hardware heap measurements. The subsequent hardware sections record the measurements and resulting
+configuration decisions. No merge or push was performed.
 
 ## DevKit hardware follow-up — 2026-10-12
 
@@ -434,10 +430,12 @@ and TCP window tuning still await those measurements. No merge or push was perfo
 
 The user supplied these results from Claude's physical DevKit tests on network `HUAWEI-F219BS`,
 using `e86e837` and a local WSS Connector. The successful measurements below were taken after the
-local TLS, TCP and feature/HTTP/RX changes requested in items 1–3. They do not establish a hardware
-pass for the later `15732e8` error-handling fixes or the new discovery JSON budget in this commit.
-No raw serial logs or exact byte counts accompanied this update; approximate KB values below are
-preserved as reported, rather than converted into invented byte-accurate heap readings.
+local TLS, TCP and feature/HTTP/RX changes requested in items 1–3. Those initial results were then
+followed by Claude's completed `e6ced9c` retest, which includes `15732e8` and the new discovery cap.
+Serial diagnostics from that retest give byte counts: boot free 253,020; idle free ~130,400 with a
+57,344-byte largest block; workload sampled free minimum 58,640, smallest largest block 36,864,
+and minimum-ever free 57,680. The full retest and recovery results are recorded below. The table
+here preserves the approximate readings from the earlier `e86e837`-based run.
 
 | State/workload after those local changes | Reported free RAM | Largest block | Result |
 | --- | --- | --- | --- |
@@ -447,9 +445,9 @@ preserved as reported, rather than converted into invented byte-accurate heap re
 | 1 MiB HTTP chunk transfer | ~81 KB minimum | Not supplied | 3/3 passed |
 | HTTP text, 8 KiB | Not supplied | Not supplied | 3/3 passed |
 
-These are reported workload minima, not a new continuous `heap_caps_get_minimum_free_size` series.
-Stack watermarks and heap recovery readings were not included. The earlier AP-unavailable result
-describes the initial run only; this later local-WSS run reached the network and exercised transfers.
+These earlier approximate workload minima are separate from the exact diagnostic counters and
+heap recovery observations in the completed `e6ced9c` retest below. The AP-unavailable result
+describes the initial attempt only; the later local-WSS runs reached the network and exercised transfers.
 
 Failures that determined the new profile:
 
@@ -479,7 +477,7 @@ Failures that determined the new profile:
 | `CONFIG_COMMA_CONNECTOR_RX_MAX` | 16,384 |
 | `CONFIG_COMMA_LAN_HTTP_MAX_BYTES` | 8,192 |
 | `CONFIG_COMMA_LAN_DISCOVER_MAX_JSON` | 12,288 |
-| `CONFIG_COMMA_HEAP_DIAGNOSTICS` | `y`, retained for Claude's retest |
+| `CONFIG_COMMA_HEAP_DIAGNOSTICS` | `n` after the completed retest (`y` during measurement) |
 
 HTTP chunks remain 4 KiB, the discovery string arena remains 16 KiB, and BLE/TLS startup order is
 unchanged. Overlay comments record the hardware reasons. The shared defaults and T-Circle overlay
@@ -502,10 +500,10 @@ DevKit budget, valid JSON and whole-host truncation, and true allocator failure 
 recovery. The test allocator rejects any result allocation over the configured cap plus NUL;
 `--devkit` reads the new setting directly from the board overlay.
 
-The 12 KiB discovery cap still needs three physical-board runs alongside the full current profile.
-Keep heap diagnostics enabled for those runs and record largest blocks, recovery and stack
-watermarks. This follow-up performs builds and host validation only; it does not flash the board
-being used for Claude's retest.
+Claude completed the three physical-board runs of the 12 KiB discovery cap on `e6ced9c`: all passed.
+The diagnostic readings and heap recovery below complete those measurements, so diagnostics are
+now disabled. The original configuration follow-up performed builds and host validation only;
+the physical retest was performed separately by Claude.
 
 ### Build and host validation of this follow-up
 
@@ -527,7 +525,8 @@ socket `ResourceWarning` messages remain; neither caused a failure. Both firmwar
 without compiler warnings/errors.
 
 The DevKit generated sdkconfig was backed up and regenerated from defaults so the changed overlay
-actually took effect. Its generated values match every row of the profile table; dynamic TLS
+actually took effect. Its generated values matched the `e6ced9c` profile, with diagnostics enabled
+at that time; the current profile table reflects their subsequent disablement. Dynamic TLS
 config/CA-release suboptions are absent because dynamic buffers are off. The compile database
 contains no `lan_tunnel.c`, and `lan_tcp_dial` is absent from the application image. Local test URL
 and CA overrides remain outside this normal build.
@@ -543,3 +542,61 @@ are `libmain.a` 55,303 → 47,314 bytes, `libmbedtls.a` 27,775 → 23,871, and `
 110,516, consistent with removing tunnels/renegotiation and changing the buffer profile. These are
 build-size observations, not new runtime heap measurements. The work is a separate commit on
 `codex/multi-board`; no merge or push was performed.
+
+## Hardware retest of e6ced9c — 2026-10-12
+
+Claude retested `e6ced9c` on the physical ESP32 DevKit using local WSS on network `HUAWEI-F219BS`.
+The user supplied these results from `CONFIG_COMMA_HEAP_DIAGNOSTICS` serial output. Heap figures
+are bytes of internal RAM. Diagnostics were enabled throughout the measured run.
+
+Reported command (the certificate/key paths are omitted):
+
+```text
+fake_connector --text-limit --discover --only 1m.bin --only 10k.bin --only allbytes.bin --loop 3 --pause 20 --allow-ops --tls-cert/--tls-key
+```
+
+| Workload | Result |
+| --- | --- |
+| Discovery with the 12 KiB cap | 3/3 PASS; 7–10 hosts; results 5–10 KB; no OOM |
+| 8 KiB HTTP text | 3/3 PASS |
+| 10 KB chunk transfer (`10k.bin`) | 3/3 PASS |
+| 1 MiB chunk transfer (`1m.bin`) | 3/3 PASS; about 7 s per transfer (~140 KB/s) |
+| 256 KB chunk transfer, all byte values (`allbytes.bin`) | 3/3 PASS |
+
+There were **0 panics and 0 reboots**. One WebSocket connection lasted the whole run with **0
+reconnects**. On-wire metadata advertised exactly `http_request`, `udp_request` and `lan_discover`;
+`lan_tcp_dial` was absent.
+
+| Internal RAM measurement | Bytes |
+| --- | ---: |
+| Boot free | 253,020 |
+| Connector idle free | ~130,400 |
+| Connector idle largest block | 57,344 |
+| Lowest sampled free during the workload | 58,640 |
+| Smallest sampled largest block | 36,864 |
+| Minimum-ever free | 57,680 |
+
+Every round returned to approximately 130 KB free. Free memory then stayed flat at 130 KB for
+eight minutes of idle, with no leak observed across the three rounds and idle period. The sampled
+free minimum and the minimum-ever counter are reported separately above.
+
+The measurements are complete. `CONFIG_COMMA_HEAP_DIAGNOSTICS` is now set to `n` for DevKit; all
+other firmware settings remain unchanged.
+
+### Validation after disabling diagnostics
+
+Both boards built successfully with ESP-IDF 6.0.2. DevKit's sdkconfig was regenerated from defaults;
+comparison with its saved config shows exactly one setting change: `CONFIG_COMMA_HEAP_DIAGNOSTICS`
+from `y` to `n`. T-Circle's generated sdkconfig is **byte-for-byte unchanged**, and its linked
+archive sizes are unchanged.
+
+The DevKit image is `0x1328a0` bytes, 1,248 bytes smaller than the diagnostic build; `libmain.a`
+decreases from 47,314 to 46,469 bytes. T-Circle remains `0x1eeee0` bytes. All C host suites passed,
+including the default and DevKit discovery/HTTP/UDP profiles, and all 21 Python tests passed.
+`git diff --check` passed. Only this report and `devices/sdkconfig.esp32-devkit` were changed.
+Neither board was flashed; no merge or push was performed.
+
+## Still open
+
+- Physical BOOT button test and unplug/replug test: the user will perform these by hand.
+- T-Circle hardware smoke test: Claude will perform it once the user authorizes it.
