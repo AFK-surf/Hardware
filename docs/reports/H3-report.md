@@ -487,3 +487,28 @@ Then the logo, centred and round, nothing lit before it. No `panel: stripe trans
 
 Unverified until then: CST820 register 0xFE, ES8311 gain/volume, CO5300 SLPIN/SLPOUT timing, the
 panel's real frame time, and every runtime memory figure.
+
+## 10. Hardware results — 2026-10-12/13 (Claude)
+
+**T-Circle** (built from `2269573`, normal build, staging): boot logo, a 35 s call by tap
+(`mic_dropped` 0, `nrtx_max` 0, `send_max_ms` avg/max 77/210, cpu0+cpu1 avg 57+20 %, against 38+45 %
+in H2: the same total, scheduled differently), and BOOT 3–10 s pairing mode. The user heard no
+difference from before H3. Accepted.
+
+**Waveshare, with voice** (`2269573`): the CO5300 panel and CST820 touch came up, and the first frame
+was drawn in 45 ms. The passkey on screen matched the phone, setup from the app worked, and the board
+went online on staging. BOOT short press (108–119 ms) and tap both dialed and hung up. Touch showed no
+ghost taps. The board has a mic but **no speaker** (only a speaker header). The mic was at ~1.9× real
+time (see "Hardware findings for H4" above). The user decided to ship this board without voice.
+
+**Waveshare, without voice** (`ef89713`, full flash): boot, saved credentials kept, back online on
+staging (internal heap 167 KB free, PSRAM 7.7 MB). A tap and a short BOOT press only woke the screen.
+
+**Not tested on the Waveshare:** `lan_discover` and `http_request` through it. It was read-only, the
+Android app could not open its settings (client bug, fixed in Cue #3536), and the board's USB lead then
+broke. That code is shared and passed on the T-Circle and the DevKit. The USB serial link dropped three
+times during tests while the board kept running; that looked like the cable, not firmware.
+
+**Flash backup** of the original Waveshare firmware: 8 MB, read in ROM mode (`esptool --no-stub
+read-flash`; the stub read fails on these USB-Serial/JTAG boards on macOS) and verified against the
+flash. It is kept outside the repository.
