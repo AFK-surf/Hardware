@@ -9,8 +9,10 @@
 
 #define CARD_LINES_MAX 10
 #define CARD_LINE_CHARS 64
-#define CARD_GAP 8
-#define CARD_MARGIN 14
+// Spacing scales with the screen; at 160 px it is 8, 14 and 48.
+#define CARD_GAP (UI_CARD_SIZE * 8 / 160)
+#define CARD_MARGIN (UI_CARD_SIZE * 14 / 160)
+#define CARD_MIN_WIDTH (UI_CARD_SIZE * 48 / 160)
 #define LEVEL_LABEL 8
 #define LEVEL_TEXT 15
 
@@ -51,7 +53,7 @@ static int chord_width(int top, int bottom)
     const float r = UI_CARD_SIZE / 2.0f;
     const float d = fmaxf(fabsf(top - r), fabsf(bottom - r));
     const int w = d >= r ? 0 : (int)(2.0f * sqrtf(r * r - d * d)) - CARD_MARGIN;
-    return w < 48 ? 48 : w;
+    return w < CARD_MIN_WIDTH ? CARD_MIN_WIDTH : w;
 }
 
 // Copy text with non-ASCII code points shown as '?', so a UTF-8 SSID keeps its length.

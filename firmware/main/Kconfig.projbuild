@@ -24,6 +24,18 @@ config COMMA_HAS_VOICE
 config COMMA_HAS_DISPLAY
     bool "Display"
     default y if COMMA_BOARD_T_CIRCLE_S3
+config COMMA_DISPLAY_SIZE
+    int "Round screen size in pixels"
+    depends on COMMA_HAS_DISPLAY
+    default 160
+    help
+        Cards and the logo are drawn for this size; ui/<size>/ holds its fonts and logo.
+config COMMA_BOOT_PRESS_CALLS
+    bool "A short BOOT press starts or ends a call, like a tap"
+    depends on COMMA_HAS_VOICE
+    default n
+    help
+        A press released before the 3 s pairing hold is the call key. Holds keep their meaning.
 config COMMA_PAIRING_PASSKEY
     bool "Pair with display passkey and MITM protection"
     default y if COMMA_BOARD_T_CIRCLE_S3

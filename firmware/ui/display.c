@@ -1,72 +1,37 @@
 #include "memory_caps.h"
-// GC9D01 160x160 round panel. Idle screen is the Cue logo, still; calls and setup show text cards.
-// The screen redraws only when what it shows changes, and sleeps (backlight off, panel in SLPIN)
-// after DISPLAY_SLEEP_US without activity. Pins match the T-Circle-S3 panel used by the previous
-// logo firmware.
+// Round screen shared by the display boards. Idle screen is the Cue logo, still; calls and setup
+// show text cards. The screen redraws only when what it shows changes, and sleeps (light off, panel
+// in SLPIN) after DISPLAY_SLEEP_US without activity. The panel itself is the board's
+// (board_display.h).
 
 #include "display.h"
 
 #include <stdatomic.h>
 #include <string.h>
 
+#include "board.h"
+#include "board_display.h"
 #include "cue_logo.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "esp_heap_caps.h"
-#include "esp_lcd_gc9d01.h"
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "ui_card.h"
 
-#define LCD_HOST SPI2_HOST
-#define LCD_W 160
-#define LCD_H 160
-#define LCD_MOSI GPIO_NUM_17
-#define LCD_SCLK GPIO_NUM_15
-#define LCD_DC GPIO_NUM_16
-#define LCD_CS GPIO_NUM_13
-#define LCD_BL GPIO_NUM_18
-// The backlight is on when GPIO18 is low.
-#define BL_ON 0
-#define BL_OFF 1
-#define LCD_CMD_SLPIN 0x10
-#define LCD_CMD_SLPOUT 0x11
-
 #define DISPLAY_SLEEP_US (15LL * 1000000)
 #define POLL_MS 20
+// A frame that did not reach the panel is drawn again after this.
+#define RETRY_MS 500
 
-_Static_assert(CUE_LOGO_SIZE == LCD_W && CUE_LOGO_SIZE == LCD_H, "logo size must match panel");
+_Static_assert(CUE_LOGO_SIZE == UI_CARD_SIZE, "logo size must match panel");
 
 extern const uint8_t logo_start[] asm("_binary_cue_logo_bin_start");
 extern const uint8_t logo_end[] asm("_binary_cue_logo_bin_end");
 
 static const char *TAG = "display";
 
-#define FB_BYTES (LCD_W * LCD_H * sizeof(uint16_t))
-// One 50 KB framebuffer in PSRAM; the SPI DMA reads it directly (psram_dma_direct). 64-byte
-// alignment covers the PSRAM DMA and cache-line rules, so the driver never copies it into an
-// internal bounce buffer. Redraws are rare, so drawing just waits for the previous transfer.
-static uint16_t *s_fb;
-static SemaphoreHandle_t s_fb_free;
 static uint16_t s_lut[16];
-static esp_lcd_panel_io_handle_t s_io = NULL;
-static esp_lcd_panel_handle_t s_panel = NULL;
 static bool s_ready = false;
-
-static bool on_color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *edata, void *ctx)
-{
-    (void)io;
-    (void)edata;
-    (void)ctx;
-    BaseType_t woken = pdFALSE;
-    xSemaphoreGiveFromISR(s_fb_free, &woken);
-    return woken == pdTRUE;
-}
 
 static void build_lut(void)
 {
@@ -95,38 +60,10 @@ esp_err_t display_init(void)
         return ESP_ERR_INVALID_SIZE;
     }
     build_lut();
-    s_fb = heap_caps_aligned_calloc(64, 1, FB_BYTES, COMMA_BUFFER_CAPS);
-    s_fb_free = xSemaphoreCreateBinary();
-    if (!s_fb || !s_fb_free) {
-        return ESP_ERR_NO_MEM;
+    const esp_err_t err = board_display_init();
+    if (err != ESP_OK) {
+        return err;
     }
-    xSemaphoreGive(s_fb_free);
-
-    gpio_config_t bl = {
-        .pin_bit_mask = 1ULL << LCD_BL,
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    ESP_ERROR_CHECK(gpio_config(&bl));
-    gpio_set_level(LCD_BL, BL_OFF);
-
-    const spi_bus_config_t bus = GC9D01_PANEL_BUS_SPI_CONFIG(LCD_SCLK, LCD_MOSI, FB_BYTES);
-    ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO));
-
-    esp_lcd_panel_io_spi_config_t io_cfg = GC9D01_PANEL_IO_SPI_CONFIG(LCD_CS, LCD_DC, on_color_done, NULL);
-    io_cfg.flags.psram_dma_direct = 1;
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &s_io));
-
-    const esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = -1,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
-        .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
-        .bits_per_pixel = 16,
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(s_io, &panel_cfg, &s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, false));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
     s_ready = true;
     return ESP_OK;
 }
@@ -193,34 +130,36 @@ bool display_asleep(void)
     return s_asleep;
 }
 
-static void draw(bool card_on, const ui_card_t *card)
+static bool draw(bool card_on, const ui_card_t *card)
 {
-    xSemaphoreTake(s_fb_free, portMAX_DELAY);
-    if (card_on) {
-        ui_card_render(card, s_fb, s_lut);
-    } else {
-        expand_logo(s_fb);
+    uint16_t *fb = board_display_frame();
+    if (!fb) {
+        ESP_LOGE(TAG, "framebuffer still busy, frame skipped");
+        return false;
     }
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb));
+    if (card_on) {
+        ui_card_render(card, fb, s_lut);
+    } else {
+        expand_logo(fb);
+    }
+    const esp_err_t err = board_display_flush();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "frame not sent: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
 }
 
 static void panel_sleep(void)
 {
-    gpio_set_level(LCD_BL, BL_OFF);
-    // Let a transfer in flight finish before the panel stops listening for pixels.
-    xSemaphoreTake(s_fb_free, portMAX_DELAY);
-    xSemaphoreGive(s_fb_free);
-    esp_lcd_panel_disp_on_off(s_panel, false);
-    esp_lcd_panel_io_tx_param(s_io, LCD_CMD_SLPIN, NULL, 0);
+    board_display_sleep();
     s_asleep = true;
     ESP_LOGI(TAG, "screen off");
 }
 
-// SLPOUT needs 120 ms before the next command. The caller then draws and turns the panel on.
 static void panel_wake(void)
 {
-    esp_lcd_panel_io_tx_param(s_io, LCD_CMD_SLPOUT, NULL, 0);
-    vTaskDelay(pdMS_TO_TICKS(120));
+    board_display_wake();
     s_asleep = false;
     ESP_LOGI(TAG, "screen on");
 }
@@ -229,11 +168,13 @@ void display_run(void)
 {
     s_activity_us = esp_timer_get_time();
     bool lit = false;
+    bool on_pending = false;
     for (;;) {
         const bool wake = atomic_exchange(&s_wake_req, false);
         const bool woke = wake && s_asleep;
         if (woke) {
             panel_wake();
+            on_pending = true;
         }
         if (woke || s_dirty || !lit) {
             ui_card_t card;
@@ -246,12 +187,18 @@ void display_run(void)
             if (!s_asleep) {
                 // Panel RAM survives SLPIN, but a wake redraws anyway: cheap, and it can't show a
                 // stale frame. A change while asleep waits for the wake (s_dirty stays set).
-                draw(card_on, &card);
-                if (woke) {
-                    esp_lcd_panel_disp_on_off(s_panel, true);
+                if (!draw(card_on, &card)) {
+                    // Keep it pending and leave the light as it is: a lost frame never stalls the loop.
+                    s_dirty = true;
+                    vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
+                    continue;
+                }
+                if (on_pending) {
+                    board_display_on();
+                    on_pending = false;
                 }
                 if (!lit || woke) {
-                    gpio_set_level(LCD_BL, BL_ON);
+                    board_display_light(true);
                     lit = true;
                 }
             } else {
@@ -264,3 +211,29 @@ void display_run(void)
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
     }
 }
+
+// ---- board.h for display boards ---------------------------------------------------------------
+
+static void display_task(void *arg)
+{
+    (void)arg;
+    display_run();
+}
+
+void board_start_feedback(void)
+{
+    // The display task only draws into the framebuffer and hands it to the panel, so its stack can
+    // live in PSRAM. That leaves 8 KB more internal RAM for the Connector, which has to start while
+    // BLE still holds its controller memory.
+    if (xTaskCreateWithCaps(display_task, "display", 8192, NULL, 3, NULL, COMMA_BUFFER_CAPS) != pdPASS) {
+        ESP_LOGE("main", "display task create failed");
+    }
+}
+
+void board_show_card(const char *label, const char *big, const char *body)
+{
+    display_show_card(label, big, body);
+}
+void board_show_idle(void) { display_show_logo(); }
+void board_wake(void) { display_wake(); }
+void board_pairing_state(board_pairing_state_t state) { (void)state; }

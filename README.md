@@ -5,7 +5,9 @@ Comma hardware firmware: one ESP-IDF project, shared gateway code, and per-board
 | Folder | Purpose |
 | --- | --- |
 | `firmware/main/` | Shared Connector, LAN methods, Wi-Fi, BLE provisioning and BOOT controls |
-| `firmware/boards/t_circle_s3/` | T-Circle display, touch, audio and voice |
+| `firmware/voice/` | Shared voice call: Cue voice session, playback, noise/VAD, call controller |
+| `firmware/ui/` | Shared round-screen cards, fonts and logo, drawn at the board's screen size |
+| `firmware/boards/t_circle_s3/` | T-Circle pins and drivers: GC9D01 panel, CST816D touch, PDM mic, MAX98357A |
 | `firmware/boards/esp32_devkit/` | DevKit GPIO0 BOOT and GPIO2 status LED |
 | `devices/` | Board configurations and [porting instructions](devices/README.md) |
 | `tools/board.sh` | Build and flash one board with its own generated config and build directory |
@@ -151,7 +153,9 @@ Wi-Fi, BLE, audio, or the lwIP receive-window adjustment.
 ## Project map and current limits
 
 - `firmware/main/`: shared gateway, setup, controls, Kconfig and memory policy.
-- `firmware/boards/`: board drivers and feedback; T-Circle voice stays here.
+- `firmware/voice/` and `firmware/ui/`: voice call and screen code shared by the voice boards. A board
+  implements `voice/board_audio.h`, `voice/board_input.h` and `ui/board_display.h`.
+- `firmware/boards/`: board pins and drivers only.
 - `devices/`: per-board sdkconfig overlays; [add-a-board guide](devices/AGENTS.md).
 - `firmware/cmake/idf_patches.cmake`: shared NimBLE timeout patch and ARP table configuration.
 - `firmware/components/`: checked-in LCD driver.

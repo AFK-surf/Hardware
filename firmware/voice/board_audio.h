@@ -20,6 +20,8 @@ _Static_assert(AUDIO_FRAME_SAMPLES * (int)sizeof(int16_t) == 960, "one uplink fr
 #endif
 #define MIC_FRAME_SAMPLES (MIC_SAMPLE_RATE_HZ * AUDIO_FRAME_MS / 1000)
 
+// What each voice board implements (boards/<board>/). The rates are the voice pipeline's, not the
+// hardware's: a board whose codec runs at another rate resamples in its own layer.
 esp_err_t board_audio_init(void);
 esp_err_t board_audio_set_speaker_enabled(bool enabled);
 esp_err_t board_audio_set_recording(bool enabled);

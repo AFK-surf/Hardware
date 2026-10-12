@@ -3,9 +3,11 @@ if(CONFIG_COMMA_BOARD_ESP32_DEVKIT)
 else()
     set(board_dir "../boards/t_circle_s3")
 endif()
+# A board folder holds only that board's pins and drivers; all of its sources are built.
+file(GLOB board_srcs "${CMAKE_CURRENT_LIST_DIR}/${board_dir}/*.c")
 set(srcs "main.c" "wifi.c" "connector.c" "connector_json.c" "net_watchdog.c" "lan_http.c"
          "lan_discover_core.c" "lan_dest.c" "lan_udp.c"
-         "device_config.c" "provisioning.c" "${board_dir}/board.c")
+         "device_config.c" "provisioning.c" ${board_srcs})
 if(CONFIG_COMMA_LAN_DISCOVER)
     list(APPEND srcs "lan_discover.c")
 endif()
@@ -21,17 +23,16 @@ if(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_lcd_gc9d01
          esp_driver_spi esp_driver_tsens)
 endif()
+# Shared voice (firmware/voice/) and screen (firmware/ui/) code, for boards that have them.
 if(CONFIG_COMMA_HAS_VOICE)
-    list(APPEND srcs "${board_dir}/board_audio.c" "${board_dir}/playback.c"
-         "${board_dir}/cue_voice.c" "${board_dir}/voice_clean.c")
-    set(ldfragments "${board_dir}/voice_clean.lf")
+    list(APPEND srcs "../voice/playback.c" "../voice/cue_voice.c" "../voice/voice_clean.c" "../voice/call.c")
+    set(ldfragments "../voice/voice_clean.lf")
 endif()
 if(CONFIG_COMMA_HAS_DISPLAY)
-    list(APPEND srcs "${board_dir}/display.c" "${board_dir}/board_touch.c"
-         "${board_dir}/ui_card.c" "${board_dir}/ui_font.c")
-    set(assets "${board_dir}/cue_logo.bin")
+    list(APPEND srcs "../ui/display.c" "../ui/ui_card.c" "../ui/${CONFIG_COMMA_DISPLAY_SIZE}/ui_font.c")
+    set(assets "../ui/${CONFIG_COMMA_DISPLAY_SIZE}/cue_logo.bin")
 endif()
-idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}"
+idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../voice" "../ui"
                        PRIV_REQUIRES ${reqs} EMBED_FILES ${assets} LDFRAGMENTS ${ldfragments})
 
 # Dev only: `idf.py -B build-selftest -DCOMMA_LAN_DISCOVER_SELFTEST_S=20 build` runs lan_discover every
