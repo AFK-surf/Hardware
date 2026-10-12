@@ -24,7 +24,8 @@ and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB 
 | ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Board-tested: HTTP (8 KiB text, 1 MiB in chunks), UDP, discovery (12 KiB result cap), 3/3 each | **Unsupported: `lan_tcp_dial` disabled** | No | Secure Connections Just Works, no MITM |
 
 DevKit uses an 8 KiB text cap, 4 KiB HTTP chunks, 16 KiB incoming JSON frames, a 16 KiB discovery
-arena and a 12 KiB discovery JSON cap. On the board with local WSS, the Connector idles at about
+arena, 6 services / 6 SSDP entries per host and a 12 KiB discovery JSON cap. In H1, with BLE off
+and local WSS, the Connector idled at about
 130 KB free internal RAM (57 KB largest block) and never dropped below 57 KB during three rounds of
 discovery, 8 KiB text and 1 MiB chunk transfers, with no crash or reconnect. Physical BOOT pairing,
 factory reset and unplug/replug were also checked.
@@ -107,8 +108,10 @@ credentials, and set `COMMA_DEV_SECRETS` to `1`. That overrides BLE/NVS settings
 credentials in the firmware. `secrets.h` and build directories are ignored by Git. Ordinary builds
 and shared firmware should use BLE provisioning instead.
 
-H2 adds caller-supplied UDP discovery probes on both boards; build/host checks pass and hardware
-acceptance is pending. See the [H2 report](docs/reports/H2-report.md) for limits and the test plan.
+H2 adds caller-supplied UDP discovery probes on both boards. DevKit received an uncut 399-byte
+Gree reply; BLE-up discovery hit OOM with the old per-host caps. The DevKit 6/6 caps save 20 KiB,
+with build/host checks passing and BLE-up hardware retesting pending. See the
+[H2 report](docs/reports/H2-report.md) for measurements and remaining checks.
 
 ## Development tools and tests
 

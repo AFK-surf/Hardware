@@ -503,6 +503,68 @@ static void test_ssdp(void)
     ld_free(ctx);
 }
 
+static void test_per_host_caps(void)
+{
+    const int service_cap = CONFIG_COMMA_LAN_DISCOVER_MAX_SERVICES;
+    const int ssdp_cap = CONFIG_COMMA_LAN_DISCOVER_MAX_SSDP;
+    // Exactly full arrays (including duplicate announcements) are not truncated.
+    // One extra entry on the first host must not reduce the second host's allowance.
+    for (int overflow = 0; overflow <= 1; ++overflow) {
+        ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
+        for (int host = 30; host <= 31; ++host) {
+            char address[16];
+            snprintf(address, sizeof(address), "192.168.5.%d", host);
+            pkt_t p;
+            pkt_start(&p);
+            for (int entry = 0; entry < service_cap; ++entry) {
+                char inst[64];
+                snprintf(inst, sizeof(inst), "H%dS%d|_http|_tcp|local", host, entry);
+                rr_ptr(&p, "_http|_tcp|local", inst);
+            }
+            pkt_finish(&p);
+            ld_add_mdns(ctx, ip(address), p.b, p.n);
+            ld_add_mdns(ctx, ip(address), p.b, p.n);
+            if (host == 30 && overflow) {
+                pkt_start(&p);
+                rr_ptr(&p, "_http|_tcp|local", "extra|_http|_tcp|local");
+                pkt_finish(&p);
+                ld_add_mdns(ctx, ip(address), p.b, p.n);
+            }
+        }
+        cJSON *r = result(ctx, NULL);
+        CHECK(count(cJSON_GetObjectItem(r, "hosts")) == 2, "service cap is per host");
+        cJSON *host;
+        cJSON_ArrayForEach(host, cJSON_GetObjectItem(r, "hosts")) {
+            CHECK(count(cJSON_GetObjectItem(host, "services")) == service_cap,
+                  "each host retains %d services", service_cap);
+        }
+        CHECK(truncated(r) == (overflow != 0), "only excess services set truncated");
+        cJSON_Delete(r);
+        ld_free(ctx);
+
+        ctx = ld_create(ip(SELF), ip(MASK));
+        for (int h = 30; h <= 31; ++h) {
+            char address[16];
+            snprintf(address, sizeof(address), "192.168.5.%d", h);
+            for (int entry = 0; entry < ssdp_cap + (h == 30 ? overflow : 0); ++entry) {
+                char pkt[200];
+                int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: urn:x:%d\r\nLOCATION: http://a/\r\n\r\n", entry);
+                ld_add_ssdp(ctx, ip(address), pkt, (size_t)n, NULL);
+                ld_add_ssdp(ctx, ip(address), pkt, (size_t)n, NULL);
+            }
+        }
+        r = result(ctx, NULL);
+        CHECK(count(cJSON_GetObjectItem(r, "hosts")) == 2, "SSDP cap is per host");
+        cJSON_ArrayForEach(host, cJSON_GetObjectItem(r, "hosts")) {
+            CHECK(count(cJSON_GetObjectItem(host, "ssdp")) == ssdp_cap,
+                  "each host retains %d SSDP entries", ssdp_cap);
+        }
+        CHECK(truncated(r) == (overflow != 0), "only excess SSDP entries set truncated");
+        cJSON_Delete(r);
+        ld_free(ctx);
+    }
+}
+
 static void test_caps(void)
 {
     // 70 hosts by ARP -> 64.
@@ -522,7 +584,7 @@ static void test_caps(void)
     cJSON_Delete(r);
     ld_free(ctx);
 
-    // 20 services and 20 TXT keys on one host -> 16 each.
+    // 20 services and 20 TXT keys exercise the board service cap and shared TXT cap.
     ctx = ld_create(ip(SELF), ip(MASK));
     pkt_t p;
     pkt_start(&p);
@@ -537,7 +599,7 @@ static void test_caps(void)
     r = result(ctx, NULL);
     cJSON *h = host_in(r, "192.168.5.30");
     cJSON *svcs = h ? cJSON_GetObjectItem(h, "services") : NULL;
-    CHECK(count(svcs) == LD_MAX_SERVICES, "16 services, got %d", count(svcs));
+    CHECK(count(svcs) == LD_MAX_SERVICES, "%d services, got %d", LD_MAX_SERVICES, count(svcs));
     cJSON *s0 = NULL, *s;
     cJSON_ArrayForEach(s, svcs)
     {
@@ -550,7 +612,7 @@ static void test_caps(void)
     cJSON_Delete(r);
     ld_free(ctx);
 
-    // 17 SSDP STs on one host -> 16.
+    // 17 SSDP STs exceed both board caps.
     ctx = ld_create(ip(SELF), ip(MASK));
     for (int i = 0; i < 17; ++i) {
         char pkt[200];
@@ -558,7 +620,7 @@ static void test_caps(void)
         ld_add_ssdp(ctx, ip("192.168.5.1"), pkt, (size_t)n, NULL);
     }
     r = result(ctx, NULL);
-    CHECK(count(cJSON_GetObjectItem(host_in(r, "192.168.5.1"), "ssdp")) == LD_MAX_SSDP, "16 ssdp entries");
+    CHECK(count(cJSON_GetObjectItem(host_in(r, "192.168.5.1"), "ssdp")) == LD_MAX_SSDP, "%d ssdp entries", LD_MAX_SSDP);
     CHECK(truncated(r), "ssdp cap sets truncated");
     cJSON_Delete(r);
     ld_free(ctx);
@@ -620,10 +682,29 @@ static void test_json_budget(void)
     ld_sb_free(&b);
     free(text);
 
-    // Escaped quotes/backslashes can make one host exceed 12 KiB even with a 16 KiB arena.
+    // Escaped TXT and SSDP fields can make even a 6/6 host exceed 12 KiB.
     // Reject every allocation above the result budget: checking length only after serializing
     // that host would request a larger buffer and fail instead of producing truncated JSON.
     ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
+    char txt[1024];
+    char escaped[246];
+    memset(escaped, '"', sizeof(escaped) - 1);
+    escaped[sizeof(escaped) - 1] = 0;
+    snprintf(txt, sizeof(txt), "a=%s|b=%s|c=%s|d=%s", escaped, escaped, escaped, escaped);
+    for (int entry = 0; entry < 2; ++entry) {
+        pkt_t p;
+        char instance[64];
+        snprintf(instance, sizeof(instance), "large%d|_http|_tcp|local", entry);
+        pkt_start(&p);
+        rr_ptr(&p, "_http|_tcp|local", instance);
+        rr_txt(&p, instance, txt);
+        pkt_finish(&p);
+        ld_add_mdns(ctx, ip("192.168.5.30"), p.b, p.n);
+    }
+    // The runner resolves services when requesting reverse names, before later
+    // announcements can fill the arena. Preserve the large first host's TXT here.
+    uint32_t unnamed[LD_MAX_HOSTS];
+    CHECK(ld_hosts_without_name(ctx, unnamed, LD_MAX_HOSTS) == 1, "resolve the large first host");
     char value[LD_STR_MAX + 1];
     for (int i = 0; i < LD_STR_MAX; ++i) value[i] = i % 2 ? '\\' : '"';
     value[LD_STR_MAX] = 0;
@@ -644,7 +725,7 @@ static void test_json_budget(void)
     if (LD_MAX_JSON == 12288) {
         CHECK(count(hosts) == 0, "the oversized first host must be omitted whole");
     } else {
-        CHECK(count(hosts) > 0, "default budget should preserve a large host");
+        CHECK(count(hosts) > 0 && count(hosts) < 6, "retain whole hosts before the JSON budget");
         CHECK(count(cJSON_GetObjectItem(cJSON_GetArrayItem(hosts, 0), "ssdp")) == LD_MAX_SSDP,
               "retained host must be complete");
     }
@@ -1016,7 +1097,7 @@ static void test_probe_json_budget(void)
         ld_add_arp(ctx, ip(addr), PROBE_MAC);
         send_ready(ctx, 0);
         ld_add_probe_answer(ctx, ip(addr), 7000, data, sizeof(data));
-        // Many escaped service fields plus probe base64 force the result cap on both profiles.
+        // Many escaped SSDP fields plus probe base64 force the result cap on both profiles.
         for (int e = 0; e < LD_MAX_SSDP; ++e) {
             char pkt[1024];
             int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %02d%s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n", e, value, value, value);
@@ -1027,8 +1108,7 @@ static void test_probe_json_budget(void)
     cJSON *r = result(ctx, &raw);
     CHECK(strlen(raw) <= LD_MAX_JSON && truncated(r) && cJSON_IsTrue(cJSON_GetObjectItem(r, "probes_truncated")), "probe JSON cap preserves footer");
     const int kept = count(cJSON_GetObjectItem(r, "hosts"));
-    CHECK(kept < 5, "whole-host rollback with probes");
-    if (LD_MAX_JSON == 12288) CHECK(kept == 0, "oversized DevKit host omitted with its probes");
+    CHECK(kept > 0 && kept < 5, "whole-host rollback with probes");
     cJSON *host;
     cJSON_ArrayForEach(host, cJSON_GetObjectItem(r, "hosts")) {
         CHECK(count(cJSON_GetObjectItem(host, "probes")) == 1 && count(cJSON_GetObjectItem(host, "ssdp")) == LD_MAX_SSDP, "retained host complete");
@@ -1084,6 +1164,7 @@ int main(void)
     test_mdns_hostile();
     test_mdns_misc();
     test_ssdp();
+    test_per_host_caps();
     test_caps();
     test_json_budget();
     test_merge();

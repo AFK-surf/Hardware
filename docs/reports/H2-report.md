@@ -3,20 +3,98 @@
 2026-10-12. Base `9c73057b26c56318f11ec2c254855523d191a959` (H1 merged), branch
 `codex/discover-probes`, worktree `~/Desktop/AFK/Hardware-h2`. ESP-IDF **6.0.2**.
 
-Implementation, both firmware builds and host checks pass. **All H2 physical-board acceptance is
-pending for Claude after this commit. Neither board was flashed.** No merge, push, backend/app
-change, credentials or test certificates are included.
+Implementation, both firmware builds and host checks pass. Claude's DevKit test of `bc883dd`
+received an uncut Gree reply but found BLE-up discovery OOM. **The per-host cap fix below awaits
+Claude's BLE-up retest. Neither board was flashed during implementation or this fix.** No merge,
+push, backend/app change, credentials or test certificates are included.
 
 The Cue contract was read with `git show f0a91d861:<path>` for `lan_probes.ex`,
 `tools/lan_gateway.ex` and `test/lan_gateway_tool_test.exs`. Cue's checkout was already newer than
 that revision; it was neither checked out nor modified. Field names and capability gating match
 that backend, including its refusal to interpret `cut` answers.
 
+## BLE-up DevKit follow-up
+
+Hardware evidence supplied after `bc883dd`, using local WSS and home Wi-Fi:
+
+- The Gree AC at `192.168.3.18` answered probe `gree`: **399 bytes, not cut**. Keep the DevKit
+  answer cap at **1024**; the backend discards cut answers.
+- Provisioning with the app, or holding BOOT for 3 s, then calling `lan_discover` with BLE still
+  active returned discovery OOM, both with and without probes. This predates H2: H1 discovery
+  tests ran after BLE shut down. Backend discovery on gateway connection exposes the setup window.
+- At `lan_begin`, BLE up: **93040 bytes free, 51200 largest block**. BLE off: largest block about
+  **57 KB**. These are pre-fix observations, not acceptance measurements for the new caps.
+
+`COMMA_LAN_DISCOVER_MAX_SERVICES` and `COMMA_LAN_DISCOVER_MAX_SSDP` now default to **16/16**;
+the DevKit overlay selects **6/6**. Both values have a Kconfig range of 1..16. Existing per-host
+overflow handling omits excess entries and sets `truncated:true`, with or without probes.
+The backend already caps each array at 16, so no backend or wire-shape change is needed.
+T-Circle keeps its existing limits and behavior; DevKit's 1024-byte probe answer and 12 KiB result
+caps are unchanged.
+
+### Target allocation measurements
+
+Measured with **Xtensa GCC 15.2.0 (esp-15.2.0_20251204), ESP-IDF 6.0.2**, using each board's
+actual `compile_commands.json` flags and generated `sdkconfig.h`: compile a scratch translation
+unit including `lan_discover_core.c` and `lan_discover.c`, export a constant `uint32_t` array of
+`sizeof(host_t)`, `sizeof(host_t) * LD_MAX_HOSTS`, `sizeof(ld_ctx_t)`, `ARENA_BYTES`,
+`sizeof(probe_state_t)`, `RECV_BUF` and `sizeof(arp_dump_t)`, then read its ELF section. These are
+32-bit target compiler values, not the Mac host-test ABI or a runtime heap measurement.
+
+| Allocation, bytes | T-Circle (unchanged) | DevKit before | DevKit 6/6 |
+| --- | ---: | ---: | ---: |
+| `sizeof(host_t)` (one entry) | 532 | 532 | **212** |
+| Host table, 64 entries | 34048 | 34048 | **13568** |
+| Context | 5560 | 5560 | 5560 |
+| String arena | 98304 | 16384 | 16384 |
+| Probe state, only when requested | 26824 | 8304 | 8304 |
+| Receive buffer | 2048 | 2048 | 2048 |
+| ARP dump | 396 | 396 | 396 |
+| **Fixed total without probes** | **140356** | **58436** | **37956** |
+| **Fixed total with probes** | **167180** | **66740** | **46260** |
+| Maximum result buffer, including NUL | 49153 | 12289 | 12289 |
+| Fixed total with probes + maximum result | 216333 | 79029 | 58549 |
+
+The before column uses the reported 532-byte host and unchanged target-measured allocations.
+The reduction is **20480 bytes (20 KiB)**, all from the host table. The largest fixed DevKit
+allocation is now the 16384-byte arena. The result buffer coexists with the fixed allocations
+during serialization; the context, receive buffer and ARP dump are then freed before wrapping the
+result in the response envelope. Totals exclude allocator overhead, temporary old/new buffers
+during `realloc`, parsed request/cJSON storage, socket/lwIP buffers and the existing LAN task stack.
+They must not be treated as measured peak heap use or proof that BLE-up discovery now succeeds.
+
+### Follow-up validation
+
+- Both normal firmware profiles build successfully with IDF 6.0.2, without compiler warnings.
+  T-Circle adds only the two new `16` config keys: no existing generated setting changes.
+  Its image, flash code/data and static RAM sizes match `bc883dd` exactly.
+- DevKit was built separately in `firmware/build-esp32-devkit-h2-caps/`, from the checked-in
+  normal defaults/overlay with diagnostics off. The existing DevKit test `sdkconfig` and cached
+  local WSS URL/CA settings were preserved for Claude. Relative to that diagnostics-enabled test
+  config, only the two new `6` keys and the normal diagnostics-off setting differ.
+- T-Circle image: **2031111 bytes**, padded binary **2031232**; DevKit image: **1259450 bytes**
+  (12 fewer than `bc883dd`), padded binary **1259568**. DevKit flash code is 904090 bytes;
+  flash data 238270, DRAM 51787 and IRAM 92215 are unchanged. Size/component reports were checked;
+  voice components remain confined to T-Circle, with no dependency/lockfile changes.
+- Discovery ASan/UBSan: default **2360 core + 7476 runner**, `--devkit` **2359 + 4404**,
+  `--no-probes` **1266 + 11**, all zero failures. New checks independently cover exact service
+  and SSDP caps, duplicates at the cap, cap+1 truncation and allowances for a second host.
+  The oversized-first-host fixture now includes escaped TXT so it still exceeds 12 KiB at 6/6;
+  the probe fixture checks that a complete 6-entry host fits and later hosts roll back whole.
+- HTTP default/DevKit **263/263**, UDP **747/747**, tunnel **1366**, Connector JSON **123** checks,
+  all pass. Python **26 tests** pass (the existing fake-socket ResourceWarnings remain).
+
+**Pending for Claude:** retest discovery with BLE up, both with and without `udp_probes`, after
+app provisioning and after BOOT 3 s. Confirm the generated new caps are 6/6; keep probe answers
+at 1024. Record discovery success, heap/largest-block recovery and the real Gree answer.
+This implementation task did not flash or run hardware tests.
+
 ## Contract and implementation
 
 See [Connector protocol](../connector-protocol.md#lan_discover-a5-h2) for the complete wire contract.
 
-- Optional `udp_probes`: missing/null preserves the old result; otherwise a nonempty array within
+- Optional `udp_probes`: missing/null preserves the old result within the current board caps;
+  otherwise a nonempty array within
   the board's limit. Probe objects require unique 1..16-character `[a-z0-9_]` ids, unique integer
   ports 1..65535, and nonempty standard padded base64 within the decoded payload cap. ARP must be
   among the sources. Invalid input returns an error identifying the rule before any network use.
@@ -40,7 +118,7 @@ See [Connector protocol](../connector-protocol.md#lan_discover-a5-h2) for the co
   truncation. The final ARP harvest catches hosts discovered too late to probe.
 - The 48/12 KiB result budgets remain unchanged. A host that cannot fit is rolled back whole,
   including its answers; all later hosts are omitted. The builder reserves room for both flags.
-  No-probe runs retain the old footer reservation and exact output bytes.
+  No-probe runs retain the old footer reservation and exact output bytes within the current caps.
 - Metadata advertises the configured `discover_probes` limits only with discovery enabled and a
   nonzero probe count. A zero-count build rejects non-null probes; missing/null is still allowed.
   The existing read-only arrival/worker gates are unchanged.
@@ -49,6 +127,8 @@ See [Connector protocol](../connector-protocol.md#lan_discover-a5-h2) for the co
 
 | Setting | T-Circle | ESP32 DevKit |
 | --- | ---: | ---: |
+| `COMMA_LAN_DISCOVER_MAX_SERVICES` | 16 | 6 |
+| `COMMA_LAN_DISCOVER_MAX_SSDP` | 16 | 6 |
 | `COMMA_LAN_DISCOVER_PROBES` | 8 | 4 |
 | `COMMA_LAN_DISCOVER_PROBE_PAYLOAD` | 512 | 256 |
 | `COMMA_LAN_DISCOVER_PROBE_ANSWER` | 1024 | 1024 |
@@ -71,7 +151,8 @@ cutting larger Gree scan envelopes at 512 bytes. The chosen values remain the pr
 values: successful linking and host tests do **not** establish live TLS heap headroom or recovery.
 
 The metadata buffer grows from 1024 to 1280 bytes (+256 static bytes), allowing the new fields and
-a maximally JSON-escaped device name. Other existing memory policies/limits are unchanged.
+a maximally JSON-escaped device name. Other than the per-host cap follow-up above, existing
+memory policies/limits are unchanged.
 
 Both boards retain `CONFIG_LWIP_MAX_SOCKETS=10`. With all sources, discovery adds the previous three
 sockets plus one probe socket. T-Circle with Connector and voice uses six nominal sockets total;
@@ -107,7 +188,7 @@ lan_discover: req_…: H hosts (arp A of S swept, F failed; mdns M answers; ssdp
 counts first matched datagrams, including answers dropped by the storage budget. Counts contain
 no payload bytes. Truncation is sampled after serialization, so the log includes JSON rollback.
 
-## Build and config evidence
+## Initial H2 build and config evidence (`bc883dd`)
 
 Fresh baseline builds from the requested main were captured in this worktree before edits. Both
 final board sdkconfigs were regenerated from shared defaults + their overlay. Comparing every
@@ -148,7 +229,7 @@ tools/board.sh esp32-devkit size
 
 Builds were sequential because managed components are shared. No dependency update command was run.
 
-## Host checks
+## Initial H2 host checks (`bc883dd`)
 
 | Suite | Result |
 | --- | --- |
@@ -185,11 +266,12 @@ python -m unittest discover -s firmware/tools -p 'test_*.py'
 The system Python lacked `bleak`; the complete Python run uses the existing tools virtual
 environment with the repository's dependencies. This did not change Cue or the main checkout.
 
-## Hardware acceptance plan — all pending
+## Remaining hardware acceptance plan
 
 Claude runs these after the commit. Use the existing H1 local-WSS setup and approved provisioning
-procedure; leave credentials/certificates/generated configs out of Git. The DevKit was left
-unprovisioned by H1. Use actual addresses from each test network, not addresses from older reports.
+procedure; leave credentials/certificates/generated configs out of Git. The DevKit Gree response
+and BLE-up failure above are recorded evidence; the repeated acceptance runs below remain pending.
+Use actual addresses from each test network, not addresses from older reports.
 
 1. **Setup and access gate, each board.** Build a test image with the local Connector URL and CA
    overrides as in `devices/README.md`, then perform the separately authorized hardware setup.
@@ -255,7 +337,7 @@ simulator or H1 measurements.
 | T-Circle 8 probes + voice vs baseline | pending | pending | pending |
 | Post-discovery HTTP / UDP, both boards; TCP, T-Circle | pending | pending | pending |
 
-## Clarifications from implementation
+## Clarifications from initial implementation (`bc883dd`)
 
 No requested field, limit, access rule or board feature changed. Standard base64 validation also
 checks canonical pad bits. A failed send consumes an attempt and marks truncation; a skipped retry

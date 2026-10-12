@@ -17,8 +17,8 @@
 // The caps agreed with the backend (docs/prompts/A5-firmware-lan-discovery.md). Anything cut sets
 // "truncated": true.
 #define LD_MAX_HOSTS 64
-#define LD_MAX_SERVICES 16  // per host
-#define LD_MAX_SSDP 16      // per host
+#define LD_MAX_SERVICES CONFIG_COMMA_LAN_DISCOVER_MAX_SERVICES  // per host
+#define LD_MAX_SSDP CONFIG_COMMA_LAN_DISCOVER_MAX_SSDP          // per host
 #define LD_MAX_TXT_KEYS 16  // per service
 #define LD_STR_MAX 255      // bytes, every string
 // Not in the contract: the whole result stays under this, so a busy network can't produce a reply

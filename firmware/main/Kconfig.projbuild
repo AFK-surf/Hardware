@@ -53,6 +53,18 @@ config COMMA_LAN_DISCOVER_ARENA_BYTES
     int "Discovery string arena"
     range 1024 98304
     default 98304
+config COMMA_LAN_DISCOVER_MAX_SERVICES
+    int "Maximum discovery services per host"
+    range 1 16
+    default 16
+    help
+        Additional services are omitted and set truncated=true.
+config COMMA_LAN_DISCOVER_MAX_SSDP
+    int "Maximum discovery SSDP entries per host"
+    range 1 16
+    default 16
+    help
+        Additional SSDP entries are omitted and set truncated=true.
 config COMMA_LAN_DISCOVER_MAX_JSON
     int "Maximum discovery result JSON bytes"
     range 1024 49152

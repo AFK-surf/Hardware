@@ -164,7 +164,8 @@ clamped to 1000..8000. H2 adds optional, caller-built UDP datagrams:
                {"id":"miio","port":54321,"payload_b64":"ITEAIP////////////////////////////////////8="}]}
 ```
 
-- Missing/null `udp_probes` sends no probes and preserves the pre-H2 result bytes.
+- Missing/null `udp_probes` sends no probes and preserves the pre-H2 result bytes within the
+  current board caps below.
 - Otherwise, it must be an array of 1..`max_probes` objects, and `sources` must include ARP.
 - Each `id` is 1..16 characters of `[a-z0-9_]`, unique within the request. Each `port` is an integer
   1..65535, also unique: answers are matched by source port.
@@ -205,8 +206,10 @@ attempts occur per 25 ms; no catch-up burst is accumulated. Failed sends, unsent
 retries, ARP/host coverage caps and lost probe results set both truncation flags. Silence after two
 successful sends does not. See [H2](reports/H2-report.md) for timing and pending hardware tests.
 
-**Result:** hosts are sorted by IP; at most 64 hosts, 16 services and 16 SSDP entries per host,
-16 TXT keys per service. Text from network announcements is printable ASCII, at most 255 bytes per
+**Result:** hosts are sorted by IP; at most 64 hosts. Per-host service and SSDP caps are configured by
+`COMMA_LAN_DISCOVER_MAX_SERVICES` and `COMMA_LAN_DISCOVER_MAX_SSDP`: 16/16 on T-Circle, 6/6 on DevKit.
+Excess entries are omitted and set `truncated:true`. There are at most 16 TXT keys per service.
+Text from network announcements is printable ASCII, at most 255 bytes per
 string (tab/CR/LF become spaces, other control/non-ASCII bytes are dropped).
 
 ```json
@@ -283,7 +286,9 @@ device's `max_frame` and the smaller-frame path passes hardware tests.
 `client_source` and `component_versions` use `esp32-devkit`; T-Circle keeps `t-circle`. Disabled
 methods disappear from `lan_gateway.methods`. See [H1](reports/H1-report.md) before relying on DevKit
 capacity. H1 local-WSS discovery/text/chunk runs passed 3/3 with the 12 KiB discovery cap;
-H2 UDP probe heap/voice/device tests are pending (see [H2](reports/H2-report.md)).
+H2 received an uncut 399-byte Gree reply on DevKit. BLE-up discovery hit OOM at the old 16/16
+per-host caps; the 6/6 reduction awaits a board retest. Remaining probe heap/voice/device checks
+are tracked in [H2](reports/H2-report.md).
 
 
 | Item | Value |

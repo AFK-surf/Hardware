@@ -25,8 +25,10 @@ hosts set `truncated=true`. Heap diagnostics are off; turn `CONFIG_COMMA_HEAP_DI
 test build when measuring a change. See [H1](../docs/reports/H1-report.md) for the hardware
 measurements and build/host validation. H2 adds up to four UDP discovery probes with 256-byte
 payloads, 1024-byte answers and a shared 4096-byte answer budget (T-Circle: 8 / 512 / 1024 / 16384).
-Both builds and host tests pass; probe heap recovery, real device replies and voice coexistence
-await the [H2 hardware plan](../docs/reports/H2-report.md).
+DevKit received an uncut 399-byte Gree reply. Discovery with BLE active ran out of memory at the
+old 16/16 service/SSDP caps; DevKit now caps each host at 6/6, saving 20 KiB in the host table.
+Both builds and host tests pass. BLE-up discovery (with and without probes), heap recovery and
+voice coexistence await the [H2 hardware retest](../docs/reports/H2-report.md).
 
 The shared defaults load first, then the board overlay. Generated config and objects live in
 `firmware/build-<board>/`. ESP-IDF keeps existing config choices when defaults change: delete that
