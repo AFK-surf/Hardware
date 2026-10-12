@@ -549,3 +549,46 @@ the backend still reads both.
 
 **D. T-Circle** behavior is unchanged except for the flag meanings and the log fields; one home
 Gree round is enough to confirm.
+
+## Hardware results — 2026-10-12 (Claude, `d58b744`)
+
+Home Wi-Fi, three Gree units on the LAN. Test builds dial a local fake Connector (WSS, test CA) with
+`CONFIG_COMMA_HEAP_DIAGNOSTICS=y`; both boards were then flashed back to normal builds (default URL,
+diagnostics off).
+
+**DevKit**
+
+| Run | BLE | Result |
+| --- | --- | --- |
+| 3 rounds after boot | off | PASS: 11–12 hosts, 3 Gree answers (399 B, not cut), 8.9–10.5 KB; `send_failed` 0–4 (errno 12), `unsent` 0, `probes_truncated` false |
+| setup from the app, discovery right after `connector_up` | on | PASS: `waiting up to 8000 ms for BLE to end` → BLE ended by the 3 s timer → `BLE off after 2900 ms`; 12 hosts, 3 Gree, 9.9 KB. `free8` 55 KB at `lan_begin`, 100 KB after BLE off, 51 KB at `discovery_peak` |
+| 2 more rounds after that | off | PASS |
+| normal build, setup from the app, real backend (staging) | on, then app disconnects 2.3 s after `connector_up` | app reached Done; `udp_request` to a Gree unit answered |
+| normal build, "scan the home network" in the app | off | discovery ran, no OOM, but `probes 0 sent`: the backend did not send `udp_probes` (backend projection bug, Cue #3515, not firmware) |
+
+`truncated` is still set on DevKit, honestly: the router has 6 SSDP entries and three hosts reach 6
+services (DevKit 6/6 caps). On the T-Circle it comes from AirPlay TXT records over 16 keys (as in A5).
+
+**T-Circle** (`max_probes` 8, budget 16 KB)
+
+- 3 rounds with `gree` + `miio`: PASS, 12 hosts, 3 Gree answers, 12.0–12.7 KB, `probes_truncated` false.
+- Right after discovery, 2 rounds of: `lan_tcp_dial` echo 1 MB each way, 1 MB pull, refused dial,
+  `http_request` 1 MB in chunks, text mode: all PASS, second round equal to the first (no socket left
+  open). `udp_request` was not covered by the fake Connector; covered on DevKit through staging.
+- Voice call, without and with discovery (8 probes: `gree`, `miio`, six 512-byte probes to unused
+  ports) every ~8 s, 205 probe datagrams per run, 7 runs during the call. User heard no stutter.
+
+| `cue:` stats | no discovery (91 s) | 8-probe discovery (60 s) |
+| --- | --- | --- |
+| `send_max_ms` avg / max | 74 / 500 | 62 / 161 |
+| `queue_ms` avg / max | 501 / 1909 | 208 / 380 |
+| `mic_backlog_ms` avg / max | 70 / 460 | 62 / 380 |
+| `mic_dropped` total | 15 (one burst) | 0 |
+| `nrtx_max` | 0 | 0 |
+| cpu0 / cpu1 avg | 38 / 45 % | 47 / 52 % |
+
+Discovery runs during the call took 5017–5046 ms (about 5013 ms without a call), with 0
+`send_failed` and 0 `unsent`.
+
+**Pending:** an end-to-end discovery with probes through staging once Cue #3515 is deployed; miIO on
+the office network.
