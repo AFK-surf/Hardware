@@ -2,6 +2,7 @@
 #include "firmware_config.h"
 #include "memory_caps.h"
 #include "connector.h"
+#include "connector_json.h"
 #include "net_watchdog.h"
 
 #include "voice_state.h"
@@ -885,15 +886,19 @@ static void handle_request(const char *id, const char *method, cJSON *root)
     }
 }
 
+static void handle_json_oom(const char *json)
+{
+    ESP_LOGW(TAG, "out of memory parsing frame");
+    comma_heap_log("json_parse_oom");
+    char *id = find_request_id(json, strlen(json));
+    if (id) { send_oom(id); free(id); }
+    else { post(EV_CLOSED, NULL); }
+}
+
 static void handle_text(const char *json)
 {
-    cJSON *root = cJSON_Parse(json);
+    cJSON *root = connector_json_parse(json, handle_json_oom);
     if (!root) {
-        ESP_LOGW(TAG, "invalid JSON or out of memory parsing frame");
-        comma_heap_log("json_parse_failed");
-        char *id = find_request_id(json, strlen(json));
-        if (id) { send_oom(id); free(id); }
-        else { post(EV_CLOSED, NULL); }
         return;
     }
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");

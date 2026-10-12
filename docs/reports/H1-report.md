@@ -348,3 +348,76 @@ strings are absent from the application binary. Its fresh setup radio-only heap 
 
 The implementation and evidence are committed for review, but H1's full hardware acceptance remains
 open until these checks are completed.
+
+## H1 review follow-up — 2026-10-12
+
+This follow-up fixes the two error-handling regressions on `codex/multi-board` in one separate
+commit. It does not change the protocol, board limits, pairing, or memory-tuning settings.
+
+### Malformed JSON versus allocation failure
+
+`handle_text` now uses `connector_json_parse`. Invalid JSON is logged and ignored, without sending
+an OOM response or closing the session. The existing OOM response/session-close path runs only when
+an allocation actually failed during that parse.
+
+The allocation-failure callback is installed once in `app_main`, before starting the application
+tasks. ESP-IDF 6.0.2 invokes it only after malloc's internal/PSRAM fallback has failed. Two native
+thread-local flags scope the result to the parsing task; failures in other tasks, interrupts, or
+before the parse do not contaminate it. The callback only records the failure. cJSON keeps its
+default global allocator hooks, preserving its realloc path for printing in every task.
+
+The new `firmware/tools/connector_json_test/run.sh` compiles the actual parser wrapper and cJSON
+with ASan/UBSan. It checks malformed frames with and without an ID, failure at every allocation in
+a nested request, an OOM frame without an ID, cleanup after partial parses, recovery on the next
+frame, and unrelated task/interrupt failures. It verifies that malformed frames never invoke the
+Connector's OOM callback, which owns error sending and session closure.
+
+### Failed tunnel commands retain their identity
+
+The single all-tunnel failure flag is replaced by a separate queue of `{session, id}` records,
+reserved at tunnel startup. Both command allocation failure and command queue failure use it
+without allocating memory. The tunnel task drains accepted commands before handling failures, so
+an already-queued dial can be found. It finishes only the matching tunnel. An identified but
+unknown or stale-session command is ignored; only a record with no usable identity falls back to
+ending all tunnels.
+
+The failure queue holds one record per configured tunnel. If it fills, the Connector task waits
+for the tunnel task to drain it, without holding the host send lock. Records are never overwritten
+or converted into a global shutdown just because a queue is full. Startup failure also frees this
+queue.
+
+The tunnel host test now keeps two tunnels open while injecting decoded-buffer OOM, command OOM,
+and command-send failure, and while actually filling the command queue. Each case requires the
+affected tunnel's error EOF and successful bidirectional transfer plus acknowledgment on the other
+tunnel. Additional cases cover stale sessions, unknown IDs, a refused new dial, an unidentified
+failure, and back-pressure when multiple failure records fill the separate queue.
+
+### Validation
+
+All C suites use ASan/UBSan. Results from this follow-up:
+
+| Check | Result |
+| --- | --- |
+| Connector JSON host test | 123 checks, 0 failed |
+| TCP tunnel host test | 1,367 checks, 0 failed |
+| Discovery host test, default / `--devkit` | 1,221 checks each, 0 failed |
+| HTTP host test, default / `--devkit` | 263 passed each, 0 failed |
+| UDP host test, default / `--devkit` | 747 checks each, 0 failed |
+| Python `unittest discover -s firmware/tools -p 'test_*.py'` | 21 tests in 63.079 s, OK |
+| `tools/board.sh t-circle-s3 build` | PASS; app image `0x1eeea0` bytes |
+| `tools/board.sh esp32-devkit build` | PASS; app image `0x1366e0` bytes |
+| `git diff --check` | PASS |
+
+Python used the existing tools virtual environment with `bleak`. Existing socket `ResourceWarning`
+messages in `test_fake_connector.py` and the existing C library deprecation warnings remain;
+neither caused a test failure. Both firmware builds used ESP-IDF 6.0.2.
+
+`CONFIG_COMMA_HEAP_DIAGNOSTICS=y` remains enabled for DevKit; T-Circle's existing setting is
+unchanged. No board overlay, shared sdkconfig default, Kconfig option, or tunnel limit changed.
+Generated configs still have `CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576` and
+`CONFIG_LWIP_TCP_WND_DEFAULT=65535` for both boards, with application tunnel windows of 32,768 bytes
+(DevKit) and 131,072 bytes (T-Circle).
+
+This review follow-up performed host tests and builds only; it did not flash either board or add
+hardware heap measurements. The hardware acceptance items above remain open, and heap diagnostics
+and TCP window tuning still await those measurements. No merge or push was performed.

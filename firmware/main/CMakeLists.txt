@@ -3,7 +3,7 @@ if(CONFIG_COMMA_BOARD_ESP32_DEVKIT)
 else()
     set(board_dir "../boards/t_circle_s3")
 endif()
-set(srcs "main.c" "wifi.c" "connector.c" "net_watchdog.c" "lan_http.c"
+set(srcs "main.c" "wifi.c" "connector.c" "connector_json.c" "net_watchdog.c" "lan_http.c"
          "lan_discover_core.c" "lan_dest.c" "lan_udp.c"
          "device_config.c" "provisioning.c" "${board_dir}/board.c")
 if(CONFIG_COMMA_LAN_DISCOVER)

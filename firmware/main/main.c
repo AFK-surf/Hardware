@@ -3,6 +3,7 @@
 #include "app_controls.h"
 #include "board.h"
 #include "connector.h"
+#include "connector_json.h"
 #include "device_config.h"
 #include "net_watchdog.h"
 #include "provisioning.h"
@@ -88,6 +89,7 @@ bool app_poll(int64_t now, bool in_call, bool boot)
 
 void app_main(void)
 {
+    connector_json_init();
     ESP_LOGI(TAG, "board %s; PSRAM %u bytes", CONFIG_COMMA_BOARD_ID,
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     ESP_ERROR_CHECK(device_config_init());

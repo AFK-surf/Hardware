@@ -44,6 +44,8 @@ void vQueueDelete(QueueHandle_t q)
 }
 
 static atomic_size_t g_fail_alloc_size;
+static atomic_bool g_fail_command_send;
+static atomic_bool g_pause_consumer, g_consumer_paused, g_failure_queue_waiting;
 void *test_heap_alloc(size_t n)
 {
     if (n == g_fail_alloc_size) { g_fail_alloc_size = 0; return NULL; }
@@ -61,10 +63,12 @@ static void deadline_after(struct timespec *ts, TickType_t ms)
 
 BaseType_t xQueueSend(QueueHandle_t q, const void *item, TickType_t wait)
 {
+    if (q == s_cmds && atomic_exchange(&g_fail_command_send, false)) return pdFALSE;
     struct timespec ts;
-    deadline_after(&ts, wait);
+    deadline_after(&ts, wait == portMAX_DELAY ? 3600000 : wait);
     pthread_mutex_lock(&q->mu);
     while (q->count == q->len) {
+        if (q == s_command_failures) g_failure_queue_waiting = true;
         if (wait == 0 || pthread_cond_timedwait(&q->cv, &q->mu, &ts) != 0) {
             pthread_mutex_unlock(&q->mu);
             return pdFALSE;
@@ -79,6 +83,13 @@ BaseType_t xQueueSend(QueueHandle_t q, const void *item, TickType_t wait)
 
 BaseType_t xQueueReceive(QueueHandle_t q, void *item, TickType_t wait)
 {
+    if (q == s_cmds) {
+        while (g_pause_consumer) {
+            g_consumer_paused = true;
+            usleep(1000);
+        }
+        g_consumer_paused = false;
+    }
     struct timespec ts;
     deadline_after(&ts, wait == portMAX_DELAY ? 3600000 : wait);
     pthread_mutex_lock(&q->mu);
@@ -982,25 +993,132 @@ static void test_drain_on_eof(server_t *echo)
     drop_frames();
 }
 
+static void check_survivor(const char *id)
+{
+    const unsigned char data[] = "still usable after another command failed";
+    unsigned char back[sizeof(data)] = {0};
+    server_data(id, data, sizeof(data));
+    long long ack = 0;
+    size_t n = collect(id, back, sizeof(back), true, 1000, NULL, NULL, &ack);
+    CHECK(n == sizeof(data) && memcmp(back, data, sizeof(data)) == 0, "%s did not survive", id);
+    CHECK(ack == sizeof(data), "%s did not acknowledge server data", id);
+}
+
+static bool pause_consumer(void)
+{
+    g_pause_consumer = true;
+    int64_t until = now_ms() + 1000;
+    while (!g_consumer_paused && now_ms() < until) usleep(1000);
+    CHECK(g_consumer_paused, "consumer did not pause");
+    if (!g_consumer_paused) g_pause_consumer = false;
+    return g_consumer_paused;
+}
+
 static void test_out_of_memory(server_t *echo)
 {
-    for (int fail_command = 0; fail_command < 2; ++fail_command) {
+    // A decode allocation, command allocation, and command queue send can each fail.
+    for (int failure = 0; failure < 4; ++failure) {
         route(echo);
         CHECK(open_tunnel("tun_oom", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+        CHECK(open_tunnel("tun_survivor", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
         const size_t n = 32768;
         unsigned char *data = pattern(n, 42);
-        g_fail_alloc_size = fail_command ? sizeof(cmd_t) : sizeof(block_t) + B64_LEN(n) / 4 * 3;
+        if (failure == 3 && pause_consumer()) {
+            // Actually fill the command queue, in addition to the injected send failure.
+            for (int i = 0; i < QUEUE_LEN; ++i) server_ack("tun_survivor", 0);
+        } else if (failure == 2) g_fail_command_send = true;
+        else g_fail_alloc_size = failure ? sizeof(cmd_t) : sizeof(block_t) + B64_LEN(n) / 4 * 3;
         server_data("tun_oom", data, n);
+        g_pause_consumer = false;
         free(data);
         cJSON *f = next_frame(2000);
-        CHECK(f && is_eof(f) && str(f, "error"), "OOM must end with error, not stall");
+        CHECK(is_kind(f, "stream", "tun_oom") && is_eof(f) && str(f, "error"), "only failed tunnel should end");
         cJSON_Delete(f);
-        CHECK(wait_no_tunnels(2000), "OOM leaked a tunnel");
         CHECK(g_fail_alloc_size == 0, "allocation fault did not fire");
+        CHECK(!g_fail_command_send, "queue fault did not fire");
+        check_survivor("tun_survivor");
+        CHECK(lan_tunnel_count() == 1, "unrelated tunnel closed or failed tunnel leaked");
+        server_eof("tun_survivor");
+        CHECK(wait_no_tunnels(2000), "survivor leaked a tunnel");
         drop_frames();
     }
-    // A subsequent request must still work after both failure modes.
     test_connect_answer_and_echo(echo);
+}
+
+static atomic_bool g_failure_posted;
+
+static void *post_another_failure(void *arg)
+{
+    (void)arg;
+    command_failed("unknown_after_full", g_session);
+    g_failure_posted = true;
+    return NULL;
+}
+
+static void test_failure_backlog(server_t *echo)
+{
+    route(echo);
+    CHECK(open_tunnel("tun_backlog", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+    CHECK(open_tunnel("tun_survivor", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+    if (!pause_consumer()) return;
+    command_failed("tun_backlog", g_session);
+    command_failed("unknown_before_full", g_session);
+    g_failure_queue_waiting = false;
+    g_failure_posted = false;
+    pthread_t producer;
+    int err = pthread_create(&producer, NULL, post_another_failure, NULL);
+    CHECK(err == 0, "producer thread creation failed");
+    if (err == 0) {
+        int64_t until = now_ms() + 1000;
+        while (!g_failure_queue_waiting && now_ms() < until) usleep(1000);
+        CHECK(g_failure_queue_waiting && !g_failure_posted, "full failure queue did not apply back-pressure");
+    }
+    g_pause_consumer = false;
+    if (err == 0) {
+        CHECK(pthread_join(producer, NULL) == 0, "producer thread did not join");
+        CHECK(g_failure_posted, "failure identity was not handed over");
+    }
+    cJSON *f = next_frame(1000);
+    CHECK(is_kind(f, "stream", "tun_backlog") && is_eof(f) && str(f, "error"), "pending identity was overwritten");
+    cJSON_Delete(f);
+    check_survivor("tun_survivor");
+    server_eof("tun_survivor");
+    CHECK(wait_no_tunnels(1000), "backlog test leaked tunnels");
+    drop_frames();
+}
+
+static void test_failure_identity(server_t *echo)
+{
+    route(echo);
+    CHECK(open_tunnel("tun_same_id", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+    CHECK(open_tunnel("tun_other", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+    cJSON *ack = cJSON_Parse("{\"stream\":{\"channel\":\"tcp_ack\",\"seq\":0}}");
+    g_fail_alloc_size = sizeof(cmd_t);
+    CHECK(lan_tunnel_frame("tun_same_id", ack, g_session - 1), "old session frame not taken");
+    CHECK(g_fail_alloc_size == 0, "old session fault did not fire");
+    g_fail_alloc_size = sizeof(cmd_t);
+    CHECK(lan_tunnel_frame("unknown_id", ack, g_session), "unknown frame not taken");
+    CHECK(g_fail_alloc_size == 0, "unknown id fault did not fire");
+    // A refused new dial is another identified command; it cannot kill existing tunnels.
+    g_fail_command_send = true;
+    CHECK(!lan_tunnel_dial("refused_dial", NULL, g_session), "dial queue fault did not refuse");
+    cJSON_Delete(ack);
+    check_survivor("tun_same_id");
+    check_survivor("tun_other");
+    CHECK(lan_tunnel_count() == 2, "stale/unknown command ended an unrelated tunnel");
+    // Only genuinely missing identity retains the conservative all-tunnel fallback.
+    command_failed(NULL, g_session);
+    bool seen_same = false, seen_other = false;
+    for (int i = 0; i < 2; ++i) {
+        cJSON *f = next_frame(1000);
+        CHECK(is_eof(f) && str(f, "error"), "unidentified failure must end both tunnels");
+        seen_same |= is_kind(f, "stream", "tun_same_id");
+        seen_other |= is_kind(f, "stream", "tun_other");
+        cJSON_Delete(f);
+    }
+    CHECK(seen_same && seen_other, "fallback lost a tunnel identity");
+    CHECK(wait_no_tunnels(1000), "fallback leaked tunnels");
+    drop_frames();
 }
 
 int main(void)
@@ -1009,7 +1127,7 @@ int main(void)
     const lan_tunnel_host_t host = {.send = host_send, .check = host_check};
     g_fail_alloc_size = FRAME_CAP;
     CHECK(!lan_tunnel_start(&host), "startup allocation fault did not refuse");
-    CHECK(!s_cmds && !s_raw && !s_frame, "startup allocation fault leaked resources");
+    CHECK(!s_cmds && !s_command_failures && !s_raw && !s_frame, "startup allocation fault leaked resources");
     if (!lan_tunnel_start(&host)) {
         fprintf(stderr, "lan_tunnel_start failed\n");
         return 1;
@@ -1028,6 +1146,8 @@ int main(void)
     test_drain_on_eof(echo);
     test_idle(echo);
     test_out_of_memory(echo);
+    test_failure_identity(echo);
+    test_failure_backlog(echo);
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

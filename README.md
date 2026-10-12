@@ -125,6 +125,7 @@ sh firmware/tools/lan_discover_test/run.sh
 sh firmware/tools/lan_http_test/run.sh
 sh firmware/tools/lan_udp_test/run.sh
 sh firmware/tools/lan_tunnel_test/run.sh
+sh firmware/tools/connector_json_test/run.sh
 # Smaller DevKit limits (from its overlay):
 sh firmware/tools/lan_http_test/run.sh --devkit
 sh firmware/tools/lan_udp_test/run.sh --devkit

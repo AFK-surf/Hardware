@@ -22,7 +22,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +98,11 @@ typedef struct {
     block_t *block;
 } cmd_t;
 
+typedef struct {
+    unsigned session;
+    char id[ID_MAX + 1]; // empty only when the failed command cannot be identified
+} command_failure_t;
+
 // ---- Tunnels -------------------------------------------------------------------------------------
 
 typedef enum {
@@ -138,11 +142,12 @@ typedef struct {
 
 static lan_tunnel_host_t s_host;
 static QueueHandle_t s_cmds;
+// Reserved at startup so allocation/command-queue failure can still carry an identity.
+static QueueHandle_t s_command_failures;
 static tunnel_t s_t[LAN_TUNNEL_MAX_OPEN];
 static unsigned char *s_raw;  // one LAN read, PSRAM
 static char *s_frame;         // one data frame, PSRAM
 static volatile int s_count;
-static atomic_bool s_command_failure;
 
 static void *psram_alloc(size_t n)
 {
@@ -671,6 +676,22 @@ static void drain_cmds(TickType_t wait)
     }
 }
 
+static void drain_command_failures(void)
+{
+    command_failure_t failed;
+    while (xQueueReceive(s_command_failures, &failed, 0) == pdTRUE) {
+        if (failed.id[0]) {
+            tunnel_t *t = find(failed.id, failed.session);
+            if (t) finish(t, "tunnel command unavailable", true);
+            // An identified stale/unknown command must not end another tunnel.
+        } else {
+            for (int i = 0; i < LAN_TUNNEL_MAX_OPEN; ++i) {
+                if (s_t[i].state != T_FREE) finish(&s_t[i], "tunnel command unavailable", true);
+            }
+        }
+    }
+}
+
 // ---- The loop ------------------------------------------------------------------------------------
 
 // Writes queued server bytes to the LAN socket; one ack for whatever went out.
@@ -778,12 +799,8 @@ static void housekeeping(tunnel_t *t, int64_t now)
 
 void lan_tunnel_step(int wait_ms)
 {
-    if (atomic_exchange(&s_command_failure, false)) {
-        for (int i = 0; i < LAN_TUNNEL_MAX_OPEN; ++i) {
-            if (s_t[i].state != T_FREE) finish(&s_t[i], "tunnel command unavailable", true);
-        }
-    }
     drain_cmds(s_count > 0 ? 0 : pdMS_TO_TICKS(wait_ms));
+    drain_command_failures();
     if (s_count == 0) {
         return;
     }
@@ -849,6 +866,7 @@ void lan_tunnel_step(int wait_ms)
     // Server data that arrived while the socket was already writable goes out without waiting for
     // the next select.
     drain_cmds(0);
+    drain_command_failures();
     for (int i = 0; i < LAN_TUNNEL_MAX_OPEN; ++i) {
         if ((s_t[i].state == T_OPEN || s_t[i].state == T_DRAINING) && s_t[i].head) {
             pump_out(&s_t[i]);
@@ -879,9 +897,10 @@ bool lan_tunnel_start(const lan_tunnel_host_t *host)
         s_t[i].fd = -1;
     }
     s_cmds = xQueueCreate(QUEUE_LEN, sizeof(cmd_t *));
+    s_command_failures = xQueueCreate(LAN_TUNNEL_MAX_OPEN, sizeof(command_failure_t));
     s_raw = psram_alloc(LAN_TUNNEL_MAX_FRAME);
     s_frame = psram_alloc(FRAME_CAP);
-    if (!s_cmds || !s_raw || !s_frame) {
+    if (!s_cmds || !s_command_failures || !s_raw || !s_frame) {
         ESP_LOGE(TAG, "out of memory, lan_tcp_dial off");
         goto fail;
     }
@@ -893,9 +912,11 @@ bool lan_tunnel_start(const lan_tunnel_host_t *host)
     return true;
 fail:
     if (s_cmds) vQueueDelete(s_cmds);
+    if (s_command_failures) vQueueDelete(s_command_failures);
     free(s_raw);
     free(s_frame);
     s_cmds = NULL;
+    s_command_failures = NULL;
     s_raw = NULL;
     s_frame = NULL;
     return false;
@@ -908,12 +929,23 @@ int lan_tunnel_count(void)
 
 // ---- Connector-task side ---------------------------------------------------------------------------
 
+static void command_failed(const char *id, unsigned session)
+{
+    command_failure_t failed = {.session = session};
+    if (id && strlen(id) <= ID_MAX) strlcpy(failed.id, id, sizeof(failed.id));
+    // This separate queue needs no allocation and is drained by the tunnel task.
+    // Apply back-pressure if it fills: never overwrite a known identity or turn
+    // a full command queue into a shutdown of unrelated tunnels. No host send
+    // lock is held by this Connector-task path.
+    xQueueSend(s_command_failures, &failed, portMAX_DELAY);
+}
+
 static bool post(cmd_t *c)
 {
     // The tunnel task drains the queue every POLL_MS, so this only waits when something is badly wrong.
     if (xQueueSend(s_cmds, &c, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ESP_LOGW(TAG, "%s: command queue full, dropped", c->id);
-        s_command_failure = true;
+        command_failed(c->id, c->session);
         free(c->block);
         free(c);
         return false;
@@ -1018,7 +1050,7 @@ bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)
     }
     if (!c) {
         ESP_LOGW(TAG, "%s: out of memory for a tunnel frame", id);
-        s_command_failure = true;
+        command_failed(id, session);
         return true;
     }
     post(c);
