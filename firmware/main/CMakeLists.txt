@@ -25,10 +25,10 @@ set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
          tcp_transport http_parser lwip)
 # Requirements are collected before Kconfig is available, so they follow the target and the board
-# name from tools/board.sh. Both S3 boards have voice/display; the classic ESP32 target has neither.
+# name from tools/board.sh. The T-Circle has voice and display; the Waveshare AMOLED display only (no
+# speaker); the classic ESP32 target neither.
 if(comma_board STREQUAL "waveshare-amoled-1-32")
-    list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_driver_spi esp_driver_tsens
-         waveshare_deps)
+    list(APPEND reqs esp_driver_i2c esp_lcd esp_driver_spi waveshare_deps)
 elseif(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_lcd_gc9d01
          esp_driver_spi esp_driver_tsens)

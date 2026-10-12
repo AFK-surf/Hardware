@@ -2,8 +2,8 @@
 // The screen is polled, as on the T-Circle's CST816D (same register layout: finger count at 0x02,
 // chip ID at 0xA7, I2C address 0x15). A failed read counts as no finger, so a controller that
 // naps between touches only costs a NACK. A tap shorter than 280 ms becomes BOARD_INPUT_TAP when
-// the finger lifts; a longer press is not a tap. BOOT is debounced here; call.c turns a short press
-// into the call key and app_poll() owns the holds.
+// the finger lifts; a longer press is not a tap. BOOT is debounced here; app_poll() owns the holds.
+// This board has no voice: a tap or a BOOT press only wakes the screen (board.c).
 
 #include "board_input.h"
 #include "board_pins.h"
@@ -118,7 +118,7 @@ void board_input_init(void)
     uint8_t device_id = 0;
     err = touch_read_register(CST820_REG_DEVICE_ID, &device_id);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "CST820 probe failed: %s; BOOT still calls", esp_err_to_name(err));
+        ESP_LOGE(TAG, "CST820 probe failed: %s; BOOT still wakes the screen", esp_err_to_name(err));
         return;
     }
     err = touch_write_register(CST820_REG_DIS_AUTO_SLEEP, 0x01);

@@ -6,10 +6,84 @@
 | Commit | Content |
 | --- | --- |
 | A `bfb9e73` | Split: shared `firmware/voice/` and `firmware/ui/`, T-Circle board layer. No behaviour change. |
-| B (this report's commit) | Waveshare AMOLED board, 24→16 kHz resampler, BOOT-press calls, size-aware fonts/logo. |
+| B `2269573` | Waveshare AMOLED board, 24→16 kHz resampler, BOOT-press calls, size-aware fonts/logo. |
+| C (this report's last commit) | The Waveshare ships without voice: display + gateway. Section 0. |
 
-Nothing was flashed. **The Waveshare board is built, not yet tested on hardware**; A must be
-retested on the T-Circle before B is reviewed. No merge, no push, no protocol/BLE/app/backend change.
+**The Waveshare board has no speaker** (only a speaker header), so it has no voice. B ran on the
+board (section 0); C is built, not flashed. A must still be retested on the T-Circle. No merge, no
+push, no protocol/BLE/app/backend change.
+
+## 0. Commit C: the Waveshare ships without voice
+
+### What B did on the board (before C)
+
+Worked: display (logo, cards), touch, BLE setup with the on-screen passkey, BOOT short press, and
+the BOOT 3–10 s hold into pairing mode.
+
+Voice, for H4 (the StickS3 also uses an ES8311). One call of 28 s:
+
+| | Waveshare (B) | T-Circle |
+| --- | --- | --- |
+| Mic delivered, `sent_ms` per second | 1680–1880 (about **1.9× real time**) | max 1040 |
+| `mic_dropped` | **37–65 frames every second** | 0 |
+| `mic_backlog_ms` | 576 average | — |
+| `afe_ms` | ~480 | ~250 |
+| `mic_rms` | ~80–220 | ~400 |
+| Mic resampler at boot | **4.81 %** of one core (predicted ~1 %) | not used |
+
+- The mic produced nearly twice as much audio as time passed, so the uplink fell behind and dropped
+  frames, and the AFE did about twice the work. The likely cause is the ES8311 RX slot or rate
+  setup in B's `board_audio.c` (for example both slots read as mono samples, or the RX clock at
+  twice the rate). **It was not fixed**; H4 must check the RX rate (`sent_ms` per second ≈ 1000)
+  before anything else.
+- `mic_rms` was low, about a third to a half of the T-Circle's, at 24 dB mic PGA.
+- One `E I2C_If: Fail to read from dev 30` at boot (0x30 = the ES8311's 8-bit address, from
+  esp_codec_dev). Not chased; C no longer touches the codec.
+- The resampler's own cost was 4.81 % of one core, against the ~1 % estimated in section 4.
+
+### The change
+
+- `COMMA_HAS_VOICE` defaults to y only on the T-Circle; the Waveshare overlay sets
+  `CONFIG_COMMA_HAS_VOICE=n` and `CONFIG_COMMA_HAS_DISPLAY=y`. `voice/` is not built for it, and
+  `COMMA_BOOT_PRESS_CALLS` (depends on voice) is off; the option and its code in `call.c` stay for
+  a later voice board.
+- `boards/waveshare_amoled_1_32/board_audio.c` is deleted. `esp_codec_dev` is gone from
+  `waveshare_deps` and from `dependencies.lock.waveshare-amoled-1-32`; the overlay no longer sets
+  ESP-SR, `CODEC_*`, run-time stats or external BSS keys. `main` no longer requires `esp_driver_i2s`,
+  `esp-sr` or `esp_driver_tsens` on this board.
+- **PA (GPIO46)**: `board_init` drives it low with the pull-down on, first thing, before I2C and touch.
+- **Partition table** `partitions.waveshare-amoled-1-32.csv`: no `model` partition; factory app
+  0x10000–0x800000 (0x7F0000, 7.94 MB). Nothing for ESP-SR is built or flashed (`flash_args`:
+  bootloader, partition table, app).
+- **Input**: `board.c` has its own UI loop. A tap or a short BOOT press only wakes the screen
+  (`app_poll` wakes it when BOOT goes down); 3–10 s → pairing, > 10 s → reset, unchanged. A tap no
+  longer leaves pairing mode. The boot help line is gone. Setup ends on "All set / Connector ready".
+- `voice/resample.c` and its host test stay: the StickS3 (H4) has an ES8311 on one I2S port too, so
+  it needs the same 24→16 kHz mic path. The T-Circle compiles it and drops it at link, as since B.
+
+One leftover: `esp-sr` still resolves in this build, because `main/idf_component.yml` adds it for
+every esp32s3 target; it compiles but nothing links it (0 bytes in the image, no model). A
+`$CONFIG{COMMA_HAS_VOICE}` rule in that manifest was tried and reverted: on a fresh configure the
+rule is read before Kconfig exists, so it also dropped esp-sr from the T-Circle lock and broke the
+T-Circle build. Removing it cleanly needs a manifest split that would also rewrite the T-Circle and
+DevKit locks' `manifest_hash`; left for later.
+
+### Checks
+
+| | B | C |
+| --- | ---: | ---: |
+| Waveshare image (`esp_idf_size` total) | 2,186,843 | **1,510,566** |
+| Waveshare app partition free | 48 % of 4 MB | 82 % of 7.94 MB |
+| Waveshare DIRAM | 180,409 | **153,105** |
+| Waveshare external BSS | 33,876 | 0 |
+| T-Circle image / DIRAM / external BSS | 2,032,451 / 179,001 / 33,876 | same |
+| DevKit image | 1,261,219 | same |
+
+T-Circle and DevKit `sdkconfig`, regenerated from defaults, are byte-identical before and after C,
+and so are `dependencies.lock` and `dependencies.lock.esp32`. Their `.bin` files have the same size
+and differ only in the app descriptor (version string, build time) and the image hashes (77 and 75
+bytes). All three boards build with no warnings. Host tests were not rerun: C touches none of the
+sources they compile.
 
 ## 1. Layout and board interface
 
@@ -21,7 +95,7 @@ firmware/
     playback.c/.h         agent audio, ringback, tones (moved, unchanged)
     voice_clean.c/.h/.lf  V2 AFE: VAD, optional nsnet2 (moved, unchanged)
     call.c/.h             call controller, from the T-Circle board.c
-    resample.c/.h         24 -> 16 kHz mic resampler (B; only the Waveshare links it)
+    resample.c/.h         24 -> 16 kHz mic resampler (B; no board links it since C; kept for H4)
     board_audio.h         board interface: audio
     board_input.h         board interface: tap and BOOT
   ui/                   shared round screen, built with CONFIG_COMMA_HAS_DISPLAY
@@ -32,8 +106,9 @@ firmware/
     466/  ui_font.c, cue_logo.bin   (Waveshare, B)
     board_display.h       board interface: panel
   boards/t_circle_s3/     board.c (init order, help text), board_audio.c, board_touch.c, panel.c
-  boards/waveshare_amoled_1_32/  board.c, board_pins.h, board_audio.c, board_touch.c, panel.c,
-                                 waveshare_deps/ (managed drivers, this build only)
+  boards/waveshare_amoled_1_32/  board.c (own UI loop since C), board_pins.h, board_touch.c, panel.c,
+                                 waveshare_deps/ (managed panel driver, this build only);
+                                 board_audio.c in B only
   boards/esp32_devkit/    unchanged
 ```
 
@@ -65,7 +140,8 @@ call cards, notices, temperature log). Each board's `board_init` calls them in t
 original order: audio, AFE, input, temperature+playback, display.
 
 New Kconfig: `COMMA_DISPLAY_SIZE` (160 default, 466 for the Waveshare), `COMMA_BOOT_PRESS_CALLS`
-(off; on for the Waveshare), and the `COMMA_BOARD_WAVESHARE_AMOLED_1_32` choice.
+(off; on for the Waveshare in B, off everywhere since C), and the `COMMA_BOARD_WAVESHARE_AMOLED_1_32`
+choice.
 
 ## 2. T-Circle is unchanged (commit A, rechecked after B)
 
@@ -116,28 +192,31 @@ exactly 8, 14 and 48 at 160. Timings (`NOTICE_US`, `CALL_OVER_US`, `DIAL_PENDING
 | Kconfig / board ID / client source | `COMMA_BOARD_WAVESHARE_AMOLED_1_32` / `waveshare-amoled-1-32` / `waveshare-amoled-1-32` |
 | Overlay / target | `devices/sdkconfig.waveshare-amoled-1-32` / `tools/board.sh waveshare-amoled-1-32` → `esp32s3` |
 | Flash / PSRAM | 8 MB DIO 80 MHz / 8 MB octal 80 MHz (the reference's working modes) |
-| Features | voice, display 466, passkey + MITM, BOOT-press calls, discovery; all LAN limits = T-Circle |
-| Image | 2,186,843 bytes; 4 MB app partition 48 % free; DIRAM 180,409 (+1,408 vs T-Circle: resampler state); external BSS 33,876 |
+| Features | display 466, passkey + MITM, discovery; all LAN limits = T-Circle. **No voice since C** (no speaker) |
+| Image | C: 1,510,566 bytes, 7.94 MB app partition 82 % free, DIRAM 153,105. (B: 2,186,843; 4 MB app 48 % free; DIRAM 180,409) |
 
-Config against the T-Circle's: only flash size (8 MB), board choice/ID/client source, display size,
-`COMMA_BOOT_PRESS_CALLS=y`, and esp_codec_dev's menu (only `CODEC_ES8311_SUPPORT=y`). The overlay
-repeats the T-Circle's PSRAM/ESP-SR/run-time-stats keys (needed for the shared voice code). Metadata
-differs only in `client_source`/component key; limits are the T-Circle's.
+Config against the T-Circle's (as of B): only flash size (8 MB), board choice/ID/client source,
+display size, `COMMA_BOOT_PRESS_CALLS=y`, and esp_codec_dev's menu. Since C: voice off, own partition
+table, no ESP-SR/codec/run-time-stats keys. Metadata differs only in `client_source`/component key;
+limits are the T-Circle's.
 
 ### Pin map (Waveshare BSP `esp32_s3_touch_amoled_1_32.h`)
 
 | Function | GPIO |
 | --- | --- |
-| I2C SDA / SCL (ES8311 control + CST820, one bus, I2C0) | 47 / 48 |
-| I2S MCLK / SCLK / WS / DOUT (to codec) / DIN (from codec), I2S0 | 38 / 39 / 41 / 42 / 40 |
-| Speaker PA enable (active high) | 46 |
+| I2C SDA / SCL (ES8311 control + CST820, one bus, I2C0; only the touch is used since C) | 47 / 48 |
+| I2S MCLK / SCLK / WS / DOUT (to codec) / DIN (from codec), I2S0 (unused since C) | 38 / 39 / 41 / 42 / 40 |
+| Speaker PA enable (active high; held low since C) | 46 |
 | CO5300 QSPI CS / PCLK / D0–D3 / RST (SPI2) | 10 / 11 / 12–15 / 8 |
 | CST820 RST / INT (INT unused, input pull-up) | 7 / 6 |
 | BOOT (active low) | 0 |
 
 ### Partition table
 
-The T-Circle's `partitions.csv` unchanged; it ends at 0x510000, inside 8 MB (0x800000):
+Since C, `partitions.waveshare-amoled-1-32.csv`: nvs 0x9000 (0x6000), phy_init 0xF000 (0x1000),
+factory 0x10000 (0x7F0000), ending at 0x800000. No `model` partition.
+
+In B it used the T-Circle's `partitions.csv`, ending at 0x510000:
 
 | Name | Offset | Size |
 | --- | --- | --- |
@@ -153,7 +232,7 @@ The T-Circle's `partitions.csv` unchanged; it ends at 0x510000, inside 8 MB (0x8
 | Package | Version | Why | License |
 | --- | --- | --- | --- |
 | `espressif/esp_lcd_co5300` | **2.1.0** (IDF ≥ 5.4) | panel driver; the version the reference ran on this board | Apache-2.0 |
-| `espressif/esp_codec_dev` | **1.6.2** (IDF ≥ 4.0; uses `i2c_master` on IDF ≥ 5.3) | ES8311 registers only; latest non-beta (2.0 is beta) | Apache-2.0 |
+| `espressif/esp_codec_dev` | 1.6.2, **removed in C** | ES8311 registers only (B) | Apache-2.0 |
 | `espressif/cmake_utilities` | 0.5.3 | pulled by esp_lcd_co5300 | Apache-2.0 |
 
 They are declared in `boards/waveshare_amoled_1_32/waveshare_deps/idf_component.yml` (public
@@ -167,12 +246,14 @@ LVGL are not used; CST820 is a small driver of ours over `i2c_master`. No `updat
 
 Adapted code: the CO5300 init table and 6-column gap in `boards/waveshare_amoled_1_32/panel.c`
 come from the Waveshare BSP (`esp32_s3_touch_amoled_1_32.c`, Apache-2.0); the file carries that
-notice. Pins in `board_pins.h` are from the BSP header. The ES8311 setup sequence, gains and PA
-handling follow our own voice-box-agent `board_audio_waveshare.c`. Everything else is new.
+notice. Pins in `board_pins.h` are from the BSP header. B's ES8311 setup sequence, gains and PA
+handling (deleted in C) followed our own voice-box-agent `board_audio_waveshare.c`. Everything else
+is new.
 
-## 4. Audio: one I2S clock at 24 kHz
+## 4. Audio: one I2S clock at 24 kHz (B only; removed in C)
 
-ES8311 is full duplex on one I2S port, so mic and speaker share one sample clock. **I2S runs at
+What B built, kept as the starting point for H4's ES8311; see section 0 for what it did on the
+board (mic at ~1.9× real time, not fixed). ES8311 is full duplex on one I2S port, so mic and speaker share one sample clock. **I2S runs at
 24 kHz** (MCLK 6.144 MHz, a rate in the ES8311 coefficient table); playback goes out as received;
 the mic is read at 24 kHz and resampled to 16 kHz in the board layer for V2's AFE.
 
@@ -238,6 +319,10 @@ Other choices:
 
 ## 6. Input rules
 
+**Since C:** a tap or a short BOOT press only wakes the screen; BOOT holds as below. The rest of this
+section is B's call-key behaviour, which stays in `call.c` behind `COMMA_BOOT_PRESS_CALLS` (off on
+every board now).
+
 - **Tap** (CST820, polled every 10 ms as on the T-Circle): a touch that lifts within 280 ms calls or
   hangs up. Touch is not the only way: if the CST820 is absent or damaged, BOOT still calls
   (`touch: CST820 probe failed: …; BOOT still calls`). Auto-sleep is switched off with register
@@ -253,6 +338,9 @@ Other choices:
 - Log line for a press: `main: BOOT press (N ms): call key`.
 
 ## 7. Memory
+
+Since C: DIRAM 153,105 B, no external BSS, no I2S DMA; the +14,912 B DMA stripe and the 434 KB
+framebuffer are unchanged. The rest of this section is B's.
 
 Static (linker): DIRAM 180,409 B (T-Circle 179,001), external BSS 33,876 B (same).
 Runtime allocations that differ from the T-Circle: +14,912 B internal (DMA stripe); I2S DMA about
@@ -326,7 +414,15 @@ BOOT 3 s to pair, 10 s to reset`, logo on screen, `display: screen off` after 15
   tap leaves it on a provisioned board.
 - One discovery (`fake_connector.py --discover-probes` or the app): PASS as in H2.
 
-### 2. Waveshare: backup, flash, functions
+### 2. Waveshare after C (no voice)
+
+`tools/board.sh waveshare-amoled-1-32 flash-monitor <PORT>`: use `flash`, not `app-flash`; the
+partition table changed. Saved credentials survive (nvs is at the same offset). Expect: no `audio:`,
+`clean:` or `I2C_If` lines, no help line; `touch: CST820 ready`, `panel: CO5300 ready`, logo. Tap or
+short BOOT press on a dark screen → `display: screen on`, no call. BOOT 3–10 s → pairing; > 10 s →
+reset. Connector online, discovery and `http_request` as on the T-Circle. No hiss (PA low).
+
+### 2b. Waveshare: B's plan (voice), kept for reference
 
 **Full flash backup first** (8 MB), with the board in download mode if needed:
 

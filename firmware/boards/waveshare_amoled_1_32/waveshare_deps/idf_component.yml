@@ -1,11 +1,7 @@
-# Waveshare ESP32-S3-Touch-AMOLED-1.32 only. Exact versions; both support ESP-IDF 6.0.
-# Public, so main (which requires this component) gets their headers.
+# Waveshare ESP32-S3-Touch-AMOLED-1.32 only. Exact version; supports ESP-IDF 6.0.
+# Public, so main (which requires this component) gets its headers.
 dependencies:
   # CO5300 AMOLED over QSPI (panel.c). 2.1.0 is the version the reference project ran on this board.
   espressif/esp_lcd_co5300:
     version: "2.1.0"
-    require: public
-  # ES8311 codec control (board_audio.c). I2S data goes through our own channels.
-  espressif/esp_codec_dev:
-    version: "1.6.2"
     require: public

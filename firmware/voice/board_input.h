@@ -1,7 +1,8 @@
 #pragma once
 
-// What each voice board implements (boards/<board>/): the screen or key that starts and ends a
-// call, and the BOOT key. call.c polls both from the UI task; app_poll() owns BOOT holds.
+// What each touch board implements (boards/<board>/): the screen or key that starts and ends a
+// call (or, on a board without voice, wakes the screen), and the BOOT key. call.c, or the board's
+// own UI loop, polls both from the UI task; app_poll() owns BOOT holds.
 
 #include <stdbool.h>
 

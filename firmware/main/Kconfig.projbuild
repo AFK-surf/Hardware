@@ -25,7 +25,9 @@ config COMMA_CLIENT_SOURCE
     default "waveshare-amoled-1-32" if COMMA_BOARD_WAVESHARE_AMOLED_1_32
 config COMMA_HAS_VOICE
     bool "Voice"
-    default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_WAVESHARE_AMOLED_1_32
+    default y if COMMA_BOARD_T_CIRCLE_S3
+    help
+        Needs a mic and a speaker. The Waveshare AMOLED has no speaker on board (only a header).
 config COMMA_HAS_DISPLAY
     bool "Display"
     default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_WAVESHARE_AMOLED_1_32
@@ -39,7 +41,6 @@ config COMMA_DISPLAY_SIZE
 config COMMA_BOOT_PRESS_CALLS
     bool "A short BOOT press starts or ends a call, like a tap"
     depends on COMMA_HAS_VOICE
-    default y if COMMA_BOARD_WAVESHARE_AMOLED_1_32
     default n
     help
         A press released before the 3 s pairing hold is the call key. Holds keep their meaning.

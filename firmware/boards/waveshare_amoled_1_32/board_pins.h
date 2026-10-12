@@ -6,17 +6,17 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 
-// I2C: ES8311 codec control and CST820 touch share one bus.
+// I2C: ES8311 codec and CST820 touch share one bus. Only the touch is used.
 #define WS_I2C_SDA GPIO_NUM_47
 #define WS_I2C_SCL GPIO_NUM_48
 
-// ES8311, one I2S port, full duplex.
+// ES8311, one I2S port, full duplex. Unused: the board has no speaker, so it has no voice.
 #define WS_I2S_MCLK GPIO_NUM_38
 #define WS_I2S_SCLK GPIO_NUM_39
 #define WS_I2S_WS GPIO_NUM_41
 #define WS_I2S_DOUT GPIO_NUM_42  // to the codec's DAC
 #define WS_I2S_DIN GPIO_NUM_40   // from the codec's ADC
-// Speaker power amplifier enable, active high. Driven here, never by the codec driver.
+// Speaker power amplifier enable, active high. Held low (board.c): there is no speaker.
 #define WS_PA GPIO_NUM_46
 
 // CO5300 AMOLED, QSPI. No backlight pin: brightness is a panel command.

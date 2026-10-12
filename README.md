@@ -8,7 +8,7 @@ Comma hardware firmware: one ESP-IDF project, shared gateway code, and per-board
 | `firmware/voice/` | Shared voice call: Cue voice session, playback, noise/VAD, call controller |
 | `firmware/ui/` | Shared round-screen cards, fonts and logo, drawn at the board's screen size |
 | `firmware/boards/t_circle_s3/` | T-Circle pins and drivers: GC9D01 panel, CST816D touch, PDM mic, MAX98357A |
-| `firmware/boards/waveshare_amoled_1_32/` | Waveshare AMOLED pins and drivers: CO5300 panel, CST820 touch, ES8311 codec |
+| `firmware/boards/waveshare_amoled_1_32/` | Waveshare AMOLED pins and drivers: CO5300 panel, CST820 touch (no voice: no speaker on board) |
 | `firmware/boards/esp32_devkit/` | DevKit GPIO0 BOOT and GPIO2 status LED |
 | `devices/` | Board configurations and [porting instructions](devices/README.md) |
 | `tools/board.sh` | Build and flash one board with its own generated config and build directory |
@@ -22,7 +22,7 @@ and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB 
 | Board | Chip / memory | Connector | Snapshots (TCP tunnel) | Voice | Pairing |
 | --- | --- | --- | --- | --- | --- |
 | LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Running: HTTP, UDP, discovery | 2, board-tested in G3 | Yes | On-screen passkey, MITM |
-| Waveshare ESP32-S3-Touch-AMOLED-1.32 | ESP32-S3-PICO-1, 8 MB flash, 8 MB PSRAM | Built, not yet tested on hardware; T-Circle limits | 2 configured; unverified | Yes (ES8311) | On-screen passkey, MITM |
+| Waveshare ESP32-S3-Touch-AMOLED-1.32 | ESP32-S3-PICO-1, 8 MB flash, 8 MB PSRAM | Display + gateway, no voice (no speaker on board); T-Circle limits; display, touch and passkey setup board-tested | 2 configured; unverified | No (no speaker on board) | On-screen passkey, MITM |
 | ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Planned, not added | Expected; unverified | Planned | Planned spoken passkey |
 | M5Stack Stick (model to confirm) | Depends on model | Planned, not added | Unverified | Depends on hardware | Depends on hardware |
 | ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Board-tested: HTTP (8 KiB text, 1 MiB in chunks), UDP, discovery (12 KiB result cap), 3/3 each | **Unsupported: `lan_tcp_dial` disabled** | No | Secure Connections Just Works, no MITM |
@@ -75,8 +75,8 @@ No board, Wi-Fi password, backend credential, or `secrets.h` is needed to compil
 board settings come from `firmware/sdkconfig.defaults` plus `devices/sdkconfig.<board>`. Each build
 generates `firmware/build-<board>/sdkconfig`; no generated sdkconfig is committed. Dependencies are
 locked in `firmware/dependencies.lock` (T-Circle), `firmware/dependencies.lock.esp32` (DevKit) and
-`firmware/dependencies.lock.waveshare-amoled-1-32` (Waveshare: adds the CO5300 panel and ES8311 codec
-drivers, which only that build pulls). Build the Waveshare board with `tools/board.sh`, which tells
+`firmware/dependencies.lock.waveshare-amoled-1-32` (Waveshare: adds the CO5300 panel driver, which
+only that build pulls). Build the Waveshare board with `tools/board.sh`, which tells
 CMake the board before Kconfig runs.
 The first build needs internet access. DevKit excludes ESP-SR and the LCD/audio stack. Build boards
 sequentially: the component manager uses one shared `firmware/managed_components/` directory.
@@ -106,8 +106,7 @@ Runtime calls and LAN control require a compatible Comma/Salix backend; this rep
 the firmware and development tools, not the backend or Android app.
 
 - T-Circle: tap the screen to call; tap again to hang up.
-- Waveshare AMOLED: tap the screen, or press BOOT briefly (release within 3 s), to call; the same to
-  hang up.
+- Waveshare AMOLED: no calls (no speaker on board). A tap or a short BOOT press wakes the screen.
 - DevKit: LED off normally, slow blink while advertising, fast blink while BLE connected, solid 3 s after saved.
 - Hold BOOT for at least 3 seconds and release before 10 seconds to enter pairing mode.
 - Hold BOOT for 10 seconds to factory reset and erase the saved configuration.

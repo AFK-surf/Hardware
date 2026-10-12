@@ -1,14 +1,18 @@
-// Waveshare ESP32-S3-Touch-AMOLED-1.32: ES8311 audio (board_audio.c), CST820 touch and BOOT
-// (board_touch.c), CO5300 AMOLED (panel.c). Calls, the screen and BOOT holds are shared
-// (voice/call.c, ui/display.c, main.c). A short BOOT press calls too (COMMA_BOOT_PRESS_CALLS).
+// Waveshare ESP32-S3-Touch-AMOLED-1.32: display and Connector gateway, no voice. The board has a mic
+// (ES8311) but no speaker, only a speaker header, so the codec is never set up and the speaker PA
+// (GPIO46) is held low. CST820 touch and BOOT (board_touch.c), CO5300 AMOLED (panel.c); the screen
+// and BOOT holds are shared (ui/display.c, main.c). A tap or a short BOOT press only wakes the screen.
+#include "app_controls.h"
 #include "board.h"
-#include "board_audio.h"
 #include "board_input.h"
 #include "board_pins.h"
-#include "call.h"
 #include "display.h"
+#include "provisioning.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "main";
 static i2c_master_bus_handle_t s_i2c;
@@ -35,22 +39,43 @@ static void i2c_init(void)
     }
 }
 
+// Nothing drives the amplifier on this board: low, with the pull-down, from the first moment.
+static void pa_off(void)
+{
+    const gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << WS_PA,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_set_level(WS_PA, 0);
+    if (gpio_config(&cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "speaker PA pin config failed");
+    }
+    gpio_set_level(WS_PA, 0);
+}
+
 void board_init(void)
 {
-    // board_audio_init() pulls the speaker PA low before it touches the codec.
+    pa_off();
     i2c_init();
-    const esp_err_t audio = board_audio_init();
-    if (audio != ESP_OK) {
-        ESP_LOGE(TAG, "audio init failed: %s", esp_err_to_name(audio));
-    }
-    call_voice_clean_init();
     board_input_init();
-    call_init();
     ESP_ERROR_CHECK(display_init());
 }
 
 void board_run_ui(void *arg)
 {
     (void)arg;
-    call_run_ui("tap the screen or press BOOT to call, again to hang up; hold BOOT 3 s to pair, 10 s to reset");
+    app_controls_init(board_input_boot_held());
+    for (;;) {
+        const int64_t now = esp_timer_get_time();
+        if (board_input_poll() == BOARD_INPUT_TAP) {
+            display_wake();
+        }
+        // app_poll() wakes the screen when BOOT goes down, and owns the 3 s / 10 s holds.
+        const bool boot_tracking = app_poll(now, false, board_input_boot_held());
+        display_keep_awake(provisioning_active() || boot_tracking);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
