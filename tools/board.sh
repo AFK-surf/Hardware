@@ -8,6 +8,7 @@ if [ "$#" -ge 2 ]; then shift 2; else shift; fi
 case "$BOARD" in
   t-circle-s3) TARGET=esp32s3 ;;
   esp32-devkit) TARGET=esp32 ;;
+  waveshare-amoled-1-32) TARGET=esp32s3 ;;
   *) echo "Unknown board: $BOARD" >&2; exit 2 ;;
 esac
 case "$ACTION" in
@@ -26,6 +27,6 @@ else
 fi
 BUILD="$ROOT/firmware/build-$BOARD"
 cd "$ROOT/firmware"
-exec "${IDF[@]}" -B "$BUILD" -DIDF_TARGET="$TARGET" -DSDKCONFIG="$BUILD/sdkconfig" \
+exec "${IDF[@]}" -B "$BUILD" -DIDF_TARGET="$TARGET" -DCOMMA_BOARD="$BOARD" -DSDKCONFIG="$BUILD/sdkconfig" \
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;$ROOT/devices/sdkconfig.$BOARD" \
   ${PORT_ARGS[@]+"${PORT_ARGS[@]}"} "$@" "${ACTIONS[@]}"

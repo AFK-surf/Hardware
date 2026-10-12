@@ -6,6 +6,7 @@
 #include "device_config.h"
 #include "display.h"
 #include "firmware_config.h"
+#include "heap_diag.h"
 #include "playback.h"
 #include "provisioning.h"
 #include "voice_clean.h"
@@ -60,6 +61,29 @@ static void temp_log(int64_t now, bool in_call)
         ESP_LOGI(TAG, "temp chip=%.1f C %s uptime_s=%lld", c, in_call ? "call" : "idle", (long long)(now / 1000000));
     }
 }
+
+#if CONFIG_COMMA_HEAP_DIAGNOSTICS
+// Test builds only: internal and PSRAM heap, and the stack left in the voice and screen tasks, every
+// 10 s in a call and every 60 s otherwise. (The uplink task logs its own in the voice stats.)
+static void diag_sample(int64_t now, bool in_call)
+{
+    static int64_t last;
+    if (last != 0 && now - last < (in_call ? 10LL : 60LL) * 1000000) {
+        return;
+    }
+    last = now;
+    comma_heap_log(in_call ? "ui_call" : "ui_idle");
+    static const char *const tasks[] = {"display", "play", "sender"};
+    unsigned left[3];
+    for (int i = 0; i < 3; ++i) {
+        TaskHandle_t task = xTaskGetHandle(tasks[i]);
+        left[i] = task ? (unsigned)uxTaskGetStackHighWaterMark(task) : 0;
+    }
+    ESP_LOGI("heap", "psram free=%u largest=%u min=%u stack_free display=%u play=%u sender=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM), left[0], left[1], left[2]);
+}
+#endif
 
 // The call screen redraws only when its text changes: Calling, then the call time (once a second)
 // with Speaking or Listening, then how the call ended.
@@ -185,6 +209,9 @@ void call_run_ui(const char *help)
         const bool ending = cue_voice_ending();
         const bool in_call = (state == CUE_VOICE_CONNECTING || state == CUE_VOICE_UP) && !ending;
         temp_log(now, in_call);
+#if CONFIG_COMMA_HEAP_DIAGNOSTICS
+        diag_sample(now, in_call);
+#endif
         if (call_key) {
             display_wake();
         }

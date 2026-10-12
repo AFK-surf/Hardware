@@ -1,5 +1,12 @@
+# Set by tools/board.sh (firmware/CMakeLists.txt); empty for a plain idf.py build.
+idf_build_get_property(comma_board COMMA_BOARD)
+if(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32 AND NOT comma_board STREQUAL "waveshare-amoled-1-32")
+    message(FATAL_ERROR "Build the Waveshare AMOLED with tools/board.sh waveshare-amoled-1-32: it adds the board's drivers")
+endif()
 if(CONFIG_COMMA_BOARD_ESP32_DEVKIT)
     set(board_dir "../boards/esp32_devkit")
+elseif(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32)
+    set(board_dir "../boards/waveshare_amoled_1_32")
 else()
     set(board_dir "../boards/t_circle_s3")
 endif()
@@ -17,15 +24,19 @@ endif()
 set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
          tcp_transport http_parser lwip)
-# Requirements are collected before Kconfig is available. The supported S3
-# board has voice/display; the classic ESP32 target has neither dependency.
-if(IDF_TARGET STREQUAL "esp32s3")
+# Requirements are collected before Kconfig is available, so they follow the target and the board
+# name from tools/board.sh. Both S3 boards have voice/display; the classic ESP32 target has neither.
+if(comma_board STREQUAL "waveshare-amoled-1-32")
+    list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_driver_spi esp_driver_tsens
+         waveshare_deps)
+elseif(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_lcd_gc9d01
          esp_driver_spi esp_driver_tsens)
 endif()
 # Shared voice (firmware/voice/) and screen (firmware/ui/) code, for boards that have them.
 if(CONFIG_COMMA_HAS_VOICE)
-    list(APPEND srcs "../voice/playback.c" "../voice/cue_voice.c" "../voice/voice_clean.c" "../voice/call.c")
+    list(APPEND srcs "../voice/playback.c" "../voice/cue_voice.c" "../voice/voice_clean.c" "../voice/call.c"
+         "../voice/resample.c")
     set(ldfragments "../voice/voice_clean.lf")
 endif()
 if(CONFIG_COMMA_HAS_DISPLAY)

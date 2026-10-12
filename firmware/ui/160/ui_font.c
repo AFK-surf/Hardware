@@ -419,4 +419,3 @@ static const ui_glyph_t s_large_glyphs[12] = {
     {2782, 9, 18, 0, 17, 9},  // ':'
 };
 const ui_font_t ui_font_large = {" 0123456789:", s_large_glyphs, s_large_bitmap, 44, 9, 35};
-
