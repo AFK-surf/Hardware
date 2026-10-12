@@ -10,6 +10,19 @@
 #include "cJSON.h"
 
 static int g_checks, g_failed;
+static size_t g_alloc_limit, g_alloc_peak;
+static int g_alloc_rejected;
+static bool g_alloc_fail;
+
+void *ld_test_realloc(void *p, size_t n)
+{
+    if (n > g_alloc_peak) g_alloc_peak = n;
+    if (g_alloc_fail || (g_alloc_limit && n > g_alloc_limit)) {
+        ++g_alloc_rejected;
+        return NULL;
+    }
+    return realloc(p, n);
+}
 
 #define CHECK(cond, ...)                                       \
     do {                                                       \
@@ -583,6 +596,69 @@ static void test_caps(void)
     ld_free(ctx);
 }
 
+static void test_json_budget(void)
+{
+    // Exercise the exact boundary, including a non-power-of-two limit (12/48 KiB).
+    g_alloc_limit = LD_MAX_JSON + 1;
+    g_alloc_peak = 0;
+    g_alloc_rejected = 0;
+    char *text = malloc(LD_MAX_JSON + 1);
+    memset(text, 'x', LD_MAX_JSON);
+    text[LD_MAX_JSON] = 0;
+    ld_sb_t b = {.limit = LD_MAX_JSON};
+    ld_sb_str(&b, text);
+    CHECK(!b.oom && !b.full && b.len == LD_MAX_JSON, "exact JSON budget must fit");
+    CHECK(b.cap == LD_MAX_JSON + 1, "capacity %zu must include only one NUL beyond budget", b.cap);
+    ld_sb_str(&b, "x");
+    CHECK(b.full && !b.oom && b.len == LD_MAX_JSON, "budget overflow must not be reported as OOM");
+    ld_sb_free(&b);
+    free(text);
+
+    // Escaped quotes/backslashes can make one host exceed 12 KiB even with a 16 KiB arena.
+    // Reject every allocation above the result budget: checking length only after serializing
+    // that host would request a larger buffer and fail instead of producing truncated JSON.
+    ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
+    char value[LD_STR_MAX + 1];
+    for (int i = 0; i < LD_STR_MAX; ++i) value[i] = i % 2 ? '\\' : '"';
+    value[LD_STR_MAX] = 0;
+    for (int host = 30; host < 36; ++host) {
+        char address[16];
+        snprintf(address, sizeof(address), "192.168.5.%d", host);
+        for (int entry = 0; entry < LD_MAX_SSDP; ++entry) {
+            char pkt[1024];
+            int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %02d%s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n",
+                             entry, value, value, value);
+            ld_add_ssdp(ctx, ip(address), pkt, (size_t)n, NULL);
+        }
+    }
+    char *raw = NULL;
+    cJSON *r = result(ctx, &raw);
+    CHECK(raw && strlen(raw) <= LD_MAX_JSON && truncated(r), "oversized hosts must yield valid truncated JSON");
+    const cJSON *hosts = cJSON_GetObjectItem(r, "hosts");
+    if (LD_MAX_JSON == 12288) {
+        CHECK(count(hosts) == 0, "the oversized first host must be omitted whole");
+    } else {
+        CHECK(count(hosts) > 0, "default budget should preserve a large host");
+        CHECK(count(cJSON_GetObjectItem(cJSON_GetArrayItem(hosts, 0), "ssdp")) == LD_MAX_SSDP,
+              "retained host must be complete");
+    }
+    CHECK(g_alloc_rejected == 0 && g_alloc_peak <= LD_MAX_JSON + 1,
+          "result allocator exceeded budget: peak %zu, rejected %d", g_alloc_peak, g_alloc_rejected);
+    free(raw);
+    cJSON_Delete(r);
+    // Real allocator failure still returns NULL and does not masquerade as truncation.
+    g_alloc_fail = true;
+    raw = ld_result_json(ctx);
+    CHECK(raw == NULL && g_alloc_rejected > 0, "real allocation failure must remain OOM");
+    free(raw);
+    g_alloc_fail = false;
+    r = result(ctx, NULL);
+    CHECK(truncated(r), "discovery result must recover after allocation failure");
+    cJSON_Delete(r);
+    ld_free(ctx);
+    g_alloc_limit = 0;
+}
+
 static void test_merge(void)
 {
     // ARP + mDNS + SSDP on one host -> one entry with all three sources, in a fixed order.
@@ -632,6 +708,7 @@ int main(void)
     test_mdns_misc();
     test_ssdp();
     test_caps();
+    test_json_budget();
     test_merge();
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

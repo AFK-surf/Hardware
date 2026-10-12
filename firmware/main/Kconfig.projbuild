@@ -53,6 +53,13 @@ config COMMA_LAN_DISCOVER_ARENA_BYTES
     int "Discovery string arena"
     range 1024 98304
     default 98304
+config COMMA_LAN_DISCOVER_MAX_JSON
+    int "Maximum discovery result JSON bytes"
+    range 1024 49152
+    default 49152
+    help
+        Limit the result and its buffer growth (plus one byte for the NUL).
+        Hosts that do not fit are omitted and set truncated=true.
 config COMMA_LAN_UDP_MAX_ANSWER
     int "Maximum UDP answer"
     range 512 4096

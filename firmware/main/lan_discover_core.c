@@ -176,7 +176,11 @@ static const char *arena_str(ld_ctx_t *ctx, const char *s)
 
 void ld_sb_add(ld_sb_t *b, const char *s, size_t n)
 {
-    if (b->oom) {
+    if (b->oom || b->full) {
+        return;
+    }
+    if (b->limit && n > b->limit - b->len) {
+        b->full = true;
         return;
     }
     if (b->len + n + 1 > b->cap) {
@@ -184,6 +188,7 @@ void ld_sb_add(ld_sb_t *b, const char *s, size_t n)
         while (cap < b->len + n + 1) {
             cap *= 2;
         }
+        if (b->limit && cap > b->limit + 1) cap = b->limit + 1;
         char *p = heap_caps_realloc(b->p, cap, COMMA_BUFFER_CAPS);
         if (!p) {
             b->oom = true;
@@ -909,7 +914,7 @@ char *ld_result_json(ld_ctx_t *ctx)
         }
         order[j] = v;
     }
-    ld_sb_t b = {0};
+    ld_sb_t b = {.limit = LD_MAX_JSON};
     ld_sb_str(&b, "{\"hosts\":[");
     int written = 0;
     for (int i = 0; i < ctx->nhosts; ++i) {
@@ -918,8 +923,9 @@ char *ld_result_json(ld_ctx_t *ctx)
             ld_sb_str(&b, ",");
         }
         write_host(ctx, &b, &ctx->hosts[order[i]]);
-        if (b.len + 32 > LD_MAX_JSON) {
+        if (b.full || b.len + 32 > LD_MAX_JSON) {
             b.len = before;
+            b.full = false; // roll back the whole host, then append the result footer
             if (b.p) {
                 b.p[before] = 0;
             }

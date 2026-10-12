@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "firmware_config.h"
 
 // The caps agreed with the backend (docs/prompts/A5-firmware-lan-discovery.md). Anything cut sets
 // "truncated": true.
@@ -20,7 +21,7 @@
 #define LD_STR_MAX 255      // bytes, every string
 // Not in the contract: the whole result stays under this, so a busy network can't produce a reply
 // the agent can't use. Hosts that don't fit are left out (truncated).
-#define LD_MAX_JSON (48 * 1024)
+#define LD_MAX_JSON CONFIG_COMMA_LAN_DISCOVER_MAX_JSON
 
 #define LD_SRC_ARP 0x1
 #define LD_SRC_MDNS 0x2
@@ -65,7 +66,9 @@ typedef struct {
     char *p;
     size_t len;
     size_t cap;
+    size_t limit; // maximum content bytes, excluding NUL; zero means unbounded (envelopes)
     bool oom;
+    bool full; // content limit reached, distinct from allocation failure
 } ld_sb_t;
 void ld_sb_add(ld_sb_t *b, const char *s, size_t n);
 void ld_sb_str(ld_sb_t *b, const char *s);

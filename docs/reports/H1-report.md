@@ -2,7 +2,13 @@
 
 Date: 2026-10-11–12. Base: `0fe245a`. Worktree: `Hardware-h1`, branch `codex/multi-board`.
 
-**Implementation and build/host checks are ready for review. Hardware acceptance is incomplete.**
+**Latest status:** supplied DevKit local-WSS runs passed 8 KiB text and 1 MiB chunks 3/3. TCP tunnels
+are disabled; the new 12 KiB discovery JSON cap awaits hardware retesting. See
+[the hardware follow-up](#devkit-hardware-follow-up--2026-10-12) for the current profile, evidence
+source and remaining checks. Earlier sections below record the initial implementation and tests.
+
+**Initial acceptance attempt:** implementation and build/host checks were ready, but hardware
+acceptance was incomplete.
 The DevKit was flashed, its GPIO2 LED was confirmed by the user, and BOOT timing/reset logic was
 exercised through the USB UART control lines. BLE system pairing could not be completed while the
 Mac was locked. The Wi-Fi credentials from the specified gitignored file were also tried through
@@ -421,3 +427,119 @@ Generated configs still have `CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576` and
 This review follow-up performed host tests and builds only; it did not flash either board or add
 hardware heap measurements. The hardware acceptance items above remain open, and heap diagnostics
 and TCP window tuning still await those measurements. No merge or push was performed.
+
+## DevKit hardware follow-up — 2026-10-12
+
+### Evidence source and measured outcome
+
+The user supplied these results from Claude's physical DevKit tests on network `HUAWEI-F219BS`,
+using `e86e837` and a local WSS Connector. The successful measurements below were taken after the
+local TLS, TCP and feature/HTTP/RX changes requested in items 1–3. They do not establish a hardware
+pass for the later `15732e8` error-handling fixes or the new discovery JSON budget in this commit.
+No raw serial logs or exact byte counts accompanied this update; approximate KB values below are
+preserved as reported, rather than converted into invented byte-accurate heap readings.
+
+| State/workload after those local changes | Reported free RAM | Largest block | Result |
+| --- | --- | --- | --- |
+| Boot | ~253 KB | Not supplied | Boot measurement |
+| Provisioning, BLE and TLS simultaneously active | ~54 KB minimum | Not supplied | Overlap measured; startup order stays unchanged |
+| Connector idle | ~130 KB | ~49 KB | Local WSS connected |
+| 1 MiB HTTP chunk transfer | ~81 KB minimum | Not supplied | 3/3 passed |
+| HTTP text, 8 KiB | Not supplied | Not supplied | 3/3 passed |
+
+These are reported workload minima, not a new continuous `heap_caps_get_minimum_free_size` series.
+Stack watermarks and heap recovery readings were not included. The earlier AP-unavailable result
+describes the initial run only; this later local-WSS run reached the network and exercised transfers.
+
+Failures that determined the new profile:
+
+- Dynamic mbedTLS buffers plus separate WebSocket RX/TX locks caused **three LoadProhibited
+  panics**: the read task released the receive buffer and cleared `in_ctr` while the write task
+  reached `ssl_check_ctr_renegotiate`. Reported stack: `lan_tunnel → tunnel_send →
+  esp_websocket_client_send_text → mbedtls_ssl_write → ssl_check_ctr_renegotiate`.
+- The inherited ~64 KiB TCP receive window left only ~44 KB internal RAM during a 1 MiB chunk
+  transfer; TLS send-buffer allocation failed and disconnected the session.
+- With TLS connected, largest blocks were only ~36–49 KB. The server's 32 KiB raw tunnel frame
+  requires about 43.7 KB of base64 buffer plus JSON, which does not reliably fit.
+- Text at 16 KiB failed with OOM in **3/3** runs; 8 KiB passed **3/3**.
+- Discovery with the old 48 KiB JSON budget passed only **1/3**. Geometric buffer growth required
+  a contiguous allocation larger than the available ~36 KB block.
+
+### Current DevKit profile and discovery fix
+
+`devices/sdkconfig.esp32-devkit` now selects:
+
+| Setting | Value |
+| --- | --- |
+| `CONFIG_MBEDTLS_DYNAMIC_BUFFER` | `n`; `DYNAMIC_FREE_CONFIG_DATA` removed from overlay |
+| `CONFIG_MBEDTLS_SSL_RENEGOTIATION` | `n` |
+| `CONFIG_LWIP_TCP_WND_DEFAULT` | 16,384 |
+| `CONFIG_LWIP_TCP_SND_BUF_DEFAULT` | 16,384 |
+| `CONFIG_COMMA_LAN_TUNNELS` | 0 |
+| `CONFIG_COMMA_CONNECTOR_RX_MAX` | 16,384 |
+| `CONFIG_COMMA_LAN_HTTP_MAX_BYTES` | 8,192 |
+| `CONFIG_COMMA_LAN_DISCOVER_MAX_JSON` | 12,288 |
+| `CONFIG_COMMA_HEAP_DIAGNOSTICS` | `y`, retained for Claude's retest |
+
+HTTP chunks remain 4 KiB, the discovery string arena remains 16 KiB, and BLE/TLS startup order is
+unchanged. Overlay comments record the hardware reasons. The shared defaults and T-Circle overlay
+are unchanged.
+
+**DevKit does not support `lan_tcp_dial`.** Its metadata omits the method and its build excludes
+the tunnel implementation. Supporting it requires the backend to honor the device's `max_frame`,
+followed by hardware validation of the smaller-frame path before re-enabling tunnels. No backend
+or protocol change is included here.
+
+`LD_MAX_JSON` now takes its value from `COMMA_LAN_DISCOVER_MAX_JSON`, with a shared/host default of
+49,152 bytes to preserve T-Circle's limit. The result builder also clamps geometric allocation
+growth to that budget plus one NUL byte. It distinguishes reaching the budget from real OOM,
+rolls back a host that does not fit, and emits valid JSON with `truncated=true`. This avoids
+allocating an oversized intermediate buffer before deciding to truncate. The response envelope
+still uses the normal builder and is separate from the result budget.
+
+Host regressions cover the exact 12/48 KiB boundary, escaped strings that make one host exceed the
+DevKit budget, valid JSON and whole-host truncation, and true allocator failure followed by
+recovery. The test allocator rejects any result allocation over the configured cap plus NUL;
+`--devkit` reads the new setting directly from the board overlay.
+
+The 12 KiB discovery cap still needs three physical-board runs alongside the full current profile.
+Keep heap diagnostics enabled for those runs and record largest blocks, recovery and stack
+watermarks. This follow-up performs builds and host validation only; it does not flash the board
+being used for Claude's retest.
+
+### Build and host validation of this follow-up
+
+| Check | Result |
+| --- | --- |
+| Discovery host test, default 48 KiB JSON budget | 1,232 checks, 0 failed |
+| Discovery host test, DevKit 12 KiB JSON budget | 1,231 checks, 0 failed |
+| HTTP host test, default / DevKit 8 KiB text cap | 263 passed each, 0 failed |
+| UDP host test, default / DevKit | 747 checks each, 0 failed |
+| TCP tunnel host test, default T-Circle profile | 1,366 checks, 0 failed |
+| Connector JSON host test | 123 checks, 0 failed |
+| Python test discovery | 21 tests in 63.305 s, OK |
+| DevKit build, ESP-IDF 6.0.2 | PASS; image `0x132d80` bytes |
+| T-Circle build, ESP-IDF 6.0.2 | PASS; image `0x1eeee0` bytes |
+| `git diff --check` | PASS |
+
+All C suites ran with ASan/UBSan. The existing cJSON deprecation warnings and Python test-server
+socket `ResourceWarning` messages remain; neither caused a failure. Both firmware builds completed
+without compiler warnings/errors.
+
+The DevKit generated sdkconfig was backed up and regenerated from defaults so the changed overlay
+actually took effect. Its generated values match every row of the profile table; dynamic TLS
+config/CA-release suboptions are absent because dynamic buffers are off. The compile database
+contains no `lan_tunnel.c`, and `lan_tcp_dial` is absent from the application image. Local test URL
+and CA overrides remain outside this normal build.
+
+T-Circle's generated config differs from the pre-change snapshot only by the new
+`CONFIG_COMMA_LAN_DISCOVER_MAX_JSON=49152` key. Its overlay, shared defaults and both dependency
+lockfiles are unchanged. Compared with `15732e8`, its image grows by 64 bytes; the archive-size
+comparison changes only `libmain.a` (117,654 → 117,721 bytes, +67). Its existing voice, display,
+pairing, two-tunnel profile and discovery limit are retained.
+
+DevKit's image shrinks by 14,688 bytes (`0x1366e0` → `0x132d80`). The principal linked-archive changes
+are `libmain.a` 55,303 → 47,314 bytes, `libmbedtls.a` 27,775 → 23,871, and `liblwip.a` 111,197 →
+110,516, consistent with removing tunnels/renegotiation and changing the buffer profile. These are
+build-size observations, not new runtime heap measurements. The work is a separate commit on
+`codex/multi-board`; no merge or push was performed.

@@ -11,7 +11,19 @@ tools/board.sh esp32-devkit flash-monitor /dev/cu.usbserial-0001
 | Overlay | Target | Flash / PSRAM | Features | Status |
 | --- | --- | --- | --- | --- |
 | `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | Display, voice, passkey, HTTP/UDP/discovery, 2 tunnels | Existing board; H1 config/build/host regression checks |
-| `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 LED, Just Works, HTTP/UDP, experimental discovery + 1 tunnel | Rev v1.0 flashed; network and BLE acceptance pending, see H1 report |
+| `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 LED, Just Works, HTTP/UDP, discovery with 12 KiB result cap; no TCP tunnels | Local WSS: 8 KiB text and 1 MiB chunks passed 3/3; discovery cap awaits hardware retest |
+
+DevKit does not support `lan_tcp_dial`. The backend currently sends 32 KiB raw frames regardless of
+the device's `max_frame`; their base64/JSON buffers do not reliably fit the 36–49 KB largest blocks
+observed after TLS. The backend must honor `max_frame` before DevKit tunnel support can be retested
+and enabled. Disabled tunnels are omitted from Connector metadata.
+
+The measured DevKit profile uses static TLS buffers with renegotiation off, 16 KiB TCP receive/send
+buffers, an 8 KiB text cap, 4 KiB HTTP chunks and 16 KiB incoming JSON frames. Discovery keeps its
+16 KiB string arena but caps result JSON and buffer growth at 12 KiB (plus one NUL byte); excess
+hosts set `truncated=true`. This cap is new and still needs a hardware retest. Keep
+`CONFIG_COMMA_HEAP_DIAGNOSTICS=y` during the follow-up runs. See [H1](../docs/reports/H1-report.md)
+for the supplied hardware measurements and build/host validation.
 
 The shared defaults load first, then the board overlay. Generated config and objects live in
 `firmware/build-<board>/`. ESP-IDF keeps existing config choices when defaults change: delete that
@@ -45,5 +57,5 @@ and restore ESP-SR when switching boards, but DevKit never downloads or links it
 For new hardware follow [AGENTS.md](AGENTS.md). Do not infer board capacity from a successful build.
 
 HTTP, UDP and discovery host test scripts also accept `--devkit` to exercise the numeric limits
-from this overlay. Tunnel tests retain the default two-tunnel profile; the DevKit one-tunnel
-acceptance test requires the actual board and the fake Connector.
+from this overlay, including the discovery JSON budget. Tunnel tests retain the default two-tunnel
+profile for T-Circle; DevKit advertises no tunnel method.

@@ -7,5 +7,5 @@ cd "$(dirname "$0")"
 CJSON=../../managed_components/espressif__cjson/cJSON
 OUT=${TMPDIR:-/tmp}/lan_discover_test
 cc $COMMA_TEST_DEFINES -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -g -fsanitize=address,undefined \
-    -I../lan_http_test/stubs -I../../main -I"$CJSON" test.c "$CJSON/cJSON.c" -o "$OUT"
+    -Istubs -I../lan_http_test/stubs -I../../main -I"$CJSON" test.c "$CJSON/cJSON.c" -o "$OUT"
 "$OUT"

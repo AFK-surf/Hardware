@@ -21,12 +21,18 @@ and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB 
 | LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Running: HTTP, UDP, discovery | 2, board-tested in G3 | Yes | On-screen passkey, MITM |
 | ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Planned, not added | Expected; unverified | Planned | Planned spoken passkey |
 | M5Stack Stick (model to confirm) | Depends on model | Planned, not added | Unverified | Depends on hardware | Depends on hardware |
-| ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Builds; LED and BOOT logic verified; network acceptance pending | Experimental 1 × 32 KiB window; **not yet validated** | No | Secure Connections Just Works, no MITM |
+| ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Local WSS: 8 KiB text and 1 MiB chunks passed 3/3; discovery retest pending | **Unsupported: `lan_tcp_dial` disabled** | No | Secure Connections Just Works, no MITM |
 
-DevKit currently uses a 16 KiB text cap, 4 KiB HTTP chunks, a 16 KiB discovery arena and internal RAM
-fallback. The initial pairing heap measured about 173 KB free. BLE system pairing and the three-round
-TLS/transfer memory tests remain pending: the Mac was locked and the configured 2.4 GHz access point
-was not found. Do not treat the experimental tunnel/discovery settings as proven capacity.
+DevKit uses an 8 KiB text cap, 4 KiB HTTP chunks, 16 KiB incoming JSON frames, a 16 KiB discovery
+arena and a 12 KiB discovery JSON cap. Reported hardware runs with local WSS left about 130 KB free
+at idle (49 KB largest block) and at least 81 KB during 1 MiB chunks. Discovery passed only 1/3
+with the old 48 KiB result budget; the new 12 KiB cap still needs a hardware retest. Heap diagnostics
+remain enabled.
+
+DevKit does not support `lan_tcp_dial`: the server's 32 KiB raw frames need about 43.7 KB of base64
+buffer plus JSON, which does not reliably fit the measured 36–49 KB largest blocks after TLS.
+To support tunnels, the backend must honor the device's `max_frame`; the smaller-frame path must
+then pass hardware memory tests before tunnels are enabled again.
 See [H1's measurements and remaining checks](docs/reports/H1-report.md).
 
 The BLE UUIDs and credential fields are unchanged; even the no-voice board still accepts the existing
