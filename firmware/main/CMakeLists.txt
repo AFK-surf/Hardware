@@ -3,10 +3,15 @@ idf_build_get_property(comma_board COMMA_BOARD)
 if(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32 AND NOT comma_board STREQUAL "waveshare-amoled-1-32")
     message(FATAL_ERROR "Build the Waveshare AMOLED with tools/board.sh waveshare-amoled-1-32: it adds the board's drivers")
 endif()
+if(CONFIG_COMMA_BOARD_M5STACK_STICKS3 AND NOT comma_board STREQUAL "m5stack-sticks3")
+    message(FATAL_ERROR "Build the StickS3 with tools/board.sh m5stack-sticks3: it adds the board's drivers")
+endif()
 if(CONFIG_COMMA_BOARD_ESP32_DEVKIT)
     set(board_dir "../boards/esp32_devkit")
 elseif(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32)
     set(board_dir "../boards/waveshare_amoled_1_32")
+elseif(CONFIG_COMMA_BOARD_M5STACK_STICKS3)
+    set(board_dir "../boards/m5stack_sticks3")
 else()
     set(board_dir "../boards/t_circle_s3")
 endif()
@@ -25,10 +30,13 @@ set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
          tcp_transport http_parser lwip)
 # Requirements are collected before Kconfig is available, so they follow the target and the board
-# name from tools/board.sh. The T-Circle has voice and display; the Waveshare AMOLED display only (no
-# speaker); the classic ESP32 target neither.
+# name from tools/board.sh. The T-Circle and the StickS3 have voice and display; the Waveshare AMOLED
+# display only (no speaker); the classic ESP32 target neither.
 if(comma_board STREQUAL "waveshare-amoled-1-32")
     list(APPEND reqs esp_driver_i2c esp_lcd esp_driver_spi waveshare_deps)
+elseif(comma_board STREQUAL "m5stack-sticks3")
+    list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_driver_spi esp_driver_ledc
+         esp_driver_tsens sticks3_deps)
 elseif(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_lcd_gc9d01
          esp_driver_spi esp_driver_tsens)
@@ -40,8 +48,14 @@ if(CONFIG_COMMA_HAS_VOICE)
     set(ldfragments "../voice/voice_clean.lf")
 endif()
 if(CONFIG_COMMA_HAS_DISPLAY)
-    list(APPEND srcs "../ui/display.c" "../ui/ui_card.c" "../ui/${CONFIG_COMMA_DISPLAY_SIZE}/ui_font.c")
-    set(assets "../ui/${CONFIG_COMMA_DISPLAY_SIZE}/cue_logo.bin")
+    # ui/<size>/: a round screen's diameter, or a rectangular screen's WxH.
+    if(CONFIG_COMMA_DISPLAY_WIDTH)
+        set(ui_size "${CONFIG_COMMA_DISPLAY_WIDTH}x${CONFIG_COMMA_DISPLAY_HEIGHT}")
+    else()
+        set(ui_size "${CONFIG_COMMA_DISPLAY_SIZE}")
+    endif()
+    list(APPEND srcs "../ui/display.c" "../ui/ui_card.c" "../ui/${ui_size}/ui_font.c")
+    set(assets "../ui/${ui_size}/cue_logo.bin")
 endif()
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../voice" "../ui"
                        PRIV_REQUIRES ${reqs} EMBED_FILES ${assets} LDFRAGMENTS ${ldfragments})
