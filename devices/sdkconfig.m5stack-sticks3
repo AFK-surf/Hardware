@@ -1,0 +1,45 @@
+# M5Stack StickS3 (K150): ESP32-S3-PICO-1-N8R8, 8 MB flash, 8 MB octal PSRAM.
+# ST7789 135x240 LCD, ES8311 codec (one mic, AW8737 amp), M5PM1 power chip, KEY1 GPIO11, KEY2 GPIO12.
+# Voice and display. Memory and PSRAM modes from the reference (muse-gadget-sdk's
+# sdkconfig.muse-m5stack-sticks3, Apache-2.0, (c) Meta Platforms); flash mode as on the Waveshare,
+# the same module family.
+CONFIG_COMMA_BOARD_M5STACK_STICKS3=y
+CONFIG_COMMA_HAS_VOICE=y
+CONFIG_COMMA_HAS_DISPLAY=y
+CONFIG_IDF_TARGET="esp32s3"
+
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# App 0x10000-0x700000, ESP-SR model 0x700000-0x800000.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.m5stack-sticks3.csv"
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# The board's USB port is the S3's USB-Serial/JTAG, the secondary console.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# As on the T-Circle (8 MB PSRAM): TLS records and NimBLE pools in PSRAM, so the Connector can start
+# while BLE is up.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# V2 (voice_clean.c), as on the T-Circle: ESP-SR AFE with the VAD (nsnet2 optional), models in the
+# "model" partition. voice_clean.lf puts nsnet3's unused 19 KB .bss in PSRAM. CPU load per core in
+# the call stats.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_NSN_NSNET2=y
+CONFIG_SR_VADN_VADNET1_MEDIUM=y
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

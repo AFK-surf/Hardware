@@ -9,10 +9,10 @@
 
 #define CARD_LINES_MAX 10
 #define CARD_LINE_CHARS 64
-// Spacing scales with the screen; at 160 px it is 8, 14 and 48.
-#define CARD_GAP (UI_CARD_SIZE * 8 / 160)
-#define CARD_MARGIN (UI_CARD_SIZE * 14 / 160)
-#define CARD_MIN_WIDTH (UI_CARD_SIZE * 48 / 160)
+// Spacing scales with the screen's width; at 160 px it is 8, 14 and 48.
+#define CARD_GAP (UI_CARD_W * 8 / 160)
+#define CARD_MARGIN (UI_CARD_W * 14 / 160)
+#define CARD_MIN_WIDTH (UI_CARD_W * 48 / 160)
 #define LEVEL_LABEL 8
 #define LEVEL_TEXT 15
 
@@ -47,12 +47,18 @@ static int line_height(const ui_font_t *font)
     return font == &ui_font_large ? font->ink_bottom - font->ink_top : font->line_height;
 }
 
-// Usable width of the round glass across rows [top, bottom).
+// Usable width across rows [top, bottom): the chord of a round glass, or a rectangle's width.
 static int chord_width(int top, int bottom)
 {
-    const float r = UI_CARD_SIZE / 2.0f;
+#if UI_CARD_ROUND
+    const float r = UI_CARD_W / 2.0f;
     const float d = fmaxf(fabsf(top - r), fabsf(bottom - r));
     const int w = d >= r ? 0 : (int)(2.0f * sqrtf(r * r - d * d)) - CARD_MARGIN;
+#else
+    (void)top;
+    (void)bottom;
+    const int w = UI_CARD_W - CARD_MARGIN;
+#endif
     return w < CARD_MIN_WIDTH ? CARD_MIN_WIDTH : w;
 }
 
@@ -146,18 +152,18 @@ static void draw_glyph(uint16_t *fb, const uint16_t *lut, const ui_font_t *font,
     const uint8_t *src = font->bitmap + g->offset;
     for (int y = 0; y < g->h; ++y) {
         const int py = y0 + g->y + y;
-        if (py < 0 || py >= UI_CARD_SIZE) {
+        if (py < 0 || py >= UI_CARD_H) {
             continue;
         }
         for (int x = 0; x < g->w; ++x) {
             const int px = x0 + g->x + x;
-            if (px < 0 || px >= UI_CARD_SIZE) {
+            if (px < 0 || px >= UI_CARD_W) {
                 continue;
             }
             const uint8_t b = src[y * row_bytes + x / 2];
             const uint8_t a = (x & 1) ? (b & 0x0f) : (b >> 4);
             if (a) {
-                fb[py * UI_CARD_SIZE + px] = lut[(a * level + 7) / 15];
+                fb[py * UI_CARD_W + px] = lut[(a * level + 7) / 15];
             }
         }
     }
@@ -170,15 +176,15 @@ void ui_card_render(const ui_card_t *card, uint16_t *fb, const uint16_t lut[16])
     int count = layout(card, 0, lines, &height);
     // Re-wrap against the rows the block really lands on once it is centred.
     for (int pass = 0; pass < 3; ++pass) {
-        count = layout(card, (UI_CARD_SIZE - height) / 2, lines, &height);
+        count = layout(card, (UI_CARD_H - height) / 2, lines, &height);
     }
-    memset(fb, 0, UI_CARD_SIZE * UI_CARD_SIZE * sizeof(uint16_t));
-    int y = (UI_CARD_SIZE - height) / 2;
+    memset(fb, 0, UI_CARD_W * UI_CARD_H * sizeof(uint16_t));
+    int y = (UI_CARD_H - height) / 2;
     for (int i = 0; i < count; ++i) {
         const card_line_t *line = &lines[i];
         y += line->gap_before;
         const int top = line->font == &ui_font_large ? y - line->font->ink_top : y;
-        int x = (UI_CARD_SIZE - text_width(line->font, line->text, strlen(line->text))) / 2;
+        int x = (UI_CARD_W - text_width(line->font, line->text, strlen(line->text))) / 2;
         for (const char *c = line->text; *c; ++c) {
             const ui_glyph_t *g = glyph_for(line->font, *c);
             if (g) {

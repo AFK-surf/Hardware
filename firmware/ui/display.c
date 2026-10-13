@@ -1,5 +1,5 @@
 #include "memory_caps.h"
-// Round screen shared by the display boards. Idle screen is the Cue logo, still; calls and setup
+// Screen shared by the display boards. Idle screen is the Cue logo, still; calls and setup
 // show text cards. The screen redraws only when what it shows changes, and sleeps (light off, panel
 // in SLPIN) after DISPLAY_SLEEP_US without activity. The panel itself is the board's
 // (board_display.h).
@@ -23,7 +23,7 @@
 // A frame that did not reach the panel is drawn again after this.
 #define RETRY_MS 500
 
-_Static_assert(CUE_LOGO_SIZE == UI_CARD_SIZE, "logo size must match panel");
+_Static_assert(CUE_LOGO_W * CUE_LOGO_H % 2 == 0, "logo is packed two pixels per byte");
 
 extern const uint8_t logo_start[] asm("_binary_cue_logo_bin_start");
 extern const uint8_t logo_end[] asm("_binary_cue_logo_bin_end");

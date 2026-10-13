@@ -1,6 +1,8 @@
-// Render the firmware's text cards on the host, for checking layout on the round glass.
+// Render the firmware's text cards on the host, for checking layout on the screen.
 //
 //   cc -std=c11 -O2 -DUI_CARD_SIZE=160 -Iui tools/card_preview.c ui/ui_card.c ui/160/ui_font.c -lm -o build/card_preview
+//   cc -std=c11 -O2 -DUI_CARD_W=135 -DUI_CARD_H=240 -DUI_CARD_ROUND=0 -Iui tools/card_preview.c ui/ui_card.c \
+//      ui/135x240/ui_font.c -lm -o build/card_preview
 //   build/card_preview build-preview/cards
 //
 // Writes one 8-bit PGM per card (gray level = LUT index * 17).
@@ -42,7 +44,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < 16; ++i) {
         lut[i] = (uint16_t)i;
     }
-    static uint16_t fb[UI_CARD_SIZE * UI_CARD_SIZE];
+    static uint16_t fb[UI_CARD_W * UI_CARD_H];
     for (size_t n = 0; n < sizeof(CARDS) / sizeof(CARDS[0]); ++n) {
         ui_card_render(&CARDS[n], fb, lut);
         char path[256];
@@ -52,8 +54,8 @@ int main(int argc, char **argv)
             perror(path);
             return 1;
         }
-        fprintf(f, "P5\n%d %d\n255\n", UI_CARD_SIZE, UI_CARD_SIZE);
-        for (int i = 0; i < UI_CARD_SIZE * UI_CARD_SIZE; ++i) {
+        fprintf(f, "P5\n%d %d\n255\n", UI_CARD_W, UI_CARD_H);
+        for (int i = 0; i < UI_CARD_W * UI_CARD_H; ++i) {
             fputc(fb[i] * 17, f);
         }
         fclose(f);

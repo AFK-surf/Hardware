@@ -6,6 +6,7 @@ Run from the repository root after activating ESP-IDF 6.0.2:
 tools/board.sh t-circle-s3 build
 tools/board.sh esp32-devkit build
 tools/board.sh waveshare-amoled-1-32 build
+tools/board.sh m5stack-sticks3 build
 tools/board.sh esp32-devkit flash-monitor /dev/cu.usbserial-0001
 ```
 
@@ -13,6 +14,7 @@ tools/board.sh esp32-devkit flash-monitor /dev/cu.usbserial-0001
 | --- | --- | --- | --- | --- |
 | `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | Display, voice, passkey, HTTP/UDP/discovery, 2 tunnels | Supported; H1 smoke test on the board: boot, Connector online, voice call |
 | `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | Display + gateway, no voice (no speaker on board): AMOLED 466x466, passkey, tap or BOOT press wakes the screen, T-Circle limits, own partition table (no model partition) | Display, touch, passkey setup and BOOT press/hold board-tested on H3 B; this build not yet flashed ([H3](../docs/reports/H3-report.md)) |
+| `sdkconfig.m5stack-sticks3` | esp32s3 | 8 MB / 8 MB | Display, voice, passkey, T-Circle limits: ST7789 135x240, ES8311 on stereo I2S at 24 kHz (mic slot 0, resampled to 16 kHz), M5PM1 rails, KEY1 calls, KEY2 = BOOT holds; app 0x10000–0x700000, model 0x700000 | Board-tested: passkey setup, Connector, KEY1 calls (mic rate OK), screen sleep, KEY2 pairing hold, discovery and HTTP 3/3, heap diagnostics; KEY2 > 10 s factory reset not yet confirmed ([H4](../docs/reports/H4-report.md)) |
 | `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 LED, Just Works, HTTP/UDP, discovery with 12 KiB result cap; no TCP tunnels | Supported; local WSS: discovery, 8 KiB text and 1 MiB chunks passed 3/3; BOOT and replug checked |
 
 DevKit does not support `lan_tcp_dial`. The backend currently sends 32 KiB raw frames regardless of

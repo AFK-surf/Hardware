@@ -3,8 +3,8 @@
 // What each display board implements (boards/<board>/). ui/display.c decides what to show and when
 // to sleep; the board owns the panel, its framebuffer and the transfer.
 //
-// The framebuffer is UI_CARD_SIZE x UI_CARD_SIZE RGB565 pixels in the panel's byte order (the gray
-// table in display.c swaps bytes, as both panels take big-endian pixels).
+// The framebuffer is UI_CARD_W x UI_CARD_H RGB565 pixels, row by row, in the panel's byte order
+// (the gray table in display.c swaps bytes, as all the panels take big-endian pixels).
 
 #include <stdbool.h>
 #include <stdint.h>

@@ -6,9 +6,10 @@ Comma hardware firmware: one ESP-IDF project, shared gateway code, and per-board
 | --- | --- |
 | `firmware/main/` | Shared Connector, LAN methods, Wi-Fi, BLE provisioning and BOOT controls |
 | `firmware/voice/` | Shared voice call: Cue voice session, playback, noise/VAD, call controller |
-| `firmware/ui/` | Shared round-screen cards, fonts and logo, drawn at the board's screen size |
+| `firmware/ui/` | Shared screen cards, fonts and logo, drawn at the board's screen size (round, or 135x240 on the StickS3) |
 | `firmware/boards/t_circle_s3/` | T-Circle pins and drivers: GC9D01 panel, CST816D touch, PDM mic, MAX98357A |
 | `firmware/boards/waveshare_amoled_1_32/` | Waveshare AMOLED pins and drivers: CO5300 panel, CST820 touch (no voice: no speaker on board) |
+| `firmware/boards/m5stack_sticks3/` | M5Stack StickS3 pins and drivers: M5PM1 power chip, ES8311 audio, ST7789 panel, two keys |
 | `firmware/boards/esp32_devkit/` | DevKit GPIO0 BOOT and GPIO2 status LED |
 | `devices/` | Board configurations and [porting instructions](devices/README.md) |
 | `tools/board.sh` | Build and flash one board with its own generated config and build directory |
@@ -24,7 +25,7 @@ and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB 
 | LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Running: HTTP, UDP, discovery | 2, board-tested in G3 | Yes | On-screen passkey, MITM |
 | Waveshare ESP32-S3-Touch-AMOLED-1.32 | ESP32-S3-PICO-1, 8 MB flash, 8 MB PSRAM | Display + gateway, no voice (no speaker on board); T-Circle limits; display, touch and passkey setup board-tested | 2 configured; unverified | No (no speaker on board) | On-screen passkey, MITM |
 | ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Planned, not added | Expected; unverified | Planned | Planned spoken passkey |
-| M5Stack Stick (model to confirm) | Depends on model | Planned, not added | Unverified | Depends on hardware | Depends on hardware |
+| M5Stack StickS3 | ESP32-S3-PICO-1, 8 MB flash, 8 MB PSRAM | Board-tested: setup, Connector online, discovery with probes and HTTP (1 MiB chunks) 3/3; T-Circle limits | 2 configured; unverified | Yes: KEY1 calls board-tested, mic rate 16 kHz checked each call | On-screen passkey, MITM (board-tested) |
 | ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Board-tested: HTTP (8 KiB text, 1 MiB in chunks), UDP, discovery (12 KiB result cap), 3/3 each | **Unsupported: `lan_tcp_dial` disabled** | No | Secure Connections Just Works, no MITM |
 
 DevKit uses an 8 KiB text cap, 4 KiB HTTP chunks, 16 KiB incoming JSON frames, a 16 KiB discovery
@@ -69,6 +70,7 @@ cd Hardware
 tools/board.sh t-circle-s3 build
 tools/board.sh esp32-devkit build
 tools/board.sh waveshare-amoled-1-32 build
+tools/board.sh m5stack-sticks3 build
 ```
 
 No board, Wi-Fi password, backend credential, or `secrets.h` is needed to compile. The target and
@@ -76,7 +78,8 @@ board settings come from `firmware/sdkconfig.defaults` plus `devices/sdkconfig.<
 generates `firmware/build-<board>/sdkconfig`; no generated sdkconfig is committed. Dependencies are
 locked in `firmware/dependencies.lock` (T-Circle), `firmware/dependencies.lock.esp32` (DevKit) and
 `firmware/dependencies.lock.waveshare-amoled-1-32` (Waveshare: adds the CO5300 panel driver, which
-only that build pulls). Build the Waveshare board with `tools/board.sh`, which tells
+only that build pulls) and `firmware/dependencies.lock.m5stack-sticks3` (StickS3: adds esp_codec_dev
+for its ES8311). Build the Waveshare and StickS3 boards with `tools/board.sh`, which tells
 CMake the board before Kconfig runs.
 The first build needs internet access. DevKit excludes ESP-SR and the LCD/audio stack. Build boards
 sequentially: the component manager uses one shared `firmware/managed_components/` directory.
@@ -107,6 +110,8 @@ the firmware and development tools, not the backend or Android app.
 
 - T-Circle: tap the screen to call; tap again to hang up.
 - Waveshare AMOLED: no calls (no speaker on board). A tap or a short BOOT press wakes the screen.
+- StickS3: press the front key (KEY1) to call, again to hang up. The side key (KEY2) is its BOOT
+  for the holds below; a short press only wakes the screen.
 - DevKit: LED off normally, slow blink while advertising, fast blink while BLE connected, solid 3 s after saved.
 - Hold BOOT for at least 3 seconds and release before 10 seconds to enter pairing mode.
 - Hold BOOT for 10 seconds to factory reset and erase the saved configuration.
@@ -148,6 +153,7 @@ sh firmware/tools/lan_udp_test/run.sh
 sh firmware/tools/lan_tunnel_test/run.sh
 sh firmware/tools/connector_json_test/run.sh
 sh firmware/tools/resample_test/run.sh
+sh firmware/tools/mic_path_test/run.sh
 # Smaller DevKit limits (from its overlay):
 sh firmware/tools/lan_http_test/run.sh --devkit
 sh firmware/tools/lan_udp_test/run.sh --devkit

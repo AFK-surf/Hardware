@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pre-render the Cue logo, as CueLogoAnimation leaves it at rest, for the round screen.
 
-Usage: gen_cue_logo.py [SIZE]   (screen size in pixels: 160, the default, or 466)
+Usage: gen_cue_logo.py [SIZE]   (screen: 160, the default, or 466 round; WxH, e.g. 135x240)
 
 Geometry, keyframe matrices and easing are copied from
 reference/cue-logo/CueLogoAnimation.tsx (defaults: easeInOut, zoom 2 s,
@@ -9,7 +9,7 @@ hold 1.4 s, nested delay 1 %). The CSS timeline is evaluated on the host, so
 the device only has to blit one frame.
 
 Output:
-  ui/<SIZE>/cue_logo.bin           SIZE x SIZE, 4 bpp, high nibble = left pixel (ui/cue_logo.h has the size)
+  ui/<SIZE>/cue_logo.bin           the screen, 4 bpp, high nibble = left pixel, raster order (ui/cue_logo.h)
   build-preview/cue-logo-<SIZE>.png  for eyeballing
 
 Needs: pip install skia-python pillow numpy
@@ -24,8 +24,10 @@ from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-SCREEN = int(sys.argv[1]) if len(sys.argv) > 1 else 160
-LOGO_PX = round(100 * SCREEN / 160)  # logo diameter: 100 px on the 160 px round glass
+SCREEN_NAME = sys.argv[1] if len(sys.argv) > 1 else "160"
+# A square screen is "N"; a rectangular one "WxH".
+WIDTH, HEIGHT = (int(v) for v in SCREEN_NAME.split("x")) if "x" in SCREEN_NAME else (int(SCREEN_NAME),) * 2
+LOGO_PX = round(100 * WIDTH / 160)  # logo diameter: 100 px on the 160 px round glass, scaled by width
 ZOOM_S = 2.0
 NESTED_DELAY_PCT = 1.0
 BEZIER = (0.77, 0.0, 0.175, 1.0)  # easeInOut
@@ -72,13 +74,14 @@ def render(ease, t):
     tx, ty = ZOOM_END[1] * zoom, ZOOM_END[2] * zoom
     ox, oy = NESTED_ORIGIN
     cx, cy, r = APERTURE
-    margin = (SCREEN - LOGO_PX) / 2
+    margin_x = (WIDTH - LOGO_PX) / 2
+    margin_y = (HEIGHT - LOGO_PX) / 2
     k = LOGO_PX / 730
 
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{SCREEN}" height="{SCREEN}" viewBox="0 0 {SCREEN} {SCREEN}">
-  <rect width="{SCREEN}" height="{SCREEN}" fill="#000"/>
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" viewBox="0 0 {WIDTH} {HEIGHT}">
+  <rect width="{WIDTH}" height="{HEIGHT}" fill="#000"/>
   <defs><clipPath id="b"><path d="{MASK}"/></clipPath></defs>
-  <g transform="translate({margin} {margin}) scale({k})">
+  <g transform="translate({margin_x} {margin_y}) scale({k})">
     <g clip-path="url(#b)">
       <g transform="matrix({s} 0 0 {s} {tx} {ty})">
         <path fill="#fff" d="{LOGO}"/>
@@ -94,7 +97,7 @@ def render(ease, t):
   </g>
 </svg>"""
     dom = skia.SVGDOM.MakeFromStream(skia.MemoryStream(svg.encode(), True))
-    surface = skia.Surface(SCREEN, SCREEN)
+    surface = skia.Surface(WIDTH, HEIGHT)
     canvas = surface.getCanvas()
     canvas.clear(skia.ColorBLACK)
     dom.render(canvas)
@@ -107,14 +110,17 @@ def main():
     # the whole zoom during calls; D1 dropped that to save power).
     still = render(bezier(*BEZIER), ZOOM_S)
     q = np.clip(np.rint(still * 15), 0, 15).astype(np.uint8)
-    blob = ((q[:, 0::2] << 4) | q[:, 1::2]).tobytes()
+    # Pairs in raster order: the same bytes as row by row for an even width, and an odd width
+    # (135) still packs.
+    flat = q.reshape(-1)
+    blob = ((flat[0::2] << 4) | flat[1::2]).tobytes()
 
-    (ROOT / "ui" / str(SCREEN)).mkdir(exist_ok=True)
-    (ROOT / "ui" / str(SCREEN) / "cue_logo.bin").write_bytes(blob)
+    (ROOT / "ui" / SCREEN_NAME).mkdir(exist_ok=True)
+    (ROOT / "ui" / SCREEN_NAME / "cue_logo.bin").write_bytes(blob)
 
     preview = ROOT / "build-preview"
     preview.mkdir(exist_ok=True)
-    Image.fromarray(q * 17).save(preview / f"cue-logo-{SCREEN}.png")
+    Image.fromarray(q * 17).save(preview / f"cue-logo-{SCREEN_NAME}.png")
     print(f"{len(blob)} bytes")
 
 
