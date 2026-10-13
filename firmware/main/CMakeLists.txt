@@ -60,15 +60,6 @@ endif()
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../voice" "../ui"
                        PRIV_REQUIRES ${reqs} EMBED_FILES ${assets} LDFRAGMENTS ${ldfragments})
 
-# Filming only: use a separate build directory so the normal image keeps its screen behavior.
-option(COMMA_VIDEO_LOGO_ONLY "Keep the T-Circle logo visible, including during calls" OFF)
-if(COMMA_VIDEO_LOGO_ONLY)
-    if(NOT CONFIG_COMMA_BOARD_T_CIRCLE_S3 OR NOT CONFIG_COMMA_HAS_DISPLAY)
-        message(FATAL_ERROR "COMMA_VIDEO_LOGO_ONLY requires a T-Circle-S3 with its display enabled")
-    endif()
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_VIDEO_LOGO_ONLY=1)
-endif()
-
 # Dev only: `idf.py -B build-selftest -DCOMMA_LAN_DISCOVER_SELFTEST_S=20 build` runs lan_discover every
 # 20 s and logs the reply (connector.c). Use a separate build directory: the cache keeps the value.
 if(COMMA_LAN_DISCOVER_SELFTEST_S)

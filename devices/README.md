@@ -19,8 +19,8 @@ tools/board.sh esp32-devkit flash-monitor PORT
 | `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 status LED, Just Works pairing, HTTP/UDP, discovery with a 12 KiB result cap; no TCP tunnels | Setup, discovery, 8 KiB text and 1 MiB chunks three times each over local WSS; BOOT holds; replug; current HTTP/UDP regressions over local WS and staging WSS reconnect |
 
 The [validation notes](../docs/validation.md) summarize the current results and outstanding tests.
-Physical offline dialing and credential
-replacement across workspaces remain unverified on hardware; host regressions cover both policies.
+Physical offline dialing and credential replacement across workspaces remain unverified on hardware;
+host regressions cover both policies.
 
 ## ESP32 DevKit limits
 
@@ -45,9 +45,6 @@ RAM (57 KB largest block) and stayed above that during three rounds of discovery
 Heap diagnostics are off; turn on `CONFIG_COMMA_HEAP_DIAGNOSTICS` in a test build to measure a change.
 
 ## Build details
-
-For a T-Circle that must show its logo continuously during filming, use the separate
-[filming image](../docs/tcircle-filming.md). Normal builds retain call cards and screen sleep.
 
 The shared defaults load first, then the board overlay. Generated config and objects live in
 `firmware/build-<board>/`. ESP-IDF keeps existing config choices when defaults change: delete that

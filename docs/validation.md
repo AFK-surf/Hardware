@@ -27,6 +27,3 @@ successful call checks do not establish a fix for it.
 
 A one-off setup failure that succeeded on retry also has no confirmed cause. Later successful
 pairing runs and fixes to other app behavior do not establish that this original failure is fixed.
-
-The optional [T-Circle filming image](tcircle-filming.md) changes screen presentation only. Its
-always-visible logo behavior is separate from the normal-firmware checks above.

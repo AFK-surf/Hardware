@@ -28,4 +28,4 @@ reports and screenshots are retained rather than removed during routine reposito
 | Credentials moved across workspaces | Credential-bound consent and failed-save host checks passed. | Re-provision a test board into another workspace, verify operation permission starts disabled and stays disabled after reboot, and confirm explicit re-enabling works. |
 | Original StickS3 setup failure | [Pairing follow-up](B3-android-pairing-report.md) completed three StickS3 runs and one T-Circle comparison, but the original error has no captured response or request ID. | Capture the failing stage, app/BLE status and backend error before retrying; distinguish it from the other app bugs already fixed. |
 
-These items remain open. The filming image and repository cleanup do not claim to resolve them.
+These items remain open. Repository cleanup does not claim to resolve them.
