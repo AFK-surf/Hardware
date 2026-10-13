@@ -18,9 +18,9 @@ tools/board.sh esp32-devkit flash-monitor PORT
 | `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | CO5300 466x466 AMOLED, CST820 touch; gateway without voice (the board has a mic but no speaker); own partition table without a model partition; T-Circle limits | Screen, touch, passkey setup, Connector, BOOT press and holds; HTTP/UDP regressions, discovery and tunnels; display recovered after correcting an earlier wrong-board flash |
 | `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 status LED, Just Works pairing, HTTP/UDP, discovery with a 12 KiB result cap; no TCP tunnels | Setup, discovery, 8 KiB text and 1 MiB chunks three times each over local WSS; BOOT holds; replug; current HTTP/UDP regressions over local WS and staging WSS reconnect |
 
-The [2026-10-13 validation report](../docs/reports/2026-10-13-firmware-fixes-hardware.md) records the
-current fixes, measured results and outstanding tests. Physical offline dialing and credential
-replacement across workspaces remain unverified on hardware; host regressions cover both policies.
+The [validation notes](../docs/validation.md) summarize the current results and outstanding tests.
+Physical offline dialing and credential replacement across workspaces remain unverified on hardware;
+host regressions cover both policies.
 
 ## ESP32 DevKit limits
 
