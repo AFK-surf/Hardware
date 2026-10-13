@@ -15,7 +15,7 @@
 
 // VAD timing inside the AFE. Speech must last 128 ms before vadnet reports it (fewer clicks and
 // keyboard hits get through); silence is reported after 96 ms, the shortest it allows, because
-// cue_voice adds its own hangover on top.
+// comma_voice adds its own hangover on top.
 #define VAD_MIN_SPEECH_MS 128
 #define VAD_MIN_NOISE_MS 96
 // Denoised audio waiting to be taken, at 16 kHz: two AFE chunks plus a frame is plenty.
@@ -121,7 +121,7 @@ static esp_err_t create_afe(void)
     if (!cfg) {
         return ESP_FAIL;
     }
-    cfg->aec_init = false;  // the echo gate in cue_voice handles the speaker for now
+    cfg->aec_init = false;  // the echo gate in comma_voice handles the speaker for now
     cfg->se_init = false;   // one mic
     cfg->ns_init = !COMMA_VOICE_NS_OFF;
     cfg->vad_init = true;

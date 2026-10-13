@@ -12,7 +12,7 @@
 
 #include "board.h"
 #include "board_display.h"
-#include "cue_logo.h"
+#include "comma_logo.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -24,10 +24,10 @@
 // A frame that did not reach the panel is drawn again after this.
 #define RETRY_MS 500
 
-_Static_assert(CUE_LOGO_W * CUE_LOGO_H % 2 == 0, "logo is packed two pixels per byte");
+_Static_assert(COMMA_LOGO_W * COMMA_LOGO_H % 2 == 0, "logo is packed two pixels per byte");
 
-extern const uint8_t logo_start[] asm("_binary_cue_logo_bin_start");
-extern const uint8_t logo_end[] asm("_binary_cue_logo_bin_end");
+extern const uint8_t logo_start[] asm("_binary_comma_logo_bin_start");
+extern const uint8_t logo_end[] asm("_binary_comma_logo_bin_end");
 
 static const char *TAG = "display";
 
@@ -45,7 +45,7 @@ static void build_lut(void)
 
 static void expand_logo(uint16_t *dst)
 {
-    for (int i = 0; i < CUE_LOGO_BYTES; ++i) {
+    for (int i = 0; i < COMMA_LOGO_BYTES; ++i) {
         uint8_t b = logo_start[i];
         dst[2 * i] = s_lut[b >> 4];
         dst[2 * i + 1] = s_lut[b & 0x0f];
@@ -57,7 +57,7 @@ esp_err_t display_init(void)
     if (s_ready) {
         return ESP_OK;
     }
-    if (logo_end - logo_start != CUE_LOGO_BYTES) {
+    if (logo_end - logo_start != COMMA_LOGO_BYTES) {
         return ESP_ERR_INVALID_SIZE;
     }
     build_lut();

@@ -43,7 +43,7 @@ elseif(IDF_TARGET STREQUAL "esp32s3")
 endif()
 # Shared voice (firmware/voice/) and screen (firmware/ui/) code, for boards that have them.
 if(CONFIG_COMMA_HAS_VOICE)
-    list(APPEND srcs "../voice/playback.c" "../voice/cue_voice.c" "../voice/voice_clean.c" "../voice/call.c"
+    list(APPEND srcs "../voice/playback.c" "../voice/comma_voice.c" "../voice/voice_clean.c" "../voice/call.c"
          "../voice/resample.c")
     set(ldfragments "../voice/voice_clean.lf")
 endif()
@@ -55,7 +55,7 @@ if(CONFIG_COMMA_HAS_DISPLAY)
         set(ui_size "${CONFIG_COMMA_DISPLAY_SIZE}")
     endif()
     list(APPEND srcs "../ui/display.c" "../ui/ui_card.c" "../ui/${ui_size}/ui_font.c")
-    set(assets "../ui/${ui_size}/cue_logo.bin")
+    set(assets "../ui/${ui_size}/comma_logo.bin")
 endif()
 idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../voice" "../ui"
                        PRIV_REQUIRES ${reqs} EMBED_FILES ${assets} LDFRAGMENTS ${ldfragments})

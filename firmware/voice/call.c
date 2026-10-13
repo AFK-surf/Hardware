@@ -3,7 +3,7 @@
 
 #include "app_controls.h"
 #include "board_input.h"
-#include "cue_voice.h"
+#include "comma_voice.h"
 #include "device_config.h"
 #include "display.h"
 #include "firmware_config.h"
@@ -107,7 +107,7 @@ static void call_screen_update(call_screen_t *cs, int64_t now, bool live)
     if (live) {
         cs->shown = true;
         cs->over_until = 0;
-        if (cue_voice_state() != CUE_VOICE_UP || playback_ringing()) {
+        if (comma_voice_state() != COMMA_VOICE_UP || playback_ringing()) {
             display_show_card("Calling", NULL, "Comma");
             return;
         }
@@ -130,12 +130,12 @@ static void call_screen_update(call_screen_t *cs, int64_t now, bool live)
     if (!cs->shown) {
         return;
     }
-    if (cs->over_until == 0 && cue_voice_last_end() == CUE_VOICE_END_NONE && !cue_voice_can_start()) {
+    if (cs->over_until == 0 && comma_voice_last_end() == COMMA_VOICE_END_NONE && !comma_voice_can_start()) {
         // Over, but not yet known how: wait for the tone (the mic closes first).
         return;
     }
     if (cs->over_until == 0) {
-        const bool dropped = cue_voice_last_end() == CUE_VOICE_END_DROPPED;
+        const bool dropped = comma_voice_last_end() == COMMA_VOICE_END_DROPPED;
         char t[16] = "";
         if (cs->up_us != 0) {
             format_time(now - cs->up_us, t, sizeof(t));
@@ -204,11 +204,11 @@ void call_run_ui(const char *help)
 #if CONFIG_COMMA_BOOT_PRESS_CALLS
         call_key = boot_pressed(&boot_press, now, board_input_boot_held()) || call_key;
 #endif
-        const cue_voice_state_t state = cue_voice_state();
+        const comma_voice_state_t state = comma_voice_state();
         // A call that is over but still closing its socket (hang-up tone playing) is not "in call":
         // a tap then dials again instead of hanging up.
-        const bool ending = cue_voice_ending();
-        const bool in_call = (state == CUE_VOICE_CONNECTING || state == CUE_VOICE_UP) && !ending;
+        const bool ending = comma_voice_ending();
+        const bool in_call = (state == COMMA_VOICE_CONNECTING || state == COMMA_VOICE_UP) && !ending;
         temp_log(now, in_call);
 #if CONFIG_COMMA_HEAP_DIAGNOSTICS
         diag_sample(now, in_call);
@@ -221,7 +221,7 @@ void call_run_ui(const char *help)
         const bool boot_tracking = app_poll(now, in_call, board_input_boot_held());
         const bool prov = provisioning_active();
         if (prov_was_active && !prov) {
-            cue_voice_credentials_changed();
+            comma_voice_credentials_changed();
         }
         prov_was_active = prov;
 
@@ -238,7 +238,7 @@ void call_run_ui(const char *help)
         if (dial_pending_until != 0 && (now > dial_pending_until || in_call || prov)) {
             dial_pending_until = 0;
         }
-        if (dial_pending_until != 0 && !ending && cue_voice_can_start()) {
+        if (dial_pending_until != 0 && !ending && comma_voice_can_start()) {
             ESP_LOGI(TAG, "dialing the tap made while the last call was closing");
             dial_pending_until = 0;
             dial = true;
@@ -248,7 +248,7 @@ void call_run_ui(const char *help)
         } else if (hung_up_at != 0 && now - hung_up_at < HANGUP_GUARD_US) {
             ESP_LOGI(TAG, "tap %lld ms after hanging up, ignored", (long long)((now - hung_up_at) / 1000));
         } else if (in_call) {
-            cue_voice_end();
+            comma_voice_end();
             hung_up_at = now;
         } else if (ending) {
             ESP_LOGI(TAG, "tap while the last call is closing: dialing once it has closed");
@@ -264,9 +264,9 @@ void call_run_ui(const char *help)
 
         if (!dial) {
             // Nothing to dial.
-        } else if (!cue_voice_can_start()) {
+        } else if (!comma_voice_can_start()) {
             ESP_LOGW(TAG, "a call cannot start yet");
-            if (cue_voice_close_code() == 4401) {
+            if (comma_voice_close_code() == 4401) {
                 display_show_card("Key rejected", NULL, "Hold BOOT 3 s and set up again in the app");
                 notice_until = now + NOTICE_US;
             }
@@ -278,7 +278,7 @@ void call_run_ui(const char *help)
             notice_until = esp_timer_get_time() + NOTICE_US;
         } else {
             call_screen_reset(&call_screen);
-            if (cue_voice_start() != ESP_OK) {
+            if (comma_voice_start() != ESP_OK) {
                 ESP_LOGE(TAG, "voice session did not start");
                 playback_tone(PLAYBACK_TONE_DROPPED);
                 display_show_card("Call failed", NULL, "Tap to try again");

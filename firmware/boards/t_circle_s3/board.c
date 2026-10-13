@@ -2,6 +2,12 @@
 // LilyGO T-Circle-S3: PDM mic and MAX98357A (board_audio.c), CST816D touch and BOOT
 // (board_touch.c), GC9D01 panel (panel.c). Calls, the screen and BOOT holds are shared
 // (voice/call.c, ui/display.c, main.c).
+//
+// Pin map (board_audio.c, board_touch.c, panel.c) from LilyGO's T-Circle-S3 V1.1 documentation:
+// the schematic (project/T-Circle-S3_V1.1.pdf) and libraries/Mylibrary/pin_config.h in
+// https://github.com/Xinyuan-LilyGO/T-Circle-S3. Facts only, no code copied. Mic MP34DT05 CLK 9 /
+// DATA 8; MAX98357A BCLK 5, LRCLK 4, DATA 6, SD_MODE 45; GC9D01 MOSI 17, SCLK 15, DC 16, CS 13,
+// BL 18; CST816D touch I2C SDA 11, SCL 14; BOOT 0.
 #include "board.h"
 #include "board_audio.h"
 #include "board_input.h"

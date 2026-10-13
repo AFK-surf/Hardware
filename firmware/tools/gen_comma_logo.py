@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pre-render the Comma logo, as the app's logo animation leaves it at rest, for the screen.
 
-Usage: gen_cue_logo.py [SIZE]   (screen: 160, the default, or 466 round; WxH, e.g. 135x240)
+Usage: gen_comma_logo.py [SIZE]   (screen: 160, the default, or 466 round; WxH, e.g. 135x240)
 
 Geometry, keyframe matrices and easing are those of the Comma app's logo
 animation (defaults: easeInOut, zoom 2 s, hold 1.4 s, nested delay 1 %). The
@@ -10,8 +10,8 @@ CSS timeline is evaluated on the host, so the device only has to blit one frame.
 The logo is a Comma trademark; see THIRD_PARTY_NOTICES.md.
 
 Output:
-  ui/<SIZE>/cue_logo.bin           the screen, 4 bpp, high nibble = left pixel, raster order (ui/cue_logo.h)
-  build-preview/cue-logo-<SIZE>.png  for eyeballing
+  ui/<SIZE>/comma_logo.bin           the screen, 4 bpp, high nibble = left pixel, raster order (ui/comma_logo.h)
+  build-preview/comma-logo-<SIZE>.png  for eyeballing
 
 Needs: pip install skia-python pillow numpy
 """
@@ -117,11 +117,11 @@ def main():
     blob = ((flat[0::2] << 4) | flat[1::2]).tobytes()
 
     (ROOT / "ui" / SCREEN_NAME).mkdir(exist_ok=True)
-    (ROOT / "ui" / SCREEN_NAME / "cue_logo.bin").write_bytes(blob)
+    (ROOT / "ui" / SCREEN_NAME / "comma_logo.bin").write_bytes(blob)
 
     preview = ROOT / "build-preview"
     preview.mkdir(exist_ok=True)
-    Image.fromarray(q * 17).save(preview / f"cue-logo-{SCREEN_NAME}.png")
+    Image.fromarray(q * 17).save(preview / f"comma-logo-{SCREEN_NAME}.png")
     print(f"{len(blob)} bytes")
 
 

@@ -22,7 +22,8 @@ Pin maps, I2C addresses and register numbers are facts about the hardware, not c
 - M5Stack StickS3 (K150) pins, from M5Stack's K150 schematic, and the M5PM1 register map, cross-checked
   with M5Stack's M5PM1 library (MIT, © M5Stack Technology); no code was copied from that library
   (`firmware/boards/m5stack_sticks3/`).
-- LilyGO T-Circle-S3 pins, from LilyGO's board documentation (`firmware/boards/t_circle_s3/`).
+- LilyGO T-Circle-S3 V1.1 pins, from LilyGO's schematic and `pin_config.h` in
+  https://github.com/Xinyuan-LilyGO/T-Circle-S3 (`firmware/boards/t_circle_s3/board.c` lists them).
 
 ## Font
 
@@ -58,7 +59,7 @@ The Python tools use [bleak](https://github.com/hbldh/bleak) (MIT) and
 
 ## Trademarks
 
-"Comma" and the Comma logo are trademarks. The logo images in `firmware/ui/*/cue_logo.bin` and
+"Comma" and the Comma logo are trademarks. The logo images in `firmware/ui/*/comma_logo.bin` and
 the pictures in `docs/assets/` are included to build and document this firmware. The Apache
 License does not grant permission to use the Comma name or logo (Apache-2.0, section 6).
 

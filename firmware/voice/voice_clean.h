@@ -6,7 +6,7 @@
 //
 // ESP-SR AFE (voice-communication type, one mic): vadnet1 VAD, optionally after nsnet2 noise
 // suppression (COMMA_VOICE_NS_OFF), models in the "model" partition. The mic runs at 16 kHz, the
-// AFE's rate; its output (raw, or denoised) is upsampled 2:3 to the wire's 24 kHz. cue_voice decides
+// AFE's rate; its output (raw, or denoised) is upsampled 2:3 to the wire's 24 kHz. comma_voice decides
 // what reaches the wire (pre-roll, hangover, zeros).
 
 #include <stdbool.h>

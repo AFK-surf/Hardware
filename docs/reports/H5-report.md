@@ -101,6 +101,8 @@ don't cover found "office camera/LAN" and the voice model's internal name; both 
 
 ## 4. Identifiers left as they are
 
+Superseded: the user decided to rename them all to `comma` (section 9, commit 3).
+
 | Identifier | Where | Recommendation |
 | --- | --- | --- |
 | CMake `project(cue_logo)` → image `cue_logo.bin`, `cue_logo.elf` | `firmware/CMakeLists.txt` | Rename to `comma` before release (image name is visible to users in flash commands); changes build paths and `flash_args`, so do it as its own change |
@@ -212,7 +214,7 @@ the outage from ~49 s to ~24 s without explaining it.
    monitor open; on the StickS3, opening the port resets the board.
 2. Reproduce: reset the board and tap the screen (T-Circle) or press KEY1 (StickS3) as soon as the
    logo appears, so the call dials while the Connector connects. The run counts only if
-   `cue: session.started call_id=…` comes **before** `connector: socket open`. If `connector:
+   `comma: session.started call_id=…` (`cue:` before commit 3) comes **before** `connector: socket open`. If `connector:
    connected run=…` comes first, that is the working case: reset and try again.
 3. Talk briefly, hang up, and wait 60 s after `connector: connected`.
 4. Expected on a repro: `connector: socket open`, `connector: Connector socket: fd N` (or `not
@@ -243,3 +245,72 @@ the outage from ~49 s to ~24 s without explaining it.
 | Self-contained | In the exported tree (no `.git`): `idf.py --version` = v6.0.2, `tools/board.sh t-circle-s3 build` OK, same size and an identical `sdkconfig` to the repository build |
 
 The baseline was built from `main` 8bb7717 in a separate detached worktree.
+
+## 9. Rename cue → comma (commit 3)
+
+Owner's decision after review (2026-10-13). Renamed:
+
+| Before | After |
+| --- | --- |
+| CMake `project(cue_logo)`, image `build-<board>/cue_logo.bin` / `.elf` | `project(comma)`, `build-<board>/comma.bin` / `.elf`; `flash_args` follows |
+| Log tag `cue` (`cue: dialing …`) | `comma` (`comma: dialing …`) |
+| `voice/cue_voice.c/.h`, `cue_voice_*()`, `cue_voice_state_t`, `cue_voice_end_t`, `CUE_VOICE_IDLE/CONNECTING/UP/ENDED/FAILED`, `CUE_VOICE_END_*`, `CUE_VOICE_PCMU`, `CUE_VOICE_SIMULATE_DROP` | `voice/comma_voice.c/.h`, `comma_voice_*()`, `comma_voice_state_t`, `comma_voice_end_t`, `COMMA_VOICE_*` |
+| `secrets.h` macros `CUE_VOICE_SERVER/GROUP/KEY`, `CUE_WORKSPACE_ID`, `CUE_CONNECTOR_URL/TOKEN` | `COMMA_VOICE_SERVER/GROUP/KEY`, `COMMA_WORKSPACE_ID`, `COMMA_CONNECTOR_URL/TOKEN` |
+| `ui/cue_logo.h`, `ui/*/cue_logo.bin`, `CUE_LOGO_W/H/BYTES`, `_binary_cue_logo_bin_*`, `tools/gen_cue_logo.py` (and its `cue-logo-*.png` previews) | `ui/comma_logo.h`, `ui/*/comma_logo.bin`, `COMMA_LOGO_*`, `_binary_comma_logo_bin_*`, `tools/gen_comma_logo.py`, `comma-logo-*.png` |
+| `firmware/reference/cue-logo/` (internal, not exported) | `firmware/reference/comma-logo/`; export exclude updated |
+
+No new name collides with an existing `COMMA_VOICE_*` / `COMMA_CONNECTOR_*` macro.
+
+**Kept, and why:**
+
+- `firmware/reference/comma-logo/CueLogoAnimation.tsx` and `cue-logo-animation.css` contents: the
+  app repository's own file, kept verbatim as a reference; internal and not exported.
+- `X-Salix-Connector-Instance-ID`, `salix_conn_`, `salix_vk_`, all JSON fields, GATT UUIDs, the voice
+  protocol name `comma.voice.v1`, NVS namespace `comma` and every `CONFIG_COMMA_*` Kconfig name:
+  backend/app contract or already `comma`. No Kconfig, JSON or wire name contained `cue`.
+- `CUE_*` in `firmware/main/device_config.c`: a build error when `COMMA_DEV_SECRETS` is 1 and a local
+  `secrets.h` still defines an old name. Without it, an old `secrets.h` would compile and silently skip
+  the optional `CUE_CONNECTOR_URL/TOKEN` (Connector off). **The main checkout's own `secrets.h` uses the
+  old names: rename them before building this branch there with dev secrets on.**
+- `docs/reports/`, `docs/prompts/`, `docs/connector-plan.md`: historical, internal, unchanged
+  (old logs say `cue:`).
+- `tools/board.sh` needed no change: it never names the image.
+
+Leak check: new `old-name` rule (`cue_…`, `CUE_…`, `cue-…`, `"cue"`, `cue:`), with one allow entry for the
+`device_config.c` guard. Also in commit 3: the `comma_voice.c` "connected on staging" comment reworded,
+and the T-Circle pin source (LilyGO V1.1 schematic and `pin_config.h`, every pin checked against it) added
+to `boards/t_circle_s3/board.c` and `THIRD_PARTY_NOTICES.md`.
+
+**Behaviour check (against commit 2's builds):**
+
+| Board | `sdkconfig` diff | Image size before → after | `.flash.rodata` |
+| --- | --- | --- | --- |
+| T-Circle | 0 lines | 2,033,232 → 2,033,232 | 351,600 → 351,600 |
+| DevKit | 0 lines | 1,262,080 → 1,262,080 | 238,636 → 238,636, strings identical |
+| Waveshare | 0 lines | 1,511,344 → 1,511,344 | 429,636 → 429,636, strings identical |
+| StickS3 | 0 lines | 2,059,008 → 2,059,008 | 359,824 → 359,824 |
+
+On the voice boards the only string changes in `.flash.rodata` are the tag `cue` (now `comma`, shared
+with the existing NVS namespace string), the assert path `./voice/cue_voice.c` → `./voice/comma_voice.c`,
+and `cue_voice_start` → `comma_voice_start` (function name in an error check); the rest of the diff is
+address bytes. The app description's project name is now `comma`. All builds without warnings.
+
+Before / after (lines from the H4 StickS3 log; only the tag or name changes):
+
+```
+I (998) app_init: Project name:     cue_logo         →  I (998) app_init: Project name:     comma
+I (253130) cue: dialing wss://…/voice/sessions       →  I (253130) comma: dialing wss://…/voice/sessions
+I (256531) cue: websocket connected                  →  I (256531) comma: websocket connected
+I (257186) cue: session.started call_id=… format=pcm16_24k max_duration_s=3600
+                                                     →  I (257186) comma: session.started call_id=… format=pcm16_24k max_duration_s=3600
+I (261531) cue: hangup requested                     →  I (261531) comma: hangup requested
+I (262028) cue: session.ended reason=caller_hangup duration_s=4.800
+                                                     →  I (262028) comma: session.ended reason=caller_hangup duration_s=4.800
+I (3048) connector: before first dial: …             →  unchanged (all other tags are unchanged)
+```
+
+Flashing: `tools/board.sh BOARD flash PORT` writes `comma.bin` at 0x10000, as `cue_logo.bin` was.
+
+Tests after the rename: C host suites unchanged (lan_discover 7574, lan_http 263, lan_udp 747,
+lan_tunnel 1366–1368 (its count varies run to run with timing), connector_json 133, resample 48625,
+mic_path 236896; DevKit 263 / 747 / 4502), all 0 failed; Python 26 OK.

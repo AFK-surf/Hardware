@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "memory_caps.h"
-#include "cue_voice.h"
+#include "comma_voice.h"
 
 #include "board_audio.h"
 #include "device_config.h"
@@ -41,14 +41,14 @@
 // after session.started (it once sent only silence for minutes, 2026-10-06), stop ringing, play the
 // connected tone and open the mic, so the caller can speak first.
 #define GREETING_WAIT_US (8LL * 1000000)
-// No echo canceller (the server's voice model does none either): the mic sends silence while agent speech plays
-// and for this long after.
+// No echo canceller (the server's voice model does none either): the mic sends silence while agent
+// speech plays and for this long after.
 #define ECHO_TAIL_US (300LL * 1000)
 // Wire format. pcm16_24k is the default. pcmu_8k (G.711 mu-law, 8 kB/s each way instead of 48)
-// connected on staging but the agent never spoke or heard the caller (2026-10-05), so it stays off.
+// connected, but in testing the agent never spoke or heard the caller (2026-10-05), so it stays off.
 // With pcmu the board still runs at 24 kHz: mic decimated 3:1 up, agent audio interpolated 1:3 down.
-#define CUE_VOICE_PCMU 0
-#if CUE_VOICE_PCMU
+#define COMMA_VOICE_PCMU 0
+#if COMMA_VOICE_PCMU
 #define WIRE_FORMAT "pcmu_8k"
 #define WIRE_RATE_HZ 8000
 #define WIRE_SAMPLE_BYTES 1
@@ -102,7 +102,7 @@
 #define SEND_TIMEOUT_MS UPLINK_STALL_LIMIT_MS
 // Bench hook for the dropped-call tone: 1 makes the voice socket look full from 20 s after
 // session.started, so the call ends through the real UPLINK_STALL_LIMIT_MS path. Keep 0.
-#define CUE_VOICE_SIMULATE_DROP 0
+#define COMMA_VOICE_SIMULATE_DROP 0
 // A wait for room longer than this is logged as a stall, with the Wi-Fi and TCP state.
 #define STALL_LOG_MS 1000
 // What one audio frame costs in the send buffer: 2 websocket fragments (the client's 4096-byte
@@ -111,10 +111,10 @@
 // pbufs one audio frame can take in the TCP send queue (4800 B / MSS plus the small header writes).
 #define AUDIO_SEND_SEGMENTS 16
 
-static const char *TAG = "cue";
+static const char *TAG = "comma";
 
 static esp_websocket_client_handle_t s_client;
-static atomic_int s_state = CUE_VOICE_IDLE;
+static atomic_int s_state = COMMA_VOICE_IDLE;
 static atomic_bool s_stop;
 static atomic_bool s_key_rejected;
 static atomic_bool s_ws_up;
@@ -136,7 +136,7 @@ static _Atomic int64_t s_wait_since_us;
 static atomic_bool s_user_hangup;
 static atomic_bool s_idle_hangup;
 static atomic_bool s_session_ended;
-static atomic_int s_last_end = CUE_VOICE_END_NONE;
+static atomic_int s_last_end = COMMA_VOICE_END_NONE;
 static _Atomic int64_t s_started_us;
 
 // The voice socket in lwIP, found by local port when the websocket connects (0: not found, and the
@@ -252,7 +252,7 @@ static void handle_text(char *json)
         int64_t now = esp_timer_get_time();
         s_idle_us = now;
         s_started_us = now;
-        s_state = CUE_VOICE_UP;
+        s_state = COMMA_VOICE_UP;
         ESP_LOGI(TAG, "session.started call_id=%s format=%s max_duration_s=%d",
                  cJSON_IsString(call_id) ? call_id->valuestring : "",
                  cJSON_IsString(format) ? format->valuestring : "",
@@ -283,7 +283,7 @@ static void handle_text(char *json)
                  cJSON_IsString(reason) ? reason->valuestring : "",
                  cJSON_IsNumber(duration) ? duration->valuedouble : 0.0);
         s_session_ended = true;
-        s_state = CUE_VOICE_ENDED;
+        s_state = COMMA_VOICE_ENDED;
     } else if (strcmp(kind, "error") == 0) {
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
         const cJSON *message = cJSON_GetObjectItemCaseSensitive(root, "message");
@@ -299,7 +299,7 @@ static void handle_text(char *json)
     cJSON_Delete(root);
 }
 
-#if CUE_VOICE_PCMU
+#if COMMA_VOICE_PCMU
 // G.711 mu-law, as in ITU-T G.711 / the classic Sun reference implementation.
 static uint8_t linear_to_ulaw(int16_t pcm)
 {
@@ -340,7 +340,7 @@ static int16_t s_down_last;
 
 static void push_agent_audio(const uint8_t *audio, size_t len)
 {
-#if !CUE_VOICE_PCMU
+#if !COMMA_VOICE_PCMU
     playback_push(audio, len);
 #else
     static int16_t pcm[256 * WIRE_DECIMATION];
@@ -365,7 +365,7 @@ static void push_agent_audio(const uint8_t *audio, size_t len)
 // mic's 4.8 kHz low-pass) keeps most aliasing out of the 4 kHz band.
 static void encode_mic_frame(const int16_t *pcm, uint8_t *out)
 {
-#if !CUE_VOICE_PCMU
+#if !COMMA_VOICE_PCMU
     memcpy(out, pcm, WIRE_FRAME_BYTES);
 #else
     for (int j = 0; j < WIRE_FRAME_BYTES; ++j) {
@@ -456,10 +456,10 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
             ESP_LOGW(TAG, "handshake HTTP %d", http);
         }
         s_ws_up = false;
-        if (s_state == CUE_VOICE_UP || s_state == CUE_VOICE_CONNECTING) {
+        if (s_state == COMMA_VOICE_UP || s_state == COMMA_VOICE_CONNECTING) {
             s_state = s_close_code == 4401 || s_close_code == 4409 || s_close_code == 4503
-                          ? CUE_VOICE_FAILED
-                          : CUE_VOICE_ENDED;
+                          ? COMMA_VOICE_FAILED
+                          : COMMA_VOICE_ENDED;
         }
         ESP_LOGI(TAG, "websocket closed");
         s_stop = true;
@@ -467,7 +467,7 @@ static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
         const esp_websocket_event_data_t *event = data;
         int http = event ? event->error_handle.esp_ws_handshake_status_code : 0;
         ESP_LOGE(TAG, "websocket error, handshake HTTP %d", http);
-        s_state = CUE_VOICE_FAILED;
+        s_state = COMMA_VOICE_FAILED;
         s_stop = true;
     }
 }
@@ -681,7 +681,7 @@ static void sender_task(void *arg)
         }
         int64_t now = esp_timer_get_time();
         bool room = !known || tcp_room(&tcp, SEND_CHUNK_BYTES);
-#if CUE_VOICE_SIMULATE_DROP
+#if COMMA_VOICE_SIMULATE_DROP
         if (s_started_us != 0 && now - s_started_us > 20 * 1000000LL) {
             known = true;
             room = false;
@@ -733,7 +733,7 @@ static void play_end_tone(void)
     const int code = s_close_code;
     const bool server_clean = (s_session_ended || code == 1000) && (code == 0 || code == 1000);
     const bool clean = s_user_hangup || s_idle_hangup || server_clean;
-    s_last_end = clean ? CUE_VOICE_END_NORMAL : CUE_VOICE_END_DROPPED;
+    s_last_end = clean ? COMMA_VOICE_END_NORMAL : COMMA_VOICE_END_DROPPED;
     ESP_LOGI(TAG, "call over: %s (tap=%d idle=%d session_ended=%d close=%d)", clean ? "ended" : "dropped",
              (int)s_user_hangup, (int)s_idle_hangup, (int)s_session_ended, code);
     playback_tone(clean ? PLAYBACK_TONE_NORMAL : PLAYBACK_TONE_DROPPED);
@@ -897,7 +897,7 @@ static void uplink_task(void *arg)
             s_start_sent = true;
             ESP_LOGI(TAG, "sent session.start");
         }
-        if (s_state != CUE_VOICE_UP) {
+        if (s_state != COMMA_VOICE_UP) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -1059,7 +1059,7 @@ static void uplink_task(void *arg)
             send_text("{\"type\":\"session.end\"}", 2000);
             ESP_LOGI(TAG, "sent session.end");
             int64_t until = esp_timer_get_time() + 1000000;
-            while (s_state == CUE_VOICE_UP && esp_timer_get_time() < until) {
+            while (s_state == COMMA_VOICE_UP && esp_timer_get_time() < until) {
                 vTaskDelay(pdMS_TO_TICKS(20));
             }
         } else {
@@ -1073,22 +1073,22 @@ static void uplink_task(void *arg)
         esp_websocket_client_stop(client);
         esp_websocket_client_destroy(client);
     }
-    if (s_state == CUE_VOICE_UP || s_state == CUE_VOICE_CONNECTING) {
-        s_state = CUE_VOICE_ENDED;
+    if (s_state == COMMA_VOICE_UP || s_state == COMMA_VOICE_CONNECTING) {
+        s_state = COMMA_VOICE_ENDED;
     }
     s_ws_up = false;
     s_uplink_running = false;
     vTaskDelete(NULL);
 }
 
-esp_err_t cue_voice_start(void)
+esp_err_t comma_voice_start(void)
 {
     if (s_key_rejected) {
         ESP_LOGE(TAG, "not retrying after close 4401");
         return ESP_ERR_INVALID_STATE;
     }
-    cue_voice_state_t state = s_state;
-    if (s_uplink_running || state == CUE_VOICE_CONNECTING || state == CUE_VOICE_UP) {
+    comma_voice_state_t state = s_state;
+    if (s_uplink_running || state == COMMA_VOICE_CONNECTING || state == COMMA_VOICE_UP) {
         return ESP_ERR_INVALID_STATE;
     }
     device_config_t *dc = calloc(1, sizeof(*dc));
@@ -1155,10 +1155,10 @@ esp_err_t cue_voice_start(void)
     s_idle_hangup = false;
     s_session_ended = false;
     s_started_us = 0;
-    s_last_end = CUE_VOICE_END_NONE;
+    s_last_end = COMMA_VOICE_END_NONE;
     s_idle_us = 0;
     s_assembling = false;
-    s_state = CUE_VOICE_CONNECTING;
+    s_state = COMMA_VOICE_CONNECTING;
 
     esp_websocket_client_config_t cfg = {
         .uri = s_uri,
@@ -1183,7 +1183,7 @@ esp_err_t cue_voice_start(void)
     }
     s_client = esp_websocket_client_init(&cfg);
     if (!s_client) {
-        s_state = CUE_VOICE_FAILED;
+        s_state = COMMA_VOICE_FAILED;
         return ESP_FAIL;
     }
     ESP_ERROR_CHECK(esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, on_ws, NULL));
@@ -1192,7 +1192,7 @@ esp_err_t cue_voice_start(void)
     if (err != ESP_OK) {
         esp_websocket_client_destroy(s_client);
         s_client = NULL;
-        s_state = CUE_VOICE_FAILED;
+        s_state = COMMA_VOICE_FAILED;
         return err;
     }
     s_sender_running = true;
@@ -1202,7 +1202,7 @@ esp_err_t cue_voice_start(void)
         esp_websocket_client_stop(s_client);
         esp_websocket_client_destroy(s_client);
         s_client = NULL;
-        s_state = CUE_VOICE_FAILED;
+        s_state = COMMA_VOICE_FAILED;
         return ESP_ERR_NO_MEM;
     }
     s_uplink_running = true;
@@ -1215,7 +1215,7 @@ esp_err_t cue_voice_start(void)
         esp_websocket_client_stop(s_client);
         esp_websocket_client_destroy(s_client);
         s_client = NULL;
-        s_state = CUE_VOICE_FAILED;
+        s_state = COMMA_VOICE_FAILED;
         return ESP_ERR_NO_MEM;
     }
     playback_ringback(true);
@@ -1223,43 +1223,43 @@ esp_err_t cue_voice_start(void)
     return ESP_OK;
 }
 
-void cue_voice_credentials_changed(void)
+void comma_voice_credentials_changed(void)
 {
     s_key_rejected = false;
 }
 
-void cue_voice_end(void)
+void comma_voice_end(void)
 {
-    if (s_state == CUE_VOICE_CONNECTING || s_state == CUE_VOICE_UP) {
+    if (s_state == COMMA_VOICE_CONNECTING || s_state == COMMA_VOICE_UP) {
         ESP_LOGI(TAG, "hangup requested");
         s_user_hangup = true;
         s_stop = true;
     }
 }
 
-bool cue_voice_can_start(void)
+bool comma_voice_can_start(void)
 {
-    cue_voice_state_t state = s_state;
-    return !s_key_rejected && !s_uplink_running && !s_sender_running && state != CUE_VOICE_CONNECTING && state != CUE_VOICE_UP;
+    comma_voice_state_t state = s_state;
+    return !s_key_rejected && !s_uplink_running && !s_sender_running && state != COMMA_VOICE_CONNECTING && state != COMMA_VOICE_UP;
 }
 
-cue_voice_state_t cue_voice_state(void)
+comma_voice_state_t comma_voice_state(void)
 {
     return s_state;
 }
 
-bool cue_voice_ending(void)
+bool comma_voice_ending(void)
 {
-    const cue_voice_state_t state = s_state;
-    return s_uplink_running && (s_stop || (state != CUE_VOICE_CONNECTING && state != CUE_VOICE_UP));
+    const comma_voice_state_t state = s_state;
+    return s_uplink_running && (s_stop || (state != COMMA_VOICE_CONNECTING && state != COMMA_VOICE_UP));
 }
 
-cue_voice_end_t cue_voice_last_end(void)
+comma_voice_end_t comma_voice_last_end(void)
 {
-    return (cue_voice_end_t)s_last_end;
+    return (comma_voice_end_t)s_last_end;
 }
 
-int cue_voice_close_code(void)
+int comma_voice_close_code(void)
 {
     return s_close_code;
 }

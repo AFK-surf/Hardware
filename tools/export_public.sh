@@ -14,13 +14,13 @@ DEST=${1:?Usage: tools/export_public.sh DEST}
 
 # Internal paths (Git pathspecs), each with the reason it stays out.
 EXCLUDE=(
-  'docs/prompts/'                # agent instructions for each development step
-  'docs/reports/'                # development reports: test networks, device IDs, logs
-  'docs/connector-plan.md'       # internal planning notes: backend file paths, test boards and networks
-  'firmware/reference/cue-logo/' # logo animation source copied from the private app repository
-  'tools/mini_connector.py'      # protocol spike against a local backend; fake_connector.py covers testing
-  'tools/check_public.py'        # this export's leak check: holds the private deny list
-  'tools/export_public.sh'       # this script
+  'docs/prompts/'                   # agent instructions for each development step
+  'docs/reports/'                   # development reports: test networks, device IDs, logs
+  'docs/connector-plan.md'          # internal planning notes: backend file paths, test boards and networks
+  'firmware/reference/comma-logo/'  # logo animation source copied from the private app repository
+  'tools/mini_connector.py'         # protocol spike against a local backend; fake_connector.py covers testing
+  'tools/check_public.py'           # this export's leak check: holds the private deny list
+  'tools/export_public.sh'          # this script
 )
 
 if [ -e "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then

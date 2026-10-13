@@ -51,6 +51,8 @@ RULES = [
      r"\bAFK-surf\b|\bsalix-connect\b|\bcomma-android\b|\bvoice-box-agent\b|\bsalix_agent\b|\bSalixAgent\b"
      r"|\bCue\s+(?:`?main`?|PR|repo(?:sitory)?|commit|`[0-9a-f]{7,}`)"
      r"|\bsystems/(?:apps|connector|station)\b|\b(?:salix_web|salix_env|comma_core|comma_web)\b", 0),
+    # The pre-release name. Code, files and log tags were renamed to comma; this catches leftovers.
+    ("old-name", r"\b(?:cue|CUE)[_-]\w*|\"cue\"|\bcue:", 0),
     ("pr-number", r"\bPRs?\s*#?\d+|/pull/\d+", 0),
     ("internal-doc", r"docs/(?:prompts|reports)\b|\b(?:prompts|reports)/[A-Za-z0-9_-]+\.md|-report\.md\b", 0),
     # Development step names (A1..A5, B1b, H2 ...), e.g. "see the H2 report". ESP32-H2/-C3 are chips.
@@ -78,6 +80,9 @@ ALLOW = [
      "documentation placeholders"),
     ("token", None, r"salix_(?:conn|vk)_(?:replace_me|EXAMPLE)?", "placeholder prefixes in docs and secrets.h.example"),
     ("token", None, r"salix_conn_(?:dev_override|x)", "dummy tokens: the dev URL override and a malformed-write test"),
+    ("old-name", "firmware/main/device_config.c",
+     r"CUE_(?:VOICE_SERVER|VOICE_GROUP|VOICE_KEY|WORKSPACE_ID|CONNECTOR_URL|CONNECTOR_TOKEN)?",
+     "the build error that names old secrets.h macros"),
     ("internal-step", "firmware/components/esp_lcd_gc9d01/*", r".*", "vendored Espressif driver (register names)"),
     ("internal-step", "LICENSE", r".*", "Apache-2.0 text"),
     ("internal-step", "THIRD_PARTY_NOTICES.md", r"V2", "license names (e.g. MIT-0, OFL 1.1)"),
