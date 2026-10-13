@@ -283,6 +283,11 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 ## 5. Access state
 
 - On first boot, or when nothing is stored, the device is **read-only** (`local_file_read`), like the desktop Connector in device mode.
+- Changing the workspace, group, server/connect URL, Connector token or voice key durably revokes
+  operation consent before saving the new credentials. Wi-Fi/name-only changes preserve it.
+  Token/key rotation also requires fresh consent: the device cannot prove identity continuity.
+  Access updates from an old credential generation are rejected. Development credentials compiled
+  into the image use consent for the current boot only.
 - Always send the current state as the dial `scope` and as `metadata.capabilities.scope`. Once a device has reported a scope, a later connection that reports none is shown with **no command environment** at all; the server treats the old scope as stale (verified).
 - The server does **not** enforce access on the device-placed MCP path. Settings toggles the device's own state, and only the device's check stops `http_request` (verified: with access off, the call reached the device and was refused there). **The firmware gate is the real gate.**
 
@@ -312,6 +317,7 @@ the 6/6 caps have not yet been retested in that state.
 | Pending requests per socket | 256; T-Circle can handle them one at a time but must answer each |
 | Max frame | 16 MiB server side. T-Circle: cap `http_request` bodies at e.g. 32 KiB and report `truncated` (the MCP path asks for `max_bytes` = 10 MiB) |
 | T-Circle `http_request` caps | Text mode: 64 KiB body, 30 s. Chunk mode: 4 MiB in all, 110 s for the whole transfer |
+| Queued LAN requests | Bound to their socket and credential generation. HTTP timeout starts when the complete request frame is received, including queue time. UDP/discovery have a 30 s overall budget including queue time, within which their method-specific timeout applies. Expired or disconnected jobs do not start network operations. |
 | T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified |
 | Chunk mode during a voice call | Refused: `error` `busy: voice call active`, before any network use. A call that starts mid-transfer ends it with the same `error`. Retry after the call (on the board, a transfer alongside a call froze its Wi-Fi) |
 | Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |

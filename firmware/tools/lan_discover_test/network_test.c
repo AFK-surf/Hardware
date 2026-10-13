@@ -134,6 +134,33 @@ static cJSON *run(int ms, unsigned probes, bool arp_only)
     return frame;
 }
 
+static int64_t cancel_at;
+static const char *cancel_request(void *ctx) {
+    (void)ctx; return clock_ms >= cancel_at ? "socket closed" : NULL;
+}
+static void check_cancelled(const lan_request_t *request) {
+    cJSON *params = cJSON_Parse("{\"timeout_ms\":1000}");
+    char *raw = lan_discover_run_request("cancel", params, request);
+    CHECK(raw != NULL);
+    cJSON *frame = cJSON_Parse(raw);
+    CHECK(frame && cJSON_IsString(cJSON_GetObjectItem(frame, "error")));
+    CHECK(opened == closed && !log_allocs);
+    cJSON_Delete(frame); cJSON_Delete(params); free(raw);
+}
+static void test_request_lifetime(void) {
+    reset();
+    lan_request_t request = {.deadline_us = -1};
+    check_cancelled(&request); CHECK(opened == 0);
+    reset(); request.deadline_us = 30000000; request.cancelled = cancel_request; cancel_at = 0;
+    check_cancelled(&request); CHECK(opened == 0);
+    reset(); ble_off_at = 3000; cancel_at = 250;
+    check_cancelled(&request); CHECK(opened == 0 && clock_ms <= 300);
+    reset(); cancel_at = 250;
+    check_cancelled(&request); CHECK(opened > 0 && clock_ms <= 300);
+    reset(); ble_off_at = 3000; request.cancelled = NULL; request.deadline_us = 250000;
+    check_cancelled(&request); CHECK(opened == 0 && clock_ms <= 300);
+}
+
 int main(void)
 {
     reset();
@@ -210,6 +237,7 @@ int main(void)
     frame = run(5000, 0, true);
     CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(cJSON_GetObjectItem(frame, "result"), "hosts")) == 1);
     cJSON_Delete(frame);
+    test_request_lifetime();
     printf("runner: %d checks, 0 failed\n", checks);
     return 0;
 }

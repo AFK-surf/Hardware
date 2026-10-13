@@ -39,7 +39,6 @@
 #include "lwip/priv/tcpip_priv.h"
 #include "lwip/sockets.h"
 #include "lwip/tcp.h"
-#include "nvs.h"
 
 #define WS_OP_TEXT 0x1
 #define WS_OP_CLOSE 0x8
@@ -100,8 +99,6 @@
 
 #define SCOPE_READ_ONLY "local_file_read"
 #define SCOPE_OPERATIONS ""
-#define NVS_NAMESPACE "connector"
-#define NVS_KEY_ALLOW "allow_ops"
 #define FIRMWARE_VERSION "0.1.0"
 
 static const char *TAG = "connector";
@@ -119,6 +116,7 @@ typedef struct {
     event_kind_t kind;
     char *data;
     unsigned session;
+    int64_t received_us;
 } event_t;
 
 typedef enum {
@@ -132,6 +130,8 @@ typedef struct {
     lan_method_t method;
     cJSON *params;     // detached from the request frame, freed by the worker
     unsigned session;  // the socket the request came in on
+    unsigned generation;
+    int64_t deadline_us;
 } lan_job_t;
 
 typedef struct {
@@ -155,7 +155,7 @@ static struct sockaddr_in s_fd_before[CONFIG_LWIP_MAX_SOCKETS];
 static atomic_bool s_up;
 static atomic_int s_close_code;
 static atomic_int s_handshake_status;
-static atomic_bool s_allow_operations;
+static atomic_uint s_credentials_generation;
 static QueueHandle_t s_lan_jobs;
 static bool s_lan_ready;
 // Counts sockets. A reply only goes out on the socket its request came in on; the server has
@@ -222,36 +222,14 @@ static bool credentials_stale(const credentials_t *creds)
     return device_config_generation() != creds->generation;
 }
 
+static bool operations_allowed(void)
+{
+    return device_config_operations_allowed(s_credentials_generation);
+}
+
 static const char *current_scope(void)
 {
-    return s_allow_operations ? SCOPE_OPERATIONS : SCOPE_READ_ONLY;
-}
-
-// Read-only until the user allows operations in Settings, like the desktop Connector in device mode.
-static void load_access(void)
-{
-    nvs_handle_t nvs;
-    uint8_t allow = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
-        nvs_get_u8(nvs, NVS_KEY_ALLOW, &allow);
-        nvs_close(nvs);
-    }
-    s_allow_operations = allow != 0;
-}
-
-static esp_err_t save_access(bool allow)
-{
-    nvs_handle_t nvs;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = nvs_set_u8(nvs, NVS_KEY_ALLOW, allow ? 1 : 0);
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs);
-    }
-    nvs_close(nvs);
-    return err;
+    return operations_allowed() ? SCOPE_OPERATIONS : SCOPE_READ_ONLY;
 }
 
 static void make_instance_id(void)
@@ -267,7 +245,7 @@ static void make_instance_id(void)
 
 static void post_session(event_kind_t kind, char *data, unsigned session)
 {
-    event_t ev = {.kind = kind, .data = data, .session = session};
+    event_t ev = {.kind = kind, .data = data, .session = session, .received_us = esp_timer_get_time()};
     // The LAN worker can afford to wait; a dropped reply leaves the caller waiting out its timeout.
     const TickType_t wait = pdMS_TO_TICKS(kind == EV_REPLY ? 5000 : 100);
     if (xQueueSend(s_events, &ev, wait) != pdTRUE) {
@@ -278,7 +256,7 @@ static void post_session(event_kind_t kind, char *data, unsigned session)
 
 static void post(event_kind_t kind, char *data)
 {
-    post_session(kind, data, 0);
+    post_session(kind, data, s_session);
 }
 
 static char *psram_strndup(const char *src, size_t len)
@@ -474,7 +452,7 @@ static void send_metadata(void)
         return;
     }
     if (send_json(json)) {
-        ESP_LOGI(TAG, "sent metadata scope=%s", s_allow_operations ? "\"\"" : SCOPE_READ_ONLY);
+        ESP_LOGI(TAG, "sent metadata scope=%s", operations_allowed() ? "\"\"" : SCOPE_READ_ONLY);
     }
 }
 
@@ -521,16 +499,16 @@ static void handle_device_access(const char *id, const cJSON *params)
         return;
     }
     const bool value = cJSON_IsTrue(allow);
-    esp_err_t err = save_access(value);
+    const bool was_allowed = operations_allowed();
+    esp_err_t err = device_config_set_operations_allowed(s_credentials_generation, value);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "saving access failed: %s", esp_err_to_name(err));
         send_error(id, "could not save device access");
         return;
     }
-    if (value != s_allow_operations) {
+    if (value != was_allowed) {
         ESP_LOGI(TAG, "access: %s", value ? "operations allowed" : "read-only");
     }
-    s_allow_operations = value;
     // The server learns the new scope only from metadata, so it goes out before the response.
     send_metadata();
     cJSON *obj = cJSON_CreateObject();
@@ -563,9 +541,9 @@ static void send_read_only_refusal(const char *id, lan_method_t method)
 // The access gate, for every method that touches the LAN. The server does not check access on the
 // device-placed MCP path, so this is the only thing between the cloud and the LAN while the user has
 // not allowed operations.
-static void handle_lan_request(const char *id, lan_method_t method, cJSON *root)
+static void handle_lan_request(const char *id, lan_method_t method, cJSON *root, int64_t received_us)
 {
-    if (!s_allow_operations) {
+    if (!operations_allowed()) {
         ESP_LOGW(TAG, "%s refused: read-only", id);
         send_read_only_refusal(id, method);
         return;
@@ -581,9 +559,11 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root)
         send_error(id, "request id too long for this device");
         return;
     }
-    lan_job_t job = {.session = s_session, .method = method};
+    lan_job_t job = {.session = s_session, .generation = s_credentials_generation, .method = method};
     strlcpy(job.id, id, sizeof(job.id));
     job.params = cJSON_DetachItemFromObjectCaseSensitive(root, "params");
+    const int seconds = method == LAN_HTTP_REQUEST ? lan_http_timeout_seconds(job.params) : 30;
+    job.deadline_us = received_us + (int64_t)seconds * 1000000;
     if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
         comma_heap_log("lan_result_ready");
         cJSON_Delete(job.params);
@@ -595,6 +575,7 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root)
 
 typedef struct {
     unsigned session;  // the socket the request came in on; chunks never go out on another
+    const lan_request_t *request;
     unsigned frames;
     size_t wire_bytes;
     int64_t send_max_us;  // longest gate wait + write for one frame
@@ -640,6 +621,11 @@ static bool chunk_wait_room(chunk_ctx_t *c, char *err, size_t err_size)
 {
     const int64_t since = esp_timer_get_time();
     for (;;) {
+        const char *cancelled = lan_request_check(c->request);
+        if (cancelled) {
+            snprintf(err, err_size, "%s", cancelled);
+            return false;
+        }
         if (c->session != s_session || !s_up) {
             snprintf(err, err_size, "the Connector socket closed during the transfer");
             return false;
@@ -676,7 +662,7 @@ static bool send_on_session(unsigned session, const char *frame, size_t len)
 {
     bool ok = false;
     if (xSemaphoreTake(s_client_mutex, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) == pdTRUE) {
-        ok = session == s_session && s_client && esp_websocket_client_is_connected(s_client) &&
+        ok = s_up && session == s_session && s_client && esp_websocket_client_is_connected(s_client) &&
              esp_websocket_client_send_text(s_client, frame, (int)len, pdMS_TO_TICKS(CHUNK_STALL_LIMIT_MS)) >= 0;
         xSemaphoreGive(s_client_mutex);
     }
@@ -687,7 +673,7 @@ static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_byte
 {
     chunk_ctx_t *c = arg;
     (void)raw_bytes;
-    if (!s_allow_operations) {
+    if (!operations_allowed()) {
         snprintf(err, err_size, "method \"http_request\" is not permitted for a local_file_read connector");
         return false;
     }
@@ -739,7 +725,7 @@ static lan_tunnel_verdict_t tunnel_check(void *arg, unsigned session, const char
     if (session != s_session || !s_up) {
         return LAN_TUNNEL_END_SILENT;
     }
-    if (!s_allow_operations) {
+    if (!operations_allowed()) {
         *reason = "method \"lan_tcp_dial\" is not permitted for a local_file_read connector";
         return LAN_TUNNEL_END;
     }
@@ -757,7 +743,7 @@ static bool s_tunnel_ready;
 // Same gates as the other LAN methods, answered right here; the tunnel task checks them again.
 static void handle_tcp_dial(const char *id, const cJSON *params)
 {
-    if (!s_allow_operations) {
+    if (!operations_allowed()) {
         ESP_LOGW(TAG, "%s refused: read-only", id);
         send_error(id, "method \"lan_tcp_dial\" is not permitted for a local_file_read connector");
     } else if (!s_tunnel_ready) {
@@ -774,10 +760,26 @@ static void handle_tcp_dial(const char *id, const cJSON *params)
 
 #endif
 
-static char *run_http_request(const lan_job_t *job)
+// Rechecked by each LAN implementation before network I/O (including after DNS).
+static const char *job_cancelled(void *arg)
+{
+    const lan_job_t *job = arg;
+    if (job->session != SELFTEST_SESSION &&
+        (!s_up || job->session != s_session || job->generation != device_config_generation())) {
+        return "the Connector socket or credentials changed before the request completed";
+    }
+    if (!device_config_operations_allowed(job->session == SELFTEST_SESSION ?
+                                         device_config_generation() : job->generation)) {
+        return "device operations are not allowed";
+    }
+    return NULL;
+}
+
+static char *run_http_request(const lan_job_t *job, const lan_request_t *request)
 {
     chunk_ctx_t ctx = {
         .session = job->session,
+        .request = request,
         .started_us = esp_timer_get_time(),
         .internal_min = heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         .gated = s_conn_fd >= 0,
@@ -785,7 +787,7 @@ static char *run_http_request(const lan_job_t *job)
     const size_t internal_before = ctx.internal_min;
     const lan_http_sink_t sink = {
         .refuse = chunk_refuse, .frame_bytes = chunk_frame_bytes, .send = chunk_send, .ctx = &ctx};
-    char *frame = lan_http_run(job->id, job->params, &sink);
+    char *frame = lan_http_run_request(job->id, job->params, &sink, request);
     if (ctx.frames > 0) {
         ESP_LOGI(TAG, "%s chunks: %u frames, %u B on the wire, %lld ms, send_max_ms=%lld, gated=%s, "
                       "internal before %u min %u (lowest since boot %u)",
@@ -805,29 +807,30 @@ static void lan_worker(void *arg)
         xQueueReceive(s_lan_jobs, &job, portMAX_DELAY);
         comma_heap_log("lan_begin");
         char *frame;
+        const lan_request_t request = {
+            .deadline_us = job.session == SELFTEST_SESSION ? INT64_MAX : job.deadline_us,
+            .cancelled = job_cancelled, .ctx = &job};
+        const char *cancelled = lan_request_check(&request);
         const bool selftest = job.session == SELFTEST_SESSION;
-        if (!selftest && job.session != s_session) {
+        if (!selftest && (!s_up || job.session != s_session || job.generation != device_config_generation())) {
             ESP_LOGI(TAG, "%s skipped: its socket closed", job.id);
             frame = NULL;
-        } else if (!s_allow_operations) {
-            // Access was turned off while this one waited in line.
-            char message[96];
-            snprintf(message, sizeof(message), "method \"%s\" is not permitted for a local_file_read connector",
-                     lan_method_name(job.method));
+        } else if (cancelled) {
+            // Access, connection and deadline may have changed while this waited in line.
             cJSON *obj = cJSON_CreateObject();
             cJSON_AddStringToObject(obj, "id", job.id);
             cJSON_AddStringToObject(obj, "type", "error");
-            cJSON_AddStringToObject(obj, "error", message);
+            cJSON_AddStringToObject(obj, "error", cancelled);
             frame = cJSON_PrintUnformatted(obj);
             cJSON_Delete(obj);
 #if CONFIG_COMMA_LAN_DISCOVER
         } else if (job.method == LAN_DISCOVER) {
-            frame = lan_discover_run(job.id, job.params);
+            frame = lan_discover_run_request(job.id, job.params, &request);
 #endif
         } else if (job.method == LAN_UDP_REQUEST) {
-            frame = lan_udp_run(job.id, job.params);
+            frame = lan_udp_run_request(job.id, job.params, &request);
         } else {
-            frame = run_http_request(&job);
+            frame = run_http_request(&job, &request);
         }
         comma_heap_log("lan_result_ready");
         cJSON_Delete(job.params);
@@ -860,7 +863,7 @@ static void selftest_task(void *arg)
         }
         lan_job_t job = {.session = SELFTEST_SESSION, .method = LAN_DISCOVER};
         snprintf(job.id, sizeof(job.id), "selftest_%u", n);
-        if (!s_allow_operations) {
+        if (!operations_allowed()) {
             ESP_LOGW(TAG, "%s refused: read-only", job.id);
             continue;
         }
@@ -882,19 +885,19 @@ static void selftest_task(void *arg)
 }
 #endif
 
-static void handle_request(const char *id, const char *method, cJSON *root)
+static void handle_request(const char *id, const char *method, cJSON *root, int64_t received_us)
 {
     ESP_LOGI(TAG, "request %s %s", id, method);
     const cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
     if (strcmp(method, "device_access") == 0) {
         handle_device_access(id, params);
     } else if (strcmp(method, "http_request") == 0) {
-        handle_lan_request(id, LAN_HTTP_REQUEST, root);
+        handle_lan_request(id, LAN_HTTP_REQUEST, root, received_us);
     } else if (strcmp(method, "udp_request") == 0) {
-        handle_lan_request(id, LAN_UDP_REQUEST, root);
+        handle_lan_request(id, LAN_UDP_REQUEST, root, received_us);
 #if CONFIG_COMMA_LAN_DISCOVER
     } else if (strcmp(method, "lan_discover") == 0) {
-        handle_lan_request(id, LAN_DISCOVER, root);
+        handle_lan_request(id, LAN_DISCOVER, root, received_us);
 #endif
 #if CONFIG_COMMA_LAN_TUNNELS > 0
     } else if (strcmp(method, "lan_tcp_dial") == 0) {
@@ -916,7 +919,7 @@ static void handle_json_oom(const char *json)
     else { post(EV_CLOSED, NULL); }
 }
 
-static void handle_text(const char *json)
+static void handle_text(const char *json, int64_t received_us)
 {
     cJSON *root = connector_json_parse(json, handle_json_oom);
     if (!root) {
@@ -937,7 +940,7 @@ static void handle_text(const char *json)
         } else if (!cJSON_IsString(method)) {
             send_error(id->valuestring, "method must be a string");
         } else {
-            handle_request(id->valuestring, method->valuestring, root);
+            handle_request(id->valuestring, method->valuestring, root, received_us);
         }
     } else if (strcmp(kind, "stream") == 0) {
         const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
@@ -1138,6 +1141,8 @@ static void log_silent_link(void)
 // One connection, from dial to close. Returns how long the socket was open, in microseconds.
 static int64_t run_session(const credentials_t *creds)
 {
+    if (credentials_stale(creds)) return 0;
+    s_credentials_generation = creds->generation;
     if (!build_dial(creds)) {
         ESP_LOGE(TAG, "connect URL or token too long");
         return 0;
@@ -1215,10 +1220,15 @@ static int64_t run_session(const credentials_t *creds)
                 }
                 continue;
             }
-            if (ev.kind == EV_CLOSED) {
+            if (ev.kind == EV_CLOSED || credentials_stale(creds) || !s_up) {
+                free(ev.data);
                 break;
             }
-            last_rx_us = esp_timer_get_time();
+            if (ev.session != s_session) {
+                free(ev.data);
+                continue;
+            }
+            if (ev.kind != EV_REPLY) last_rx_us = ev.received_us;
             if (ev.kind == EV_OPEN) {
                 opened_us = last_rx_us;
                 s_heartbeat_us = 0;
@@ -1228,7 +1238,7 @@ static int64_t run_session(const credentials_t *creds)
                 conn_fd_find();
                 send_metadata();
             } else if (ev.kind == EV_TEXT) {
-                handle_text(ev.data);
+                handle_text(ev.data, ev.received_us);
             } else if (ev.kind == EV_REPLY) {
                 if (ev.session == s_session) {
                     send_json(ev.data);
@@ -1246,6 +1256,7 @@ static int64_t run_session(const credentials_t *creds)
         }
     }
     s_up = false;
+    ++s_session;  // invalidate queued work before reconnect backoff
     s_conn_fd = -1;
     // Waits for a chunk send in progress (bounded by its own timeout) to finish with the client.
     xSemaphoreTake(s_client_mutex, portMAX_DELAY);
@@ -1272,9 +1283,8 @@ static void connector_task(void *arg)
     (void)arg;
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // startup publishes all worker readiness first
     credentials_t creds;
-    load_access();
     make_instance_id();
-    ESP_LOGI(TAG, "access: %s, instance %s", s_allow_operations ? "operations allowed" : "read-only", s_instance_id);
+    ESP_LOGI(TAG, "access: %s, instance %s", operations_allowed() ? "operations allowed" : "read-only", s_instance_id);
     uint32_t backoff_ms = BACKOFF_MIN_MS;
     bool first = true;
     for (;;) {

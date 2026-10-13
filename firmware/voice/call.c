@@ -28,6 +28,7 @@
 #define CALL_OVER_US (3LL * 1000000)
 // A tap while the last call is still closing dials as soon as it has closed (normally < 2 s).
 #define DIAL_PENDING_US (6LL * 1000000)
+#define WIFI_PENDING_US (20LL * 1000000)
 // Taps this soon after a hang-up tap are ignored, so a double tap to hang up doesn't redial.
 #define HANGUP_GUARD_US (500LL * 1000)
 // "Speaking" shows at once; "Listening" only after the agent has been quiet this long, so the
@@ -192,6 +193,7 @@ void call_run_ui(const char *help)
     bool prov_was_active = provisioning_active();
     call_screen_t call_screen = {0};
     int64_t dial_pending_until = 0;
+    int64_t wifi_pending_until = 0;
     int64_t hung_up_at = 0;
 #if CONFIG_COMMA_BOOT_PRESS_CALLS
     boot_press_t boot_press = {.down = board_input_boot_held(), .ignore = board_input_boot_held()};
@@ -227,7 +229,7 @@ void call_run_ui(const char *help)
 
         if (notice_until && now > notice_until) {
             notice_until = 0;
-            if (!provisioning_active()) {
+            if (!prov && !boot_tracking && !in_call) {
                 display_show_logo();
             }
         }
@@ -235,7 +237,21 @@ void call_run_ui(const char *help)
         // One tap on a dark screen wakes it and dials: the device has one job, the ringback says a
         // call is starting, and a second tap hangs up.
         bool dial = false;
-        if (dial_pending_until != 0 && (now > dial_pending_until || in_call || prov)) {
+        if (wifi_pending_until != 0) {
+            if (in_call || prov || boot_tracking || !device_config_provisioned() || call_key) {
+                wifi_pending_until = 0;
+                if (!in_call && !prov) display_show_logo();
+                call_key = false;  // a second tap cancels, without starting another wait
+            } else if (now >= wifi_pending_until) {
+                wifi_pending_until = 0;
+                display_show_card("No Wi-Fi", NULL, "Still trying to connect");
+                notice_until = now + NOTICE_US;
+            } else if (wifi_is_up() && comma_voice_can_start()) {
+                wifi_pending_until = 0;
+                dial = true;
+            }
+        }
+        if (dial_pending_until != 0 && (now > dial_pending_until || in_call || prov || boot_tracking)) {
             dial_pending_until = 0;
         }
         if (dial_pending_until != 0 && !ending && comma_voice_can_start()) {
@@ -272,10 +288,13 @@ void call_run_ui(const char *help)
             }
         } else if (!device_config_provisioned()) {
             ESP_LOGW(TAG, "not provisioned");
-        } else if (wifi_wait(20000) != ESP_OK) {
-            ESP_LOGW(TAG, "Wi-Fi not up");
-            display_show_card("No Wi-Fi", NULL, "Still trying to connect");
-            notice_until = esp_timer_get_time() + NOTICE_US;
+        } else if (!wifi_is_up()) {
+            // Keep polling input while Wi-Fi reconnects: pairing/reset holds and cancellation
+            // must work even when the stored access point is unavailable.
+            wifi_pending_until = now + WIFI_PENDING_US;
+            notice_until = 0;
+            call_screen_reset(&call_screen);
+            display_show_card("Waiting for Wi-Fi", NULL, "Tap to cancel");
         } else {
             call_screen_reset(&call_screen);
             if (comma_voice_start() != ESP_OK) {
@@ -289,7 +308,7 @@ void call_run_ui(const char *help)
         }
 
         display_keep_awake(in_call || ending || prov || boot_tracking || notice_until != 0 ||
-                           call_screen.shown || dial_pending_until != 0);
+                           call_screen.shown || dial_pending_until != 0 || wifi_pending_until != 0);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

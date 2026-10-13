@@ -395,6 +395,7 @@ typedef struct {
     size_t header_bytes;
     bool headers_done;
     bool complete;
+    bool unsupported_upgrade;
     sb_t body;
     chunks_t *chunks;   // chunk mode: the body streams out here instead of into body
     size_t body_bytes;  // body bytes taken (kept or sent)
@@ -479,6 +480,10 @@ static int on_header_value(http_parser *p, const char *at, size_t len)
 static int on_headers_complete(http_parser *p)
 {
     resp_t *r = p->data;
+    if (p->status_code == 101) {
+        r->unsupported_upgrade = true;
+        return 2;  // stop parsing: this client cannot switch protocols
+    }
     r->headers_done = true;
     return commit_header(r);
 }
@@ -512,7 +517,20 @@ static int on_body(http_parser *p, const char *at, size_t len)
 
 static int on_message_complete(http_parser *p)
 {
-    ((resp_t *)p->data)->complete = true;
+    resp_t *r = p->data;
+    if (p->status_code < 200 && p->status_code != 101) {
+        // http_parser continues with the next response, even within the same read.
+        // Discard interim headers; only the final response belongs in the result.
+        cJSON_Delete(r->headers);
+        r->headers = cJSON_CreateObject();
+        r->headers_done = false;
+        if (!r->headers) {
+            r->oom = true;
+            return 1;
+        }
+        return 0;
+    }
+    r->complete = true;
     return 0;
 }
 
@@ -620,11 +638,12 @@ static int remaining_ms(int64_t deadline_us)
     return left > 0 ? (int)left : 0;
 }
 
-static bool write_all(esp_transport_handle_t t, const char *p, size_t n, int64_t deadline_us)
+static bool write_all(esp_transport_handle_t t, const char *p, size_t n, int64_t deadline_us,
+                      const lan_request_t *request)
 {
     while (n > 0) {
         const int ms = remaining_ms(deadline_us);
-        if (ms == 0) {
+        if (ms == 0 || lan_request_check(request)) {
             return false;
         }
         const int w = esp_transport_write(t, p, (int)n, ms);
@@ -689,8 +708,25 @@ static bool chunks_finish(chunks_t *c, char *hex)
     return true;
 }
 
+int lan_http_timeout_seconds(const cJSON *params)
+{
+    const cJSON *mode = cJSON_GetObjectItemCaseSensitive(params, "response_mode");
+    const int cap = cJSON_IsString(mode) && strcmp(mode->valuestring, "chunks") == 0 ?
+                    LAN_HTTP_CHUNK_TIMEOUT_MAX_S : LAN_HTTP_TIMEOUT_MAX_S;
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(params, "timeout_seconds");
+    return cJSON_IsNumber(v) && v->valuedouble >= 1 && v->valuedouble < cap ? (int)v->valuedouble : cap;
+}
+
 char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *sink)
 {
+    return lan_http_run_request(id, params, sink, NULL);
+}
+
+char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_sink_t *sink,
+                           const lan_request_t *request)
+{
+    const char *cancelled = lan_request_check(request);
+    if (cancelled) return error_frame(id, cancelled);
     char err[ERR_MAX] = "";
     const int64_t started_us = esp_timer_get_time();
     if (!cJSON_IsObject(params)) {
@@ -739,15 +775,9 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
             return error_frame(id, busy);
         }
     }
-    const int timeout_max_s = chunk_mode ? LAN_HTTP_CHUNK_TIMEOUT_MAX_S : LAN_HTTP_TIMEOUT_MAX_S;
     const size_t limit_max = chunk_mode ? LAN_HTTP_CHUNK_MAX_TOTAL : LAN_HTTP_MAX_BYTES;
 
-    const cJSON *jt = cJSON_GetObjectItemCaseSensitive(params, "timeout_seconds");
-    // The desktop Connector's default (120 s) is over the device cap, so no value or a bad one means the cap.
-    int timeout_s = timeout_max_s;
-    if (cJSON_IsNumber(jt) && jt->valuedouble >= 1 && jt->valuedouble < timeout_max_s) {
-        timeout_s = (int)jt->valuedouble;
-    }
+    const int timeout_s = lan_http_timeout_seconds(params);
     const cJSON *jx = cJSON_GetObjectItemCaseSensitive(params, "max_bytes");
     double max_bytes = cJSON_IsNumber(jx) ? jx->valuedouble : 0;
     const size_t limit = (max_bytes <= 0 || max_bytes > limit_max) ? limit_max : (size_t)max_bytes;
@@ -756,7 +786,7 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
     const char *body = cJSON_IsString(jb) ? jb->valuestring : "";
     const size_t body_len = strlen(body);
 
-    const int64_t deadline_us = started_us + (int64_t)timeout_s * 1000000;
+    const int64_t deadline_us = lan_request_deadline(request, started_us + (int64_t)timeout_s * 1000000);
     uint32_t ip = 0;
     if (!lan_dest_resolve(url.host, &ip, err) || !lan_dest_check(ip, err)) {
         ESP_LOGW(TAG, "%s refused: %s", id, err);
@@ -795,6 +825,11 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
 
     ESP_LOGI(TAG, "%s %s %s:%d%s (timeout %d s, max %u B%s)", id, method, url.host, url.port, url.https ? " tls" : "",
              timeout_s, (unsigned)limit, chunk_mode ? ", chunks" : "");
+    cancelled = lan_request_check(request);
+    if (cancelled || remaining_ms(deadline_us) == 0) {
+        snprintf(err, sizeof(err), "%s", cancelled ? cancelled : "HTTP request timed out before connecting");
+        goto done;
+    }
     if (esp_transport_connect(t, ip_text, url.port, remaining_ms(deadline_us)) < 0) {
         const int e = esp_transport_get_errno(t);
         if (remaining_ms(deadline_us) == 0) {
@@ -813,7 +848,7 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
         }
         goto done;
     }
-    if (!write_all(t, req.p, req.len, deadline_us) || !write_all(t, body, body_len, deadline_us)) {
+    if (!write_all(t, req.p, req.len, deadline_us, request) || !write_all(t, body, body_len, deadline_us, request)) {
         snprintf(err, sizeof(err), remaining_ms(deadline_us) ? "sending the request to %s failed"
                                                               : "request to %s timed out while sending",
                  url.host);
@@ -831,6 +866,11 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
         .on_message_complete = on_message_complete,
     };
     while (!r.complete && !r.truncated) {
+        cancelled = lan_request_check(request);
+        if (cancelled) {
+            snprintf(err, sizeof(err), "%s", cancelled);
+            goto done;
+        }
         const int ms = remaining_ms(deadline_us);
         if (ms == 0) {
             snprintf(err, sizeof(err), "request to %s timed out after %d s", url.host, timeout_s);
@@ -840,8 +880,8 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
         if (n == ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT) {
             continue;
         }
-        if (n < 0) {
-            // Closed (FIN or error): an HTTP/1.0-style body ends here; tell the parser.
+        if (n == ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN) {
+            // Only an orderly EOF can complete a close-delimited body.
             http_parser_execute(&parser, &settings, NULL, 0);
             if (!r.complete && !r.truncated) {
                 snprintf(err, sizeof(err), "%s closed the connection before the whole response arrived", url.host);
@@ -849,7 +889,15 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
             }
             break;
         }
+        if (n < 0) {
+            snprintf(err, sizeof(err), "reading the response from %s failed", url.host);
+            goto done;
+        }
         const size_t used = http_parser_execute(&parser, &settings, buf, (size_t)n);
+        if (r.unsupported_upgrade) {
+            snprintf(err, sizeof(err), "HTTP protocol upgrade from %s is not supported", url.host);
+            goto done;
+        }
         if (chunk_mode && chunks.failed) {
             strlcpy(err, chunks.err, sizeof(err));
             goto done;

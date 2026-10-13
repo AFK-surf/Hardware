@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cJSON.h"
+#include "lan_request.h"
 
 // The Connector's `lan_discover` (contract in docs/connector-protocol.md):
 //   params {sources?: ["arp","mdns","ssdp"], timeout_ms?: 1000..8000,
@@ -19,3 +20,5 @@
 // Blocks for about timeout_ms. Returns the whole reply frame for `id` (a `response`, or an `error`),
 // NUL-terminated, in PSRAM; the caller frees it. NULL only when out of memory.
 char *lan_discover_run(const char *id, const cJSON *params);
+// Connector variant: bounds queue + BLE wait + scan, checking cancellation throughout.
+char *lan_discover_run_request(const char *id, const cJSON *params, const lan_request_t *request);

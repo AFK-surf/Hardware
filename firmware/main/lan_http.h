@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 #include "cJSON.h"
+#include "lan_request.h"
 
 // The Connector's `http_request` (docs/connector-protocol.md §4), with the result shape of
 // the desktop Connector's http_request. Only LAN destinations: RFC 1918, link-local (169.254/16) and
@@ -46,3 +47,8 @@ typedef struct {
 // any chunk frames. NULL only when out of memory. sink may be NULL; a chunk-mode request is then
 // refused.
 char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *sink);
+// Connector variant: includes queue time and rechecks the request lifetime before network I/O.
+char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_sink_t *sink,
+                           const lan_request_t *request);
+// Shared with the queue so both use the same effective timeout.
+int lan_http_timeout_seconds(const cJSON *params);

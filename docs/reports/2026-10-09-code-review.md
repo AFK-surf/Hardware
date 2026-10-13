@@ -4,6 +4,20 @@
 the existing host-test stubs, and injected transport reads. No firmware fixes or board tests were
 performed during this review. These findings are additional to the limitations in the G3 report.
 
+Follow-up, 2026-10-13: the five findings below are addressed in the working tree. Consent now lives
+behind the configuration mutex and is revoked durably before identity changes; old credential
+generations cannot grant access. LAN jobs carry receipt-based deadlines and recheck socket,
+generation and consent before I/O. HTTP distinguishes failed reads from FIN and skips interim
+responses (101 upgrades are refused). The shared call UI polls while waiting for Wi-Fi, with tap
+cancellation and pairing/reset priority. Host regressions cover NVS reload/write failures, stale
+consent updates, expired/cancelled LAN work, interim/failed HTTP responses, and offline input.
+Hardware validation is tracked in the [follow-up report](2026-10-13-firmware-fixes-hardware.md).
+HTTP/UDP regressions and discovery passed on all four boards; tunnels passed on the three boards
+that support them. T-Circle and StickS3 calls passed user listening and hang-up checks. Outstanding
+physical offline-input and cross-workspace credential tests are listed there. The separate
+intermittent 45 s Connector issue in H5 has no established root cause and is not claimed fixed by
+these changes.
+
 ## 1. Operation permission survives a change of credentials
 
 `connector.c` loads `connector/allow_ops` once at task startup. `device_config_save()` replaces the

@@ -23,7 +23,8 @@ operations in the app. New appliances need no firmware change.
 
 The DevKit build targets the classic ESP32 with 4 MB flash and no PSRAM. ESP32-S3 development
 boards are not supported by that build. Board details, limits and test status are in
-[devices/README.md](devices/README.md).
+[devices/README.md](devices/README.md). The latest fix validation is recorded in the
+[2026-10-13 hardware report](docs/reports/2026-10-13-firmware-fixes-hardware.md).
 
 ## Quick start
 
@@ -103,6 +104,9 @@ keys, and the board restarts unconfigured. A key still held when the board start
 released. The DevKit's LED is off normally, blinks slowly while advertising, quickly while the app is
 connected, and stays on for about 3 s after setup is saved.
 
+On voice boards, tapping while Wi-Fi is unavailable waits up to 20 seconds for it to return.
+Tap again to cancel. Pairing/reset holds remain responsive and cancel the pending call.
+
 ## Security notes
 
 - **Pairing.** Every board uses LE Secure Connections only (legacy pairing is refused) and requires an
@@ -120,6 +124,9 @@ connected, and stays on for about 3 s after setup is saved.
   operations are off, it refuses every LAN request without touching the network. Requests may only
   go to addresses on the board's own subnet and private ranges, never to the board itself, loopback,
   broadcast or multicast addresses.
+- Changing the workspace, group, backend URLs, Connector token or voice key resets operation
+  permission; allow operations again in the app. Changing only Wi-Fi or the device name preserves
+  permission. With compiled-in development credentials, permission lasts only until reboot.
 - The Bluetooth advertising data uses the test company ID `0xFFFF`.
 - There is no OTA update; update by USB.
 
@@ -148,6 +155,8 @@ sh firmware/tools/lan_tunnel_test/run.sh
 sh firmware/tools/connector_json_test/run.sh
 sh firmware/tools/resample_test/run.sh
 sh firmware/tools/mic_path_test/run.sh
+sh firmware/tools/device_config_test/run.sh
+sh firmware/tools/call_ui_test/run.sh
 # The DevKit's smaller limits:
 sh firmware/tools/lan_http_test/run.sh --devkit
 sh firmware/tools/lan_udp_test/run.sh --devkit
@@ -164,6 +173,11 @@ They do not replace board tests for Wi-Fi, Bluetooth or audio.
 - `firmware/tools/fake_connector.py`: a local Connector server for testing a board without the
   backend. Build with `-DCOMMA_CONNECT_URL_OVERRIDE=ws://<your-computer>:8765/v1/connect` in a
   separate build directory (see [devices/README.md](devices/README.md)).
+- `firmware/tools/connector_regression.py --report /tmp/connector-regression.json`: live-board
+  HTTP/UDP regression checks using that same override image. Tests interim responses, FIN versus
+  reset, queued deadlines, permission revocation and disconnect cancellation. It temporarily changes
+  operation permission and restores the original value after completion; wait for `DONE`, then
+  restore the normal firmware. On interruption, check the permission in the app before resuming use.
 - `tools/lan_mcp_server.py`: a tiny MCP server to stand in for a device on your network.
 - For a development board, `firmware/main/secrets.h.example` shows how to compile credentials in
   instead of using Bluetooth setup. `secrets.h` is ignored by Git; never ship such an image.

@@ -28,6 +28,12 @@ static uint32_t g_mask;
 static int g_connect_errno;
 // Non-zero: connect goes to this port instead of the server's (a closed one, for a real refusal).
 static int g_connect_port;
+static const char *const *g_reads;
+static int g_read_index, g_terminal, g_connects, g_writes;
+static const lan_request_t *g_request;
+static const char *g_cancelled;
+static bool g_cancel_after_resolve, g_cancel_after_connect;
+static const char *cancel_request(void *ctx) { (void)ctx; return g_cancelled; }
 
 bool wifi_ip_info(uint32_t *ip, uint32_t *netmask)
 {
@@ -36,6 +42,7 @@ bool wifi_ip_info(uint32_t *ip, uint32_t *netmask)
     }
     *ip = g_self;
     *netmask = g_mask;
+    if (g_cancel_after_resolve) g_cancelled = "socket closed during DNS";
     return true;
 }
 
@@ -71,6 +78,9 @@ void esp_transport_ssl_set_common_name(esp_transport_handle_t t, const char *nam
 int esp_transport_connect(esp_transport_handle_t t, const char *host, int port, int timeout_ms)
 {
     (void)timeout_ms;
+    g_connects++;
+    if (g_cancel_after_connect) g_cancelled = "socket closed during connect";
+    if (g_reads) return 0;
     strlcpy(g_connect_host, host, sizeof(g_connect_host));
     t->fd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_connect_errno) {
@@ -91,6 +101,15 @@ int esp_transport_connect(esp_transport_handle_t t, const char *host, int port, 
 
 int esp_transport_read(esp_transport_handle_t t, char *buf, int len, int timeout_ms)
 {
+    if (g_reads) {
+        const char *next = g_reads[g_read_index];
+        if (!next) return g_terminal;
+        size_t n = strlen(next);
+        if (n > (size_t)len) abort();
+        memcpy(buf, next, n);
+        g_read_index++;
+        return (int)n;
+    }
     struct pollfd p = {.fd = t->fd, .events = POLLIN};
     int r = poll(&p, 1, timeout_ms);
     if (r == 0) {
@@ -106,6 +125,8 @@ int esp_transport_read(esp_transport_handle_t t, char *buf, int len, int timeout
 int esp_transport_write(esp_transport_handle_t t, const char *buf, int len, int timeout_ms)
 {
     (void)timeout_ms;
+    g_writes++;
+    if (g_reads) return len;
     ssize_t n = send(t->fd, buf, (size_t)len, 0);
     return n < 0 ? -1 : (int)n;
 }
@@ -315,7 +336,7 @@ static cJSON *run(const char *fmt, ...)
         exit(2);
     }
     g_connect_host[0] = 0;
-    char *frame = lan_http_run("req_test", params, g_use_sink);
+    char *frame = lan_http_run_request("req_test", params, g_use_sink, g_request);
     cJSON_Delete(params);
     strlcpy(g_frame, frame ? frame : "", sizeof(g_frame));
     cJSON *out = frame ? cJSON_Parse(frame) : NULL;
@@ -823,6 +844,89 @@ static void test_connect_refused(void)
     sink_reset(0, 0);
 }
 
+static void test_interim_and_read_failures(void)
+{
+    const char *split[] = {"HTTP/1.1 100 Continue\r\nX-Interim: discard\r\n\r\n",
+                          "HTTP/1.1 103 Early Hints\r\nLink: discard\r\n\r\n",
+                          "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Final: keep\r\n\r\nHELLO", NULL};
+    const char *combined[] = {"HTTP/1.1 100 Continue\r\nX-Interim: discard\r\n\r\n"
+                             "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Final: keep\r\n\r\nHELLO", NULL};
+    const char *partial[] = {"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nPARTIAL", NULL};
+    const char *interim_only[] = {"HTTP/1.1 100 Continue\r\n\r\n", NULL};
+    const char *upgrade[] = {"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", NULL};
+    for (int chunks = 0; chunks < 2; chunks++) {
+        const char *mode = chunks ? ",\"response_mode\":\"chunks\"" : "";
+        for (int combined_read = 0; combined_read < 2; combined_read++) {
+            g_reads = combined_read ? combined : split;
+            g_read_index = 0;
+            g_terminal = ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN;
+            sink_reset(8192, 0);
+            cJSON *f = run("{\"url\":\"http://192.168.1.50/test\"%s}", mode);
+            const cJSON *r = result(f);
+            CHECK(num(r, "status") == 200 && num(r, "body_bytes") == 5, "interim: %s", g_frame);
+            CHECK(header_has(r, "X-Final", 0, "keep"), "final headers: %s", g_frame);
+            CHECK(!cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(r, "headers"), "X-Interim"),
+                  "interim header leaked: %s", g_frame);
+            CHECK(g_read_index == (combined_read ? 1 : 3), "stopped before final response");
+            CHECK(chunks ? g_sink.len == 5 && memcmp(g_sink.data, "HELLO", 5) == 0 :
+                           strcmp(str(r, "body"), "HELLO") == 0, "final body");
+            cJSON_Delete(f);
+        }
+        for (int failed = 0; failed < 2; failed++) {
+            g_reads = partial; g_read_index = 0;
+            g_terminal = failed ? ERR_TCP_TRANSPORT_CONNECTION_FAILED : ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN;
+            sink_reset(8192, 0);
+            cJSON *f = run("{\"url\":\"http://192.168.1.50/test\"%s}", mode);
+            CHECK(failed ? is_error(f, "reading the response") : num(result(f), "body_bytes") == 7,
+                  "FIN vs failure: %s", g_frame);
+            cJSON_Delete(f);
+        }
+        g_reads = interim_only; g_read_index = 0; g_terminal = ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN;
+        sink_reset(8192, 0);
+        cJSON *f = run("{\"url\":\"http://192.168.1.50/test\"%s}", mode);
+        CHECK(is_error(f, "before the whole response"), "missing final response: %s", g_frame);
+        cJSON_Delete(f);
+        g_reads = upgrade; g_read_index = 0;
+        f = run("{\"url\":\"http://192.168.1.50/test\"%s}", mode);
+        CHECK(is_error(f, "upgrade"), "upgrade: %s", g_frame);
+        cJSON_Delete(f);
+    }
+    g_reads = NULL;
+    sink_reset(0, 0);
+}
+
+static void test_request_lifetime(void)
+{
+    lan_request_t request = {.deadline_us = esp_timer_get_time() - 1, .cancelled = cancel_request};
+    g_request = &request;
+    g_connects = g_writes = 0;
+    cJSON *f = run("{\"url\":\"http://192.168.1.50/test\"}");
+    CHECK(is_error(f, "including queue time") && g_connects == 0, "expired queue job touched network");
+    cJSON_Delete(f);
+    request.deadline_us = esp_timer_get_time() + 30000000;
+    g_cancelled = "socket closed";
+    f = run("{\"url\":\"http://192.168.1.50/test\"}");
+    CHECK(is_error(f, "socket closed") && g_connects == 0, "disconnected job touched network");
+    cJSON_Delete(f);
+    g_cancelled = NULL; g_cancel_after_resolve = true;
+    f = run("{\"url\":\"http://192.168.1.50/test\"}");
+    CHECK(is_error(f, "socket closed during DNS") && g_connects == 0, "cancel during DNS connected");
+    cJSON_Delete(f);
+    g_cancelled = NULL; g_cancel_after_resolve = false; g_cancel_after_connect = true;
+    const char *reads[] = {NULL}; g_reads = reads;
+    f = run("{\"url\":\"http://192.168.1.50/test\"}");
+    CHECK(strcmp(str(f, "type"), "error") == 0 && g_writes == 0, "cancel during connect sent request");
+    cJSON_Delete(f);
+    g_reads = NULL; g_cancel_after_connect = false; g_cancelled = NULL;
+    int64_t start = esp_timer_get_time();
+    request.deadline_us = start + 100000;  // most of the caller's timeout was spent in the queue
+    f = run("{\"url\":\"http://192.168.1.50:%d/slow\",\"timeout_seconds\":1}", g_port);
+    CHECK(strcmp(str(f, "type"), "error") == 0 && esp_timer_get_time() - start < 500000,
+          "queue wait did not shorten HTTP timeout: %s", g_frame);
+    cJSON_Delete(f);
+    g_request = NULL;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -836,6 +940,8 @@ int main(int argc, char **argv)
     test_requests();
     test_chunks();
     test_connect_refused();
+    test_interim_and_read_failures();
+    test_request_lifetime();
     printf("%d passed, %d failed\n", g_passed, g_failed);
     return g_failed ? 1 : 0;
 }

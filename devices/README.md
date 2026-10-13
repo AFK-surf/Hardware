@@ -13,10 +13,14 @@ tools/board.sh esp32-devkit flash-monitor PORT
 
 | Overlay | Target | Flash / PSRAM | Features | Tested on hardware |
 | --- | --- | --- | --- | --- |
-| `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | GC9D01 160 px round screen, CST816D touch, PDM mic, MAX98357A speaker; voice, passkey, HTTP/UDP/discovery, 2 tunnels | Setup, Connector, calls, discovery, HTTP text and chunks, tunnels |
-| `sdkconfig.m5stack-sticks3` | esp32s3 | 8 MB / 8 MB | ST7789 135x240 screen, ES8311 codec on stereo I2S at 24 kHz (mic resampled to 16 kHz), M5PM1 power chip, KEY1 calls, KEY2 = BOOT; T-Circle limits | Passkey setup, Connector, KEY1 calls, screen sleep, KEY2 pairing and factory reset, discovery and 1 MiB HTTP chunks |
-| `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | CO5300 466x466 AMOLED, CST820 touch; gateway without voice (the board has a mic but no speaker); own partition table without a model partition; T-Circle limits | Screen, touch, passkey setup, Connector, BOOT press and holds. Discovery and HTTP through this board not yet tested |
-| `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 status LED, Just Works pairing, HTTP/UDP, discovery with a 12 KiB result cap; no TCP tunnels | Setup, discovery, 8 KiB text and 1 MiB chunks three times each over local WSS; BOOT holds; replug |
+| `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | GC9D01 160 px round screen, CST816D touch, PDM mic, MAX98357A speaker; voice, passkey, HTTP/UDP/discovery, 2 tunnels | Setup, Connector, calls, discovery, HTTP text and chunks, UDP, tunnels; queued deadline/revocation/disconnect regressions |
+| `sdkconfig.m5stack-sticks3` | esp32s3 | 8 MB / 8 MB | ST7789 135x240 screen, ES8311 codec on stereo I2S at 24 kHz (mic resampled to 16 kHz), M5PM1 power chip, KEY1 calls, KEY2 = BOOT; T-Circle limits | Passkey setup, Connector, KEY1 calls, screen sleep, KEY2 pairing and factory reset, discovery, HTTP/UDP regressions and tunnels; -3 dB speaker level accepted in listening test |
+| `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | CO5300 466x466 AMOLED, CST820 touch; gateway without voice (the board has a mic but no speaker); own partition table without a model partition; T-Circle limits | Screen, touch, passkey setup, Connector, BOOT press and holds; HTTP/UDP regressions, discovery and tunnels; display recovered after correcting an earlier wrong-board flash |
+| `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 status LED, Just Works pairing, HTTP/UDP, discovery with a 12 KiB result cap; no TCP tunnels | Setup, discovery, 8 KiB text and 1 MiB chunks three times each over local WSS; BOOT holds; replug; current HTTP/UDP regressions over local WS and staging WSS reconnect |
+
+The [2026-10-13 validation report](../docs/reports/2026-10-13-firmware-fixes-hardware.md) records the
+current fixes, measured results and outstanding tests. Physical offline dialing and credential
+replacement across workspaces remain unverified on hardware; host regressions cover both policies.
 
 ## ESP32 DevKit limits
 

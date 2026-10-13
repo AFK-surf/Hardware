@@ -27,13 +27,36 @@
 #define NS "comma"
 // Written last: a config is only complete once this key is 1.
 #define KEY_PROVISIONED "provisioned"
+#define ACCESS_NS "connector"
+#define ACCESS_KEY "allow_ops"
 
 static const char *TAG = "config";
 
 static SemaphoreHandle_t s_lock;
 static device_config_t s_cfg;
-static bool s_provisioned;
+static atomic_bool s_provisioned;
 static atomic_uint s_generation;
+static bool s_allow_operations;  // protected by s_lock, together with credentials and NVS writes
+
+static esp_err_t save_access(bool allow)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ACCESS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(h, ACCESS_KEY, allow);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+static bool same_identity(const device_config_t *a, const device_config_t *b)
+{
+    // Wi-Fi and display-name edits preserve consent. Token/key rotation requires new consent:
+    // the firmware cannot prove that a new token belongs to the same device identity.
+    return strcmp(a->server, b->server) == 0 && strcmp(a->connect_url, b->connect_url) == 0 &&
+           strcmp(a->workspace_id, b->workspace_id) == 0 && strcmp(a->group_id, b->group_id) == 0 &&
+           strcmp(a->connector_token, b->connector_token) == 0 && strcmp(a->voice_key, b->voice_key) == 0;
+}
 
 typedef struct {
     const char *key;
@@ -131,6 +154,13 @@ esp_err_t device_config_init(void)
     load_dev_override();
 #else
     load_nvs();
+    nvs_handle_t access;
+    uint8_t allow = 0;
+    if (s_provisioned && nvs_open(ACCESS_NS, NVS_READONLY, &access) == ESP_OK) {
+        nvs_get_u8(access, ACCESS_KEY, &allow);
+        nvs_close(access);
+    }
+    s_allow_operations = allow == 1;
 #endif
     return ESP_OK;
 }
@@ -164,9 +194,21 @@ esp_err_t device_config_save(const device_config_t *cfg)
         // Still store it, so turning the override off keeps the provisioned values.
         ESP_LOGW(TAG, "saving to NVS, but secrets.h stays in effect until COMMA_DEV_SECRETS is 0");
     }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    // Revoke durably BEFORE replacing credentials, including on a power cut or failed save.
+    // Access writes use this same mutex, so an old socket cannot re-enable consent mid-save.
+    if (!s_provisioned || !same_identity(&s_cfg, cfg) || COMMA_DEV_SECRETS) {
+        s_allow_operations = false;
+        esp_err_t revoke = save_access(false);
+        if (revoke != ESP_OK) {
+            xSemaphoreGive(s_lock);
+            return revoke;
+        }
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
     if (err != ESP_OK) {
+        xSemaphoreGive(s_lock);
         return err;
     }
     // Clear the flag first so a power cut mid-write leaves the device unprovisioned, not half set.
@@ -189,15 +231,15 @@ esp_err_t device_config_save(const device_config_t *cfg)
     nvs_close(h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "save failed: %s", esp_err_to_name(err));
+        xSemaphoreGive(s_lock);
         return err;
     }
     if (!COMMA_DEV_SECRETS) {
-        xSemaphoreTake(s_lock, portMAX_DELAY);
         s_cfg = *cfg;
         s_provisioned = true;
-        xSemaphoreGive(s_lock);
     }
     ++s_generation;
+    xSemaphoreGive(s_lock);
     ESP_LOGI(TAG, "saved \"%s\" on Wi-Fi \"%s\"", cfg->device_name, cfg->wifi_ssid);
     return ESP_OK;
 }
@@ -207,14 +249,37 @@ unsigned device_config_generation(void)
     return s_generation;
 }
 
+bool device_config_operations_allowed(unsigned generation)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool allowed = s_provisioned && generation == s_generation && s_allow_operations;
+    xSemaphoreGive(s_lock);
+    return allowed;
+}
+
+esp_err_t device_config_set_operations_allowed(unsigned generation, bool allow)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (s_provisioned && generation == s_generation) {
+        // A compiled-in identity may change on every flash, so dev consent lasts only this boot.
+        err = COMMA_DEV_SECRETS ? ESP_OK : save_access(allow);
+        if (err == ESP_OK) s_allow_operations = allow;
+    }
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
 esp_err_t device_config_erase_all(void)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     memset(&s_cfg, 0, sizeof(s_cfg));
     s_provisioned = false;
-    xSemaphoreGive(s_lock);
+    s_allow_operations = false;
+    ++s_generation;
     // nvs_flash_erase deinitializes the default partition first.
     const esp_err_t err = nvs_flash_erase();
+    xSemaphoreGive(s_lock);
     ESP_LOGW(TAG, "NVS erased: %s", esp_err_to_name(err));
     return err;
 }

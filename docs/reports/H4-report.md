@@ -28,6 +28,12 @@ setup from the app. Its pins driven by the
 StickS3 image (14/15 = CO5300 D2/D3, 38–41 = I2S, 21, 45) are logic-level; no damage expected but
 check the panel. From now on the MAC is read immediately before every flash or erase.
 
+**Recovery, 2026-10-13 evening:** the same Waveshare was reattached with a blank screen, still
+running the incorrect StickS3 image. After MAC verification, its correct normal firmware was
+restored and the user confirmed the display recovered. Re-provisioning and the HTTP/UDP,
+discovery and tunnel checks then passed, as recorded in the
+[firmware fix validation report](2026-10-13-firmware-fixes-hardware.md#waveshare-amoled).
+
 ## 1. Board
 
 | Item | Value |

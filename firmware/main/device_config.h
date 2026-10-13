@@ -40,7 +40,12 @@ bool device_config_get(device_config_t *out);
 // Bumped on every save. A client that cached credentials reconnects when it changes.
 unsigned device_config_generation(void);
 
-// Store a complete config and mark the device provisioned.
+// Consent is tied to the current credentials. A stale Connector cannot use or change it.
+bool device_config_operations_allowed(unsigned generation);
+esp_err_t device_config_set_operations_allowed(unsigned generation, bool allow);
+
+// Store a complete config and mark the device provisioned. Identity/credential changes durably
+// revoke operation consent first; Wi-Fi/name-only changes preserve it.
 esp_err_t device_config_save(const device_config_t *cfg);
 
 // Erase the whole NVS partition: credentials, Wi-Fi driver state, BLE keys.

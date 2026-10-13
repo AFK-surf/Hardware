@@ -29,10 +29,20 @@ static int g_checks, g_failed;
 
 #define SELF "192.168.1.17"
 
+static const lan_request_t *g_request;
+static const char *g_cancelled;
+static bool g_cancel_after_resolve;
+static int64_t g_cancel_at;
+static const char *cancel_request(void *ctx) {
+    (void)ctx;
+    return g_cancel_at && esp_timer_get_time() >= g_cancel_at ? "socket closed" : g_cancelled;
+}
+
 bool wifi_ip_info(uint32_t *ip, uint32_t *netmask)
 {
     *ip = inet_addr(SELF);
     *netmask = inet_addr("255.255.255.0");
+    if (g_cancel_after_resolve) g_cancelled = "socket closed during DNS";
     return true;
 }
 
@@ -126,7 +136,7 @@ static void run(const char *params_json)
     cJSON *p = cJSON_Parse(params_json);
     assert(p);
     const int64_t t0 = esp_timer_get_time();
-    char *frame = lan_udp_run("req_\"q\"", p);
+    char *frame = lan_udp_run_request("req_\"q\"", p, g_request);
     g_ms = (int)((esp_timer_get_time() - t0) / 1000);
     cJSON_Delete(p);
     g_reply = frame ? cJSON_Parse(frame) : NULL;
@@ -328,12 +338,34 @@ static void test_params(void)
     cJSON_Delete(p);
 }
 
+static void test_request_lifetime(void)
+{
+    const char *params = "{\"host\":\"192.168.1.19\",\"port\":54321,\"payload_b64\":\"AA==\",\"timeout_ms\":1000}";
+    lan_request_t request = {.deadline_us = esp_timer_get_time() - 1, .cancelled = cancel_request};
+    g_request = &request;
+    run(params);
+    CHECK(is_error("including queue time") && g_sent_len < 0, "expired request sent a datagram");
+    request.deadline_us = esp_timer_get_time() + 30000000;
+    g_cancelled = "socket closed"; run(params);
+    CHECK(is_error("socket closed") && g_sent_len < 0, "disconnected request sent a datagram");
+    g_cancelled = NULL; g_cancel_after_resolve = true; run(params);
+    CHECK(is_error("during DNS") && g_sent_len < 0, "cancellation during DNS sent a datagram");
+    g_cancel_after_resolve = false; g_cancelled = NULL;
+    g_cancel_at = esp_timer_get_time() + 50000; run(params);
+    CHECK(is_error("socket closed") && g_ms < 300, "active receive did not cancel promptly");
+    g_cancel_at = 0;
+    request.deadline_us = esp_timer_get_time() + 50000; run(params);
+    CHECK(is_error("including queue time") && g_ms < 300, "remaining queue deadline ignored");
+    g_request = NULL;
+}
+
 int main(void)
 {
     setup();
     test_base64();
     test_exchange();
     test_params();
+    test_request_lifetime();
     cJSON_Delete(g_reply);
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

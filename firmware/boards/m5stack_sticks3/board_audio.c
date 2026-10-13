@@ -66,10 +66,9 @@
 // ES8311 mic PGA. The reference runs this board at 30 dB; start 6 dB lower and tune against the
 // T-Circle's mic_rms (~400 speaking at arm's length).
 #define STICK_MIC_GAIN_DB 24.0f
-// DAC volume in dB on esp_codec_dev's scale (after the hardware gain below). The reference's
-// default volume 70 is about -15 dB on esp_codec_dev's default curve. At -15 dB the first board
-// calls were too quiet by ear and echo_rms peaked at 1-2k (T-Circle median ~10k), so +9 dB.
-#define STICK_SPEAKER_DB -6.0f
+// DAC volume on esp_codec_dev's dB scale (after the hardware gain below).
+// Keep 3 dB of attenuation for speech peaks while making the small speaker easier to hear.
+#define STICK_SPEAKER_DB -3.0f
 // The mic rate check: one log line this long after the mic opens.
 #define STICK_RATE_CHECK_US (10LL * 1000000)
 // Mic audio the reader task can hold for a late voice task (the T-Circle's DMA holds 160 ms).

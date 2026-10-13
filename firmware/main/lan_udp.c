@@ -113,6 +113,13 @@ static bool int_param(const cJSON *params, const char *key, int dflt, int lo, in
 
 char *lan_udp_run(const char *id, const cJSON *params)
 {
+    return lan_udp_run_request(id, params, NULL);
+}
+
+char *lan_udp_run_request(const char *id, const cJSON *params, const lan_request_t *request)
+{
+    const char *cancelled = lan_request_check(request);
+    if (cancelled) return error_frame(id, cancelled);
     char err[LAN_DEST_ERR_MAX] = "";
     if (!cJSON_IsObject(params)) {
         return error_frame(id, "params must be an object with host, port and payload_b64");
@@ -157,6 +164,8 @@ char *lan_udp_run(const char *id, const cJSON *params)
         return error_frame(id, err);
     }
 
+    cancelled = lan_request_check(request);
+    if (cancelled) return error_frame(id, cancelled);
     const int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s < 0) {
         return error_frame(id, "the T-Circle has no free socket right now; try again shortly");
@@ -167,6 +176,11 @@ char *lan_udp_run(const char *id, const cJSON *params)
     const uint8_t *b = (const uint8_t *)&ip;
     snprintf(dest, sizeof(dest), "%u.%u.%u.%u:%d", b[0], b[1], b[2], b[3], port->valueint);
     const int64_t start_us = esp_timer_get_time();
+    cancelled = lan_request_check(request);
+    if (cancelled) {
+        close(s);
+        return error_frame(id, cancelled);
+    }
     if (sendto(s, payload, (size_t)len, 0, (struct sockaddr *)&to, sizeof(to)) < 0) {
         snprintf(err, sizeof(err), "sending to %s failed (errno %d)", dest, errno);
         close(s);
@@ -187,11 +201,16 @@ char *lan_udp_run(const char *id, const cJSON *params)
         close(s);
         return error_frame(id, "out of memory");
     }
-    const int64_t deadline_us = start_us + (int64_t)timeout_ms * 1000;
+    const int64_t deadline_us = lan_request_deadline(request, start_us + (int64_t)timeout_ms * 1000);
     int got = 0;
     int ignored = 0;
     bool timed_out = false;
     while (got < max_responses) {
+        cancelled = lan_request_check(request);
+        if (cancelled) {
+            snprintf(err, sizeof(err), "%s", cancelled);
+            break;
+        }
         const int64_t left_us = deadline_us - esp_timer_get_time();
         if (left_us <= 0) {
             timed_out = true;
@@ -200,7 +219,8 @@ char *lan_udp_run(const char *id, const cJSON *params)
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(s, &fds);
-        struct timeval tv = {.tv_sec = (long)(left_us / 1000000), .tv_usec = (long)(left_us % 1000000)};
+        const int64_t wait_us = request && left_us > 100000 ? 100000 : left_us;
+        struct timeval tv = {.tv_sec = (long)(wait_us / 1000000), .tv_usec = (long)(wait_us % 1000000)};
         const int ready = select(s + 1, &fds, NULL, NULL, &tv);
         if (ready < 0) {
             snprintf(err, sizeof(err), "waiting for answers from %s failed (errno %d)", dest, errno);

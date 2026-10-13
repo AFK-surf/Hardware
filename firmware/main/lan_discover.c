@@ -303,7 +303,7 @@ static void sleep_ms(uint32_t ms)
 
 // Without PSRAM, setup BLE holds the memory the result needs, and provisioning ends it a few seconds
 // after connector_up. Wait for that before allocating anything, within the backend's deadline.
-static void wait_for_ble_off(const char *id, int timeout_ms)
+static void wait_for_ble_off(const char *id, int timeout_ms, const lan_request_t *request)
 {
     if (!provisioning_ble_on()) {
         return;
@@ -311,7 +311,16 @@ static void wait_for_ble_off(const char *id, int timeout_ms)
     const uint32_t limit = ld_ble_wait_limit(timeout_ms);
     ESP_LOGI(TAG, "%s: waiting up to %u ms for BLE to end", id, (unsigned)limit);
     bool still_on;
-    const uint32_t waited = ld_wait_while(provisioning_ble_on, sleep_ms, limit, 100, &still_on);
+    uint32_t waited = 0;
+    while (provisioning_ble_on() && waited < limit && !lan_request_check(request)) {
+        sleep_ms(100);
+        waited += 100;
+    }
+    still_on = provisioning_ble_on();
+    if (lan_request_check(request)) {
+        ESP_LOGI(TAG, "%s: request ended while waiting for BLE", id);
+        return;
+    }
     if (still_on) {
         ESP_LOGW(TAG, "%s: BLE still on after %u ms, discovering anyway", id, (unsigned)waited);
     } else {
@@ -324,6 +333,13 @@ static void wait_for_ble_off(const char *id, int timeout_ms)
 
 char *lan_discover_run(const char *id, const cJSON *params)
 {
+    return lan_discover_run_request(id, params, NULL);
+}
+
+char *lan_discover_run_request(const char *id, const cJSON *params, const lan_request_t *request)
+{
+    const char *cancelled = lan_request_check(request);
+    if (cancelled) return error_frame(id, cancelled);
     unsigned sources;
     int timeout_ms;
     const char *bad = ld_parse_params(params, &sources, &timeout_ms);
@@ -331,8 +347,10 @@ char *lan_discover_run(const char *id, const cJSON *params)
         return error_frame(id, bad);
     }
 #if CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY
-    wait_for_ble_off(id, timeout_ms);
+    wait_for_ble_off(id, timeout_ms, request);
 #endif
+    cancelled = lan_request_check(request);
+    if (cancelled) return error_frame(id, cancelled);
     uint32_t self_ip, netmask;
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     struct netif *nif = netif ? esp_netif_get_netif_impl(netif) : NULL;
@@ -353,8 +371,16 @@ char *lan_discover_run(const char *id, const cJSON *params)
     memset(dump, 0, sizeof(*dump));
     dump->nif = nif;
 
+    cancelled = lan_request_check(request);
+    if (cancelled) {
+        ld_free(ctx);
+        free(buf);
+        free(dump);
+        comma_log_failed_allocs(false);
+        return error_frame(id, cancelled);
+    }
     const int64_t start = now_ms();
-    const int64_t deadline = start + timeout_ms;
+    const int64_t deadline = lan_request_deadline(request, (start + timeout_ms) * 1000) / 1000;
 
     // ARP: the own subnet, at most ARP_SWEEP_MAX addresses around the device's own.
     const uint32_t own = lwip_ntohl(self_ip);
@@ -414,6 +440,8 @@ char *lan_discover_run(const char *id, const cJSON *params)
     int64_t next_probe_send = start;
     int send_errno = 0;  // the first failed sendto, for the log
     for (;;) {
+        cancelled = lan_request_check(request);
+        if (cancelled) break;
         const int64_t now = now_ms();
         if (now >= deadline) {
             break;
@@ -522,6 +550,11 @@ char *lan_discover_run(const char *id, const cJSON *params)
     free(buf);
     free(dump);
 
+    if (cancelled) {
+        ld_free(ctx);
+        comma_log_failed_allocs(false);
+        return error_frame(id, cancelled);
+    }
     int hosts, n_arp, n_mdns, n_ssdp;
     bool truncated;
     // The reply envelope is written around the result in the same buffer: no second copy.
