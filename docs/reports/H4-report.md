@@ -382,3 +382,19 @@ section 7's table (`idf.py -B firmware/build-m5stack-sticks3-diag -p PORT app-fl
 
 Still open: the KEY2 > 10 s factory reset (section 5), the PMIC's voltage and power-source
 registers, and the Connector's 45 s gap when it connects during a call start (shared code).
+
+## Factory reset retest — 2026-10-13 (Claude)
+
+KEY2 (right edge, lower half, with the screen up and KEY1 below it) held 15 s on `f557c53`:
+
+```text
+W main: factory reset
+W config: NVS erased: ESP_OK
+rst:0xc (RTC_SW_CPU_RST)          (the firmware's own restart, not a power cut)
+```
+
+The board came back unprovisioned. No PMIC action was involved. The earlier failed try released
+KEY2 after 6 s (pairing mode), and the "power on" restarts match the M5PM1 power button's own
+actions (datasheet: single click resets, double click powers off, long press enters download mode).
+That button is a separate key, not KEY1 or KEY2. No firmware change was needed. The board was
+reflashed with a clean `f557c53` build; the image used in the tests above was `f3fd733-dirty`.
