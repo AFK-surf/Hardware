@@ -34,7 +34,11 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/api.h"
+#include "lwip/priv/sockets_priv.h"
+#include "lwip/priv/tcpip_priv.h"
 #include "lwip/sockets.h"
+#include "lwip/tcp.h"
 #include "nvs.h"
 
 #define WS_OP_TEXT 0x1
@@ -171,6 +175,9 @@ static uint8_t s_opcode;
 static bool s_assembling;
 
 static int s_reconnects;
+// WebSocket PONGs since the socket opened, counted in the websocket task. A PONG proves the server's
+// WebSocket layer is reading our PINGs even when no text frame arrives.
+static atomic_int s_pongs;
 static int64_t s_heartbeat_us;
 static int64_t s_stats_us;
 
@@ -314,6 +321,9 @@ static void consume_chunk(const esp_websocket_event_data_t *event)
         return;
     }
     if (event->op_code == WS_OP_PING || event->op_code == WS_OP_PONG) {
+        if (event->op_code == WS_OP_PONG) {
+            s_pongs++;
+        }
         return;
     }
     const size_t chunk = (size_t)event->data_len;
@@ -1078,6 +1088,53 @@ static void conn_fd_find(void)
     }
 }
 
+// The Connector socket's TCP state, read in the tcpip thread (no core locking in this build).
+typedef struct {
+    struct tcpip_api_call_data call;
+    struct netconn *conn;
+    int state;
+    uint32_t unacked;
+    uint32_t nrtx;
+    uint32_t rcv_wnd;
+    int refused;
+} conn_tcp_t;
+
+static err_t conn_tcp_snap(struct tcpip_api_call_data *data)
+{
+    conn_tcp_t *t = (conn_tcp_t *)data;
+    struct tcp_pcb *pcb = t->conn ? t->conn->pcb.tcp : NULL;
+    if (!pcb) {
+        return ERR_CONN;
+    }
+    t->state = pcb->state;
+    t->unacked = pcb->snd_nxt - pcb->lastack;
+    t->nrtx = pcb->nrtx;
+    t->rcv_wnd = pcb->rcv_wnd;
+    t->refused = pcb->refused_data != NULL;
+    return ERR_OK;
+}
+
+// Where a silent Connector socket stalled: data waiting unread on the device (unread, refused) is
+// a device bug; PONGs mean the server's WebSocket layer is alive but sends no frames; unacked bytes
+// with retransmissions mean the path is gone. Logged once, when the 45 s read timeout fires.
+static void log_silent_link(void)
+{
+    const int fd = s_conn_fd;
+    int unread = -1;
+    conn_tcp_t t = {0};
+    struct lwip_sock *sock = fd >= 0 ? lwip_socket_dbg_get_socket(fd) : NULL;
+    t.conn = sock ? sock->conn : NULL;
+    if (fd >= 0) {
+        ioctl(fd, FIONREAD, &unread);
+    }
+    if (!t.conn || tcpip_api_call(conn_tcp_snap, &t.call) != ERR_OK) {
+        ESP_LOGW(TAG, "silent link: pongs=%d fd=%d unread=%d tcp=?", (int)s_pongs, fd, unread);
+        return;
+    }
+    ESP_LOGW(TAG, "silent link: pongs=%d fd=%d unread=%d tcp state=%d unacked=%u nrtx=%u rcv_wnd=%u refused=%d",
+             (int)s_pongs, fd, unread, t.state, (unsigned)t.unacked, (unsigned)t.nrtx, (unsigned)t.rcv_wnd, t.refused);
+}
+
 // One connection, from dial to close. Returns how long the socket was open, in microseconds.
 static int64_t run_session(const credentials_t *creds)
 {
@@ -1153,6 +1210,7 @@ static int64_t run_session(const credentials_t *creds)
             if (xQueueReceive(s_events, &ev, pdMS_TO_TICKS(1000)) != pdTRUE) {
                 if (opened_us != 0 && esp_timer_get_time() - last_rx_us > READ_TIMEOUT_US) {
                     ESP_LOGW(TAG, "no frame for 45 s, reconnecting");
+                    log_silent_link();
                     break;
                 }
                 continue;
@@ -1164,6 +1222,7 @@ static int64_t run_session(const credentials_t *creds)
             if (ev.kind == EV_OPEN) {
                 opened_us = last_rx_us;
                 s_heartbeat_us = 0;
+                s_pongs = 0;
                 comma_heap_log("connector_open");
                 ESP_LOGI(TAG, "socket open");
                 conn_fd_find();
