@@ -19,7 +19,7 @@ on the subnet was found. StickS3 playback is set to -3 dB and passed the user's 
 
 Host regressions cover configuration persistence and failed saves, credential-generation races,
 request cancellation/deadlines, HTTP parsing, and offline call input. Existing LAN, JSON, audio and
-Python suites also passed. See [the development instructions](../README.md#host-tests) to run them.
+Python suites also passed. See [the development instructions](development.md#host-tests) to run them.
 
 Still unverified on hardware: offline tap/button cancellation and credential replacement across
 workspaces. An intermittent 45-second Connector silence observed earlier has not been diagnosed;

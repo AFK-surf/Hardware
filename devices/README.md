@@ -22,6 +22,31 @@ The [validation notes](../docs/validation.md) summarize the current results and 
 Physical offline dialing and credential replacement across workspaces remain unverified on hardware;
 host regressions cover both policies.
 
+## Flashing
+
+The first flash must write everything (bootloader, partition table, app and, on voice boards, the
+speech model partition): use `flash`, not `app-flash`. Exit the monitor with Ctrl+]. Flashing does
+not erase saved settings. Download mode, per board:
+
+- **T-Circle-S3 and Waveshare AMOLED** (native USB): esptool enters download mode by itself. If it
+  cannot connect, hold BOOT while plugging in USB, then flash. If the Waveshare stays silent with a
+  blank screen after flashing on macOS, unplug and replug USB without touching BOOT.
+- **StickS3** (native USB): download mode is automatic, no key needed. Opening the serial port resets
+  the board. A long press on the separate power button also enters download mode.
+- **ESP32 DevKit** (USB-UART bridge, often a CH340 or CP210x): install the bridge's driver if no port
+  appears. If esptool stays at `Connecting...`, hold BOOT until it starts writing.
+
+## Keys
+
+Pairing mode lets the app reconfigure a board that is already set up (new Wi-Fi, new credentials);
+it ends after 5 minutes without a connection. Factory reset erases Wi-Fi, credentials and Bluetooth
+keys, and the board restarts unconfigured. A key still held when the board starts is ignored until
+released. The DevKit's LED is off normally, blinks slowly while advertising, quickly while the app is
+connected, and stays on for about 3 s after setup is saved.
+
+On voice boards, tapping while Wi-Fi is unavailable waits up to 20 seconds for it to return.
+Tap again to cancel. Pairing/reset holds remain responsive and cancel the pending call.
+
 ## ESP32 DevKit limits
 
 The DevKit has no PSRAM, so its overlay trades capacity for memory:
