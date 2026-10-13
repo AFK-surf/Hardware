@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// V2: noise suppression and voice activity detection on the mic, so the uplink carries speech, not
-// room noise (GPT-Live's server-side turn detection kept hearing office noise as "still talking").
+// Noise suppression and voice activity detection on the mic, so the uplink carries speech, not
+// room noise (the voice model's server-side turn detection kept hearing office noise as "still talking").
 //
 // ESP-SR AFE (voice-communication type, one mic): vadnet1 VAD, optionally after nsnet2 noise
 // suppression (COMMA_VOICE_NS_OFF), models in the "model" partition. The mic runs at 16 kHz, the
@@ -13,15 +14,15 @@
 
 #include "esp_err.h"
 
-// 1: mic at 16 kHz through the AFE (default). 0: V1 behaviour, raw 24 kHz mic audio on the wire.
-// Build without it: `idf.py -B build-v2off -DCOMMA_VOICE_CLEAN_OFF=1 build` (separate build directory:
+// 1: mic at 16 kHz through the AFE (default). 0: no AFE, raw 24 kHz mic audio on the wire.
+// Build without it: `idf.py -B build-clean-off -DCOMMA_VOICE_CLEAN_OFF=1 build` (separate build directory:
 // the CMake cache keeps the value).
 #ifndef COMMA_VOICE_CLEAN
 #define COMMA_VOICE_CLEAN 1
 #endif
 
 // 1 (default): VAD only. vadnet runs on the raw 16 kHz mic and the wire carries that raw audio in
-// speech, zeros otherwise; nsnet2 cost ~0.8 s of CPU per second in a call (V2 report). 0: nsnet2
+// speech, zeros otherwise; nsnet2 cost ~0.8 s of CPU per second in a call (measured on the T-Circle). 0: nsnet2
 // denoises first, and the wire carries the denoised audio. `-DCOMMA_VOICE_NS_OFF=0` at configure time.
 #ifndef COMMA_VOICE_NS_OFF
 #define COMMA_VOICE_NS_OFF 1

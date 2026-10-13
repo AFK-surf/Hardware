@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // The part of `lan_discover` that needs no network: params, UDP probe state, mDNS/SSDP parsing and merging with
@@ -14,7 +15,7 @@
 #include "firmware_config.h"
 #include "cJSON.h"
 
-// The caps agreed with the backend (docs/prompts/A5-firmware-lan-discovery.md). A dropped host,
+// The caps agreed with the backend (docs/connector-protocol.md, lan_discover). A dropped host,
 // service, SSDP entry or string sets "truncated": true. Probe coverage or answers that were lost
 // (unsent, not resent, cut, over the answer budget) set only "probes_truncated": true.
 #define LD_MAX_HOSTS 64
@@ -117,7 +118,7 @@ void ld_sb_json(ld_sb_t *b, const char *s);
 void ld_sb_free(ld_sb_t *b);
 
 // Boards without PSRAM (CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY) wait for setup BLE to end before
-// discovery allocates. The backend gives a lan_discover request 15 s (salix_env protocol.ex); the
+// discovery allocates. The backend gives a lan_discover request 15 s; the
 // wait leaves the scan and a reply margin inside that, and is never longer than 10 s.
 #define LD_BLE_WAIT_MAX_MS 10000
 #define LD_REQUEST_DEADLINE_MS 15000

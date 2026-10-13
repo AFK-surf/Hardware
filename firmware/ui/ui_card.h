@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // Text cards for the screen: a small gray label, an optional line of big digits, and wrapped body

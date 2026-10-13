@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Replay captured datagrams through the parser (see replay.c). Usage: ./replay.sh self_ip netmask files...
 set -e
 cd "$(dirname "$0")"

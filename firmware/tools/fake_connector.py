@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A minimal local Connector server for testing the T-Circle without the backend (G1). Stdlib only.
+# SPDX-License-Identifier: Apache-2.0
+"""A minimal local Connector server for testing a board without the backend. Stdlib only.
 
 It accepts the board's dial on ws://<mac>:<port>/v1/connect, answers heartbeats, then sends
 `http_request`s in chunk mode (response_mode "chunks"), reassembles the `response_chunk` frames,
@@ -20,29 +21,29 @@ During a voice call: fetch the 1 MB file again and again, every 3 s, until Ctrl-
 
 Anything on the LAN (the camera's snapshot may answer 401: its auth is the backend's job):
 
-    python3 tools/fake_connector.py --fetch 'http://192.168.5.33/...'
+    python3 tools/fake_connector.py --fetch 'http://192.168.1.33/...'
 
-UDP discovery (H2), Gree and miIO hellos selected within the board's advertised limits:
+UDP discovery probes, Gree and miIO hellos selected within the board's advertised limits:
 
     python3 firmware/tools/fake_connector.py --discover-probes --discover-timeout 5000 --loop 3
 
 Pass --discover-probes FILE.json for an array of {id, port, payload_b64} objects, e.g. a maximum-load
 lab test. Results are saved under --out; logs contain only host/probe ids, byte counts and cut flags.
 
-TCP tunnels (lan_tcp_dial, G3): echo through a TCP echo server on this Mac (a short line, then
+TCP tunnels (lan_tcp_dial): echo through a TCP echo server on this Mac (a short line, then
 1 MB), pull 1 MB from a source server on this Mac, and a dial to a closed port (must be refused):
 
     python3 tools/fake_connector.py --tunnel
 
-Plus an RTSP OPTIONS to the office camera (answers `RTSP/1.0 200 OK`; office LAN only):
+Plus an RTSP OPTIONS to a camera on your network (expects `RTSP/1.0 200 OK`):
 
-    python3 tools/fake_connector.py --tunnel --rtsp 192.168.5.33:554
+    python3 tools/fake_connector.py --tunnel --rtsp 192.168.1.33:554
 
 Call test (one call): the camera tunnel stays open; start a call on the board within 120 s. The board
 must end the tunnel with "busy: voice call active", refuse redials during the call, and accept one
 once the call is over:
 
-    python3 tools/fake_connector.py --rtsp 192.168.5.33:554 --hold 120
+    python3 tools/fake_connector.py --rtsp 192.168.1.33:554 --hold 120
 
 The server side behaves like the backend's DeviceRelay: frames of up to 32 KB toward the board, the
 board's advertised window honoured, and a tcp_ack after every data frame it takes.
@@ -976,7 +977,7 @@ async def main():
     ap.add_argument("--out", default="fake_connector_out", help="where bodies go")
     ap.add_argument("--tunnel", action="store_true", help="lan_tcp_dial checks: echo, 1 MB pull, closed port")
     ap.add_argument("--rtsp", action="append", default=[], metavar="HOST[:PORT]",
-                    help="RTSP OPTIONS through a tunnel (repeatable), e.g. 192.168.5.33:554")
+                    help="RTSP OPTIONS through a tunnel (repeatable), e.g. 192.168.1.33:554")
     ap.add_argument("--echo-port", type=int, default=7007, help="TCP echo server port for --tunnel")
     ap.add_argument("--source-port", type=int, default=7008, help="TCP source server port for --tunnel")
     ap.add_argument("--hold", type=int, default=0, metavar="S",

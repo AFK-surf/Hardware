@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // BLE provisioning: the Comma app gives the device its Wi-Fi network and Comma credentials.
@@ -31,6 +32,6 @@ bool provisioning_ble_on(void);
 // Draw the current pairing screen again (after something else used the display).
 void provisioning_redraw(void);
 
-// For the Connector (A2): report its state so a connected app sees it in `status`.
+// For the Connector: report its state so a connected app sees it in `status`.
 // state: "connector_connecting", "connector_up" or "connector_failed". device_id may be NULL.
 void provisioning_set_connector_state(const char *state, const char *device_id);

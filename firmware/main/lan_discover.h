@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include "cJSON.h"
 
-// The Connector's `lan_discover` (contract in docs/prompts/A5-firmware-lan-discovery.md):
+// The Connector's `lan_discover` (contract in docs/connector-protocol.md):
 //   params {sources?: ["arp","mdns","ssdp"], timeout_ms?: 1000..8000,
 //           udp_probes?: [{id, port, payload_b64}]}
 //   result {hosts: [{ip, mac?, hostname?, sources, services: [{type, name, port, txt?}],

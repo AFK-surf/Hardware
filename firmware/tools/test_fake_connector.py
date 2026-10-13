@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Tests tools/fake_connector.py without a board: a Python stand-in dials it the way the firmware
 does and answers its http_requests in chunk mode (and text mode), then the fake Connector's verdicts
 are checked. Variants that break the contract (lost chunk, wrong sha256, bad byte) must FAIL.

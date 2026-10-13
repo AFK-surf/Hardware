@@ -1,7 +1,7 @@
 # M5Stack StickS3 only. Exact version; supports ESP-IDF 6.0.
 # Public, so main (which requires this component) gets its headers.
 dependencies:
-  # ES8311 registers (board_audio.c). 1.6.2 is the version H3 B built against for the same codec.
+  # ES8311 registers (board_audio.c). 1.6.2 was tested with the same codec on the Waveshare AMOLED.
   espressif/esp_codec_dev:
     version: "1.6.2"
     require: public

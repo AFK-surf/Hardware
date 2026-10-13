@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 // BSD sockets stand in for lwIP's. sendto/recvfrom go through test.c, which sends every datagram to
 // a local peer (whatever LAN address the firmware picked) and makes answers look like they came from

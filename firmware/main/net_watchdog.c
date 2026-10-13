@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "heap_diag.h"
 #include "memory_caps.h"
 #include "net_watchdog.h"

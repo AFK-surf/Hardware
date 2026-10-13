@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "heap_diag.h"
 #include "memory_caps.h"
 // http_request for the Connector. Built on esp_transport + http_parser rather than esp_http_client:
@@ -524,7 +525,7 @@ static bool header_is(const char *name, const char *want)
     return strcasecmp(name, want) == 0;
 }
 
-// Header values as salix-connect's stringFromAny would print the common JSON types.
+// Header values as the desktop Connector's would print the common JSON types.
 static char *header_value(const cJSON *v)
 {
     if (cJSON_IsString(v)) {
@@ -696,7 +697,7 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
         params = NULL;  // every field below has a default or a clear error
     }
 
-    // Method (default POST, like salix-connect).
+    // Method (default POST, like the desktop Connector).
     const cJSON *jm = cJSON_GetObjectItemCaseSensitive(params, "method");
     const char *raw_method = cJSON_IsString(jm) && jm->valuestring[0] ? jm->valuestring : "POST";
     const char *method = NULL;
@@ -742,7 +743,7 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
     const size_t limit_max = chunk_mode ? LAN_HTTP_CHUNK_MAX_TOTAL : LAN_HTTP_MAX_BYTES;
 
     const cJSON *jt = cJSON_GetObjectItemCaseSensitive(params, "timeout_seconds");
-    // salix-connect's default (120 s) is over the device cap, so no value or a bad one means the cap.
+    // The desktop Connector's default (120 s) is over the device cap, so no value or a bad one means the cap.
     int timeout_s = timeout_max_s;
     if (cJSON_IsNumber(jt) && jt->valuedouble >= 1 && jt->valuedouble < timeout_max_s) {
         timeout_s = (int)jt->valuedouble;
@@ -800,7 +801,7 @@ char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *s
             snprintf(err, sizeof(err), "request to %s timed out after %d s", url.host, timeout_s);
         } else if (e == ECONNREFUSED || e == ECONNRESET) {
             // lwIP reports a refused connect (RST to the SYN) as ECONNRESET, "Connection reset by
-            // peer", which read like the T-Circle itself had reset (G2, port 8800).
+            // peer", which read like the T-Circle itself had reset.
             snprintf(err, sizeof(err), "connect to %s:%d refused: nothing is listening on that port", url.host,
                      url.port);
         } else if (url.https && e == 0) {

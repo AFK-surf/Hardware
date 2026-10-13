@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "firmware_config.h"
 #pragma once
 
@@ -7,7 +8,7 @@
 #include "cJSON.h"
 
 // The Connector's `http_request` (docs/connector-protocol.md §4), with the result shape of
-// salix-connect's methodHTTPRequest. Only LAN destinations: RFC 1918, link-local (169.254/16) and
+// the desktop Connector's http_request. Only LAN destinations: RFC 1918, link-local (169.254/16) and
 // the device's own subnet. Loopback, the device itself, multicast and public addresses are refused,
 // because the cloud already reaches the internet and this device exists for the LAN.
 //

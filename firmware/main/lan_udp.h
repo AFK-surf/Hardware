@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "firmware_config.h"
 #pragma once
 
 #include "cJSON.h"
 
-// The Connector's `udp_request` (contract in docs/prompts/C2-backend-lan-request-tool.md):
+// The Connector's `udp_request`:
 //   params {host, port, payload_b64, timeout_ms?, max_responses?}
 //   result {responses: [{from, payload_b64}], timed_out}
 // Sends one datagram from a fresh socket and collects answers until max_responses have arrived or

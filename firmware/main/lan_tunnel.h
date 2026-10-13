@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "firmware_config.h"
 #pragma once
 
@@ -6,11 +7,11 @@
 
 #include "cJSON.h"
 
-// The Connector's `lan_tcp_dial` (G3): one TCP connection from the T-Circle to a LAN host, relayed
-// over the Connector socket. Same protocol as salix-connect's lan_tunnel.go and station's
-// lan-tunnel.ts, so the backend needs no special case:
+// The Connector's `lan_tcp_dial`: one TCP connection from the T-Circle to a LAN host, relayed
+// over the Connector socket. Same protocol as the backend's other Connector clients, so the
+// backend needs no special case:
 //
-//   request  {"method":"lan_tcp_dial","params":{"host":"192.168.5.33","port":554,"timeout_seconds":15}}
+//   request  {"method":"lan_tcp_dial","params":{"host":"192.168.1.33","port":554,"timeout_seconds":15}}
 //   answer   {"type":"response","result":{"status":"connected","remote_address":"ip:port",
 //                                          "window":LAN_TUNNEL_WINDOW,"max_frame":LAN_TUNNEL_MAX_FRAME}}
 //            or an `error` frame (refused, timeout, not permitted, busy)
@@ -29,13 +30,13 @@
 // LAN_TUNNEL_SOCKET_WINDOW of Wi-Fi RX buffers.
 #define LAN_TUNNEL_MAX_OPEN CONFIG_COMMA_LAN_TUNNELS
 // Raw bytes per device→server data frame: ~11 KB of JSON, always under the 12 KB the Connector
-// socket's writable gate guarantees (G1), so a frame write never blocks holding the TX lock.
+// socket's writable gate guarantees, so a frame write never blocks holding the TX lock.
 #define LAN_TUNNEL_MAX_FRAME CONFIG_COMMA_LAN_TUNNEL_MAX_FRAME
 // The server ignores the device's max_frame and sends up to 32 KB per frame (DeviceRelay @max_frame).
 #define LAN_TUNNEL_SERVER_FRAME_MAX (32 * 1024)
 // Unacknowledged bytes per direction. Device→server it bounds data in flight (held by the server and
 // the network, not the device): 128 KB over the ~250 ms Cloudflare round trip allows ~500 KB/s, above
-// the ~245 KB/s the Connector socket managed in G1, so the window is never the bottleneck.
+// the ~245 KB/s the Connector socket managed in chunk-mode tests, so the window is never the bottleneck.
 // Server→device it bounds what can queue here (PSRAM, as it arrives).
 #define LAN_TUNNEL_WINDOW CONFIG_COMMA_LAN_TUNNEL_WINDOW
 #define LAN_TUNNEL_DIAL_TIMEOUT_MAX_S 15
@@ -43,7 +44,7 @@
 #define LAN_TUNNEL_IDLE_S 300
 #endif
 // lwIP receive window of each tunnel's LAN socket (the global one is 64 KB for the voice socket).
-// Received data that the device hasn't read holds Wi-Fi RX buffers (zero-copy RX, see G1), so this
+// Received data that the device hasn't read holds Wi-Fi RX buffers (zero-copy RX), so this
 // caps what a stalled tunnel pins at ~11 buffers. Still ~3 MB/s on the LAN.
 // 0 turns the cut off (dev builds: -DLAN_TUNNEL_SOCKET_WINDOW=0).
 #ifndef LAN_TUNNEL_SOCKET_WINDOW

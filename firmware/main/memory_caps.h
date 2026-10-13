@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "firmware_config.h"
 #include "esp_heap_caps.h"

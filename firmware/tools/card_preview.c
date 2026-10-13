@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Render the firmware's text cards on the host, for checking layout on the screen.
 //
 //   cc -std=c11 -O2 -DUI_CARD_SIZE=160 -Iui tools/card_preview.c ui/ui_card.c ui/160/ui_font.c -lm -o build/card_preview
@@ -13,11 +14,11 @@
 #include "ui_card.h"
 
 static const ui_card_t CARDS[] = {
-    {"Hello", "", "Open the Comma app to set up Comma-5D28"},
-    {"Pairing mode", "", "Open the Comma app to set up Comma-5D28"},
+    {"Hello", "", "Open the Comma app to set up Comma-1A2B"},
+    {"Pairing mode", "", "Open the Comma app to set up Comma-1A2B"},
     {"Pairing code", "482 019", "Enter it on your phone"},
     {"Paired", "", "Choose a Wi-Fi network in the app"},
-    {"Connecting to", "", "ToEverything-IOT"},
+    {"Connecting to", "", "Home-2.4G"},
     {"Connecting to", "", "A really long network name here"},
     {"Wi-Fi failed", "", "Wrong password. Try again."},
     {"Wi-Fi failed", "", "Network not found. Only 2.4 GHz works."},

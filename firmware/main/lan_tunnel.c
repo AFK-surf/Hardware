@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "heap_diag.h"
 #include "memory_caps.h"
-// lan_tcp_dial (G3): TCP tunnels from the T-Circle to LAN hosts, relayed over the Connector socket.
+// lan_tcp_dial: TCP tunnels from the T-Circle to LAN hosts, relayed over the Connector socket.
 // Protocol and limits in lan_tunnel.h.
 //
 // One task runs every tunnel: a select() loop over the LAN sockets, plus a queue of commands from the
@@ -627,7 +628,7 @@ static void run_cmd(cmd_t *c)
     tunnel_t *t = find(c->id, c->session);
     if (!t) {
         free_cmd(c);
-        return;  // unknown or already closed: like salix-connect, ignore
+        return;  // unknown or already closed: like the desktop Connector, ignore
     }
     if (c->kind == CMD_ACK) {
         if (c->seq > t->acked && c->seq <= t->sent) {

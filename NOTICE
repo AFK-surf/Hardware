@@ -1,0 +1,23 @@
+Comma Hardware
+Copyright 2026 The Comma Hardware Authors
+
+This product includes software developed by Meta Platforms, Inc. and affiliates
+(muse-gadget-sdk, Apache License 2.0):
+  firmware/main/lan_discover.c, firmware/main/lan_discover_core.c,
+  firmware/boards/m5stack_sticks3/board_audio.c, firmware/boards/m5stack_sticks3/panel.c,
+  firmware/boards/m5stack_sticks3/pmic.c
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+This product includes software developed by Espressif Systems (Shanghai) Co., Ltd.
+(esp_lcd_gc9d01, Apache License 2.0): firmware/components/esp_lcd_gc9d01/.
+
+This product includes the CO5300 panel initialisation table adapted from the Waveshare
+ESP32-S3-Touch-AMOLED-1.32 board support package (Apache License 2.0):
+  firmware/boards/waveshare_amoled_1_32/panel.c
+
+This product includes the Inter typeface, Copyright (c) 2016 The Inter Project Authors,
+licensed under the SIL Open Font License 1.1 (firmware/reference/fonts/OFL.txt).
+
+"Comma" and the Comma logo are trademarks and are not licensed under the Apache License.
+
+See THIRD_PARTY_NOTICES.md for all third-party components and their licenses.

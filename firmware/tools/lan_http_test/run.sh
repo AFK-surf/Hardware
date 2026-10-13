@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Host test for main/lan_http.c. Needs cc and python3; no ESP-IDF build, but reads cJSON and
 # http_parser sources from managed_components and $IDF_PATH (default: IDF 6.0.2 under ~/.espressif).
 set -e

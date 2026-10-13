@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "memory_caps.h"
 #include "cue_voice.h"
 
@@ -40,7 +41,7 @@
 // after session.started (it once sent only silence for minutes, 2026-10-06), stop ringing, play the
 // connected tone and open the mic, so the caller can speak first.
 #define GREETING_WAIT_US (8LL * 1000000)
-// No echo canceller (GPT-Live does none either): the mic sends silence while agent speech plays
+// No echo canceller (the server's voice model does none either): the mic sends silence while agent speech plays
 // and for this long after.
 #define ECHO_TAIL_US (300LL * 1000)
 // Wire format. pcm16_24k is the default. pcmu_8k (G.711 mu-law, 8 kB/s each way instead of 48)
@@ -59,7 +60,7 @@
 #define WIRE_DECIMATION (AUDIO_SAMPLE_RATE_HZ / WIRE_RATE_HZ)
 #define WIRE_FRAME_BYTES (AUDIO_FRAME_SAMPLES / WIRE_DECIMATION * WIRE_SAMPLE_BYTES)
 #define WIRE_BYTES_PER_MS (WIRE_RATE_HZ * WIRE_SAMPLE_BYTES / 1000)
-// V2 (voice_clean.h): the wire carries mic audio (denoised if nsnet2 is on) only while the VAD hears
+// voice_clean.h: the wire carries mic audio (denoised if nsnet2 is on) only while the VAD hears
 // speech, from PREROLL_MS before it fired (it needs 128 ms of speech to decide, and word starts are
 // quiet) until HANGOVER_MS after it stopped (soft word ends). Otherwise zeros, still paced by the mic clock, so the
 // server keeps its continuous real-time stream. The pre-roll goes out at once when speech starts, so
@@ -76,7 +77,7 @@
 // The server closes with 4400 when caller audio arrives faster than 1.25x real time over 5 s, i.e.
 // more than 1.25 s ahead. After a network stall, the audio stuck in the TCP send buffer arrives in
 // one burst, so the sender keeps at most this much backlog and drops the oldest audio beyond it.
-// With V2 a pre-roll lands in the queue all at once, so the cap leaves room for it on top; at most
+// With voice_clean a pre-roll lands in the queue all at once, so the cap leaves room for it on top; at most
 // ~1 s is then ahead after a stall, still inside the server's 1.25 s.
 #if COMMA_VOICE_CLEAN
 #define MIC_BACKLOG_MAX_BYTES (WIRE_BYTES_PER_MS * (300 + PREROLL_MS))
@@ -754,9 +755,9 @@ typedef struct {
     int open_samples;
     int64_t echo_sq;   // raw mic while muted for agent speech: the speaker's echo
     int echo_samples;
-    int vad_frames;    // V2: frames the VAD called speech
-    int sent_frames;   // V2: frames that carried audio, not zeros
-    int64_t ns_sq;     // V2: AFE output (denoised if nsnet2 is on), open frames
+    int vad_frames;    // frames the VAD called speech
+    int sent_frames;   // frames that carried audio, not zeros
+    int64_t ns_sq;     // AFE output (denoised if nsnet2 is on), open frames
     int ns_samples;
 } mic_stats_t;
 
@@ -775,7 +776,7 @@ static int64_t sum_squares(const int16_t *pcm, int samples)
 }
 
 #if COMMA_VOICE_CLEAN
-// What V2 has kept back: up to PREROLL_FRAMES denoised frames that went out as zeros, the frames of
+// What voice_clean has kept back: up to PREROLL_FRAMES denoised frames that went out as zeros, the frames of
 // hangover left, and how many frames the stream is ahead of real time after a pre-roll.
 static int16_t (*s_preroll)[AUDIO_FRAME_SAMPLES];
 static int s_preroll_head;

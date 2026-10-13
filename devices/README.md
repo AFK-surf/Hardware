@@ -1,5 +1,6 @@
 # Board configurations
 
+Each board is one ESP-IDF configuration overlay here, applied on top of `firmware/sdkconfig.defaults`.
 Run from the repository root after activating ESP-IDF 6.0.2:
 
 ```sh
@@ -7,66 +8,81 @@ tools/board.sh t-circle-s3 build
 tools/board.sh esp32-devkit build
 tools/board.sh waveshare-amoled-1-32 build
 tools/board.sh m5stack-sticks3 build
-tools/board.sh esp32-devkit flash-monitor /dev/cu.usbserial-0001
+tools/board.sh esp32-devkit flash-monitor PORT
 ```
 
-| Overlay | Target | Flash / PSRAM | Features | Status |
+| Overlay | Target | Flash / PSRAM | Features | Tested on hardware |
 | --- | --- | --- | --- | --- |
-| `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | Display, voice, passkey, HTTP/UDP/discovery, 2 tunnels | Supported; H1 smoke test on the board: boot, Connector online, voice call |
-| `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | Display + gateway, no voice (no speaker on board): AMOLED 466x466, passkey, tap or BOOT press wakes the screen, T-Circle limits, own partition table (no model partition) | Display, touch, passkey setup and BOOT press/hold board-tested on H3 B; this build not yet flashed ([H3](../docs/reports/H3-report.md)) |
-| `sdkconfig.m5stack-sticks3` | esp32s3 | 8 MB / 8 MB | Display, voice, passkey, T-Circle limits: ST7789 135x240, ES8311 on stereo I2S at 24 kHz (mic slot 0, resampled to 16 kHz), M5PM1 rails, KEY1 calls, KEY2 = BOOT holds; app 0x10000–0x700000, model 0x700000 | Board-tested: passkey setup, Connector, KEY1 calls (mic rate OK), screen sleep, KEY2 pairing hold, discovery and HTTP 3/3, heap diagnostics; KEY2 > 10 s factory reset not yet confirmed ([H4](../docs/reports/H4-report.md)) |
-| `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 LED, Just Works, HTTP/UDP, discovery with 12 KiB result cap; no TCP tunnels | Supported; local WSS: discovery, 8 KiB text and 1 MiB chunks passed 3/3; BOOT and replug checked |
+| `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | GC9D01 160 px round screen, CST816D touch, PDM mic, MAX98357A speaker; voice, passkey, HTTP/UDP/discovery, 2 tunnels | Setup, Connector, calls, discovery, HTTP text and chunks, tunnels |
+| `sdkconfig.m5stack-sticks3` | esp32s3 | 8 MB / 8 MB | ST7789 135x240 screen, ES8311 codec on stereo I2S at 24 kHz (mic resampled to 16 kHz), M5PM1 power chip, KEY1 calls, KEY2 = BOOT; T-Circle limits | Passkey setup, Connector, KEY1 calls, screen sleep, KEY2 pairing and factory reset, discovery and 1 MiB HTTP chunks |
+| `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | CO5300 466x466 AMOLED, CST820 touch; gateway without voice (the board has a mic but no speaker); own partition table without a model partition; T-Circle limits | Screen, touch, passkey setup, Connector, BOOT press and holds. Discovery and HTTP through this board not yet tested |
+| `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 status LED, Just Works pairing, HTTP/UDP, discovery with a 12 KiB result cap; no TCP tunnels | Setup, discovery, 8 KiB text and 1 MiB chunks three times each over local WSS; BOOT holds; replug |
 
-DevKit does not support `lan_tcp_dial`. The backend currently sends 32 KiB raw frames regardless of
-the device's `max_frame`; their base64/JSON buffers do not reliably fit the 36–49 KB largest blocks
-observed after TLS. The backend must honor `max_frame` before DevKit tunnel support can be retested
-and enabled. Disabled tunnels are omitted from Connector metadata.
+## ESP32 DevKit limits
 
-The measured DevKit profile uses static TLS buffers with renegotiation off, 16 KiB TCP receive/send
-buffers, an 8 KiB text cap, 4 KiB HTTP chunks and 16 KiB incoming JSON frames. Discovery keeps its
-16 KiB string arena but caps result JSON and buffer growth at 12 KiB (plus one NUL byte); excess
-hosts set `truncated=true`. Heap diagnostics are off; turn `CONFIG_COMMA_HEAP_DIAGNOSTICS` on in a
-test build when measuring a change. See [H1](../docs/reports/H1-report.md) for the hardware
-measurements and build/host validation. H2 adds up to four UDP discovery probes with 256-byte
-payloads, 1024-byte answers and a shared 4096-byte answer budget (T-Circle: 8 / 512 / 1024 / 16384).
-DevKit received an uncut 399-byte Gree reply. Discovery with BLE active ran out of memory at the
-old 16/16 service/SSDP caps; DevKit now caps each host at 6/6, saving 20 KiB in the host table.
-Both builds and host tests pass. BLE-up discovery (with and without probes), heap recovery and
-voice coexistence await the [H2 hardware retest](../docs/reports/H2-report.md).
+The DevKit has no PSRAM, so its overlay trades capacity for memory:
+
+- static TLS buffers with renegotiation off (dynamic buffer release raced the WebSocket writer),
+  16 KiB TCP receive/send windows, 16 KiB inbound JSON frames, a 2 KiB WebSocket buffer;
+- `http_request`: 8 KiB text (16 KiB failed in tests, 8 KiB passed), 4 KiB chunks, 4 MiB total;
+- `lan_discover`: a 16 KiB string arena, at most 6 services and 6 SSDP entries per host, a 12 KiB
+  result (excess hosts set `truncated: true`), and up to 4 UDP probes of 256 bytes with 1024-byte
+  answers and a 4 KiB answer budget;
+- setup Bluetooth ends 3 s after the Connector is up (`CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY`), and
+  discovery waits for it, because a discovery result does not fit while Bluetooth holds its memory;
+- **no `lan_tcp_dial`**: the backend sends 32 KiB raw tunnel frames regardless of the device's
+  `max_frame`, and their base64/JSON buffers do not fit the 36–49 KB largest free blocks left after
+  TLS. Tunnels can be reconsidered once the backend honors `max_frame`. Disabled methods are left
+  out of the Connector metadata.
+
+With Bluetooth off and the Connector on local WSS, the DevKit idled at about 130 KB free internal
+RAM (57 KB largest block) and stayed above that during three rounds of discovery, 8 KiB text and
+1 MiB chunk transfers. Discovery with the 6/6 caps while Bluetooth is still up has not been retested.
+Heap diagnostics are off; turn on `CONFIG_COMMA_HEAP_DIAGNOSTICS` in a test build to measure a change.
+
+## Build details
 
 The shared defaults load first, then the board overlay. Generated config and objects live in
 `firmware/build-<board>/`. ESP-IDF keeps existing config choices when defaults change: delete that
 board's generated `sdkconfig` before rebuilding to apply changed defaults, or use menuconfig on that
-build directory. Never edit or commit a source-root sdkconfig.
+build directory. Never edit or commit a source-root `sdkconfig`.
 
-`build`, `flash`, `monitor` and `flash-monitor` are the usual actions. `size`, `size-components` and
-`reconfigure` are also supported. Flash and monitor require an explicit port. Additional IDF options
-follow the port, or the action for non-port commands:
+Dependencies are locked per board: `firmware/dependencies.lock` (T-Circle),
+`dependencies.lock.esp32` (DevKit), `dependencies.lock.waveshare-amoled-1-32` (adds the CO5300
+driver) and `dependencies.lock.m5stack-sticks3` (adds esp_codec_dev). `tools/board.sh` tells CMake the
+board before Kconfig runs, which selects the lock file and components. Build boards one at a time:
+`firmware/managed_components/` is shared, and the component manager may remove and restore ESP-SR
+when you switch boards. The DevKit never downloads or links ESP-SR. Do not run
+`idf.py update-dependencies` as part of ordinary work.
+
+`build`, `flash`, `monitor` and `flash-monitor` are the usual actions; `size`, `size-components` and
+`reconfigure` also work. Flash and monitor need an explicit port. Additional IDF options follow the
+port, or the action for commands without a port.
+
+## Testing against a local Connector
+
+`firmware/tools/fake_connector.py` is a local stand-in for the backend. Point a build at it:
 
 ```sh
 tools/board.sh esp32-devkit build -DCOMMA_CONNECT_URL_OVERRIDE=ws://192.168.1.2:8765/v1/connect
 ```
 
-CMake caches development overrides. To return to the normal provisioned URL and built-in trust bundle:
+The board dials that URL with a dummy token; saved credentials are neither changed nor sent. CMake
+caches the override; to return to the provisioned URL and the built-in certificate bundle:
 
 ```sh
 tools/board.sh esp32-devkit build -DCOMMA_CONNECT_URL_OVERRIDE= -DCOMMA_CONNECT_TEST_CA=
 ```
 
-For local WSS measurements, `-DCOMMA_CONNECT_TEST_CA=/absolute/path/test-ca.pem` embeds a test CA only
-when the URL override is set; certificate verification stays enabled. Do not distribute test images.
-The fake Connector supports `--tls-cert`, `--tls-key`, `--text-limit`, `--discover`, `--tunnel`, and
-`--loop 3`. H2 adds `--discover-probes [JSON_FILE]` (Gree/miIO by default) and
-`--discover-timeout 5000`; probe limits come from metadata. Binary answers are saved as base64 JSON
-under `--out`, while logs show only ids, byte counts and cut flags. It skips methods the board does not advertise and keeps the server's 32 KiB tunnel frames.
+For local WSS, `-DCOMMA_CONNECT_TEST_CA=/absolute/path/test-ca.pem` embeds a test CA, only together
+with the URL override; certificate verification stays on. Do not distribute such images. The fake
+Connector supports `--tls-cert`, `--tls-key`, `--text-limit`, `--discover`, `--discover-probes
+[JSON_FILE]` (Gree and miIO hellos by default), `--discover-timeout`, `--tunnel` and `--loop 3`. It
+reads the board's limits from its metadata and skips methods the board does not advertise. Binary
+answers are saved as base64 JSON under `--out`; logs show only ids, byte counts and cut flags.
 
-Build targets sequentially: managed components are shared. The DevKit uses its own lockfile and the
-manifest's esp32s3 target rule excludes ESP-SR on esp32. T-Circle's package versions and hashes are
-unchanged; its manifest hash reflects the conditional declaration. The component manager may remove
-and restore ESP-SR when switching boards, but DevKit never downloads or links it.
+The HTTP, UDP and discovery host tests accept `--devkit` to use this overlay's limits. The tunnel
+test uses the two-tunnel profile; the DevKit advertises no tunnel method.
 
-For new hardware follow [AGENTS.md](AGENTS.md). Do not infer board capacity from a successful build.
-
-HTTP, UDP and discovery host test scripts also accept `--devkit` to exercise the numeric limits
-from this overlay, including the discovery JSON budget. Tunnel tests retain the default two-tunnel
-profile for T-Circle; DevKit advertises no tunnel method.
+To add a board, follow [AGENTS.md](AGENTS.md) and the checklist in the root README. Do not infer a
+board's capacity from a successful build.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "firmware_config.h"
 #if defined(ESP_PLATFORM) && CONFIG_COMMA_HEAP_DIAGNOSTICS

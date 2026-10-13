@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // Waveshare ESP32-S3-Touch-AMOLED-1.32 (ESP32-S3-PICO-1). Pins from the Waveshare BSP

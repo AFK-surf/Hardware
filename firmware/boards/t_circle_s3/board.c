@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // LilyGO T-Circle-S3: PDM mic and MAX98357A (board_audio.c), CST816D touch and BOOT
 // (board_touch.c), GC9D01 panel (panel.c). Calls, the screen and BOOT holds are shared
 // (voice/call.c, ui/display.c, main.c).

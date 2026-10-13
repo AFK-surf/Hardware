@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // LilyGO T-Circle-S3 V1.1. CST816D on I2C0, BOOT on GPIO0.
 // The screen is polled. FingerNum maps both press and release without an IRQ line. A tap shorter
 // than 280 ms becomes BOARD_INPUT_TAP when the finger lifts; a longer press is not a tap.

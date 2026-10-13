@@ -37,7 +37,7 @@ CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 # Agent audio stalls for 2-4 s on lossy Wi-Fi, which the server closes as 4410. SACK lets the
 # server resend just the lost segment instead of waiting out a retransmission timeout, and a
 # receive mailbox of 64 holds a full 64 KB window (32 x 1440 B is only 46 KB).
-# lan_discover (A5): a router answering SSDP ssdp:all sends a dozen or more datagrams at once, and
+# lan_discover: a router answering SSDP ssdp:all sends a dozen or more datagrams at once, and
 # mDNS answers arrive in bursts while the call tasks keep the discovery task waiting. The default
 # mailbox of 6 drops the rest.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
@@ -50,7 +50,7 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 # GATT writes are parsed on the host task (a 513-byte buffer plus cJSON).
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 
-# V2 (voice_clean.c): ESP-SR AFE with neural noise suppression and VAD, models in the "model" partition.
+# Mic cleanup (voice_clean.c): ESP-SR AFE with neural noise suppression and VAD, models in the "model" partition.
 # Lets voice_clean.lf put nsnet3's unused 19 KB .bss in PSRAM.
 # CPU load per core in the call stats (idle tasks' run time).
 CONFIG_MODEL_IN_FLASH=y

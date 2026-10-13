@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
 // LilyGO T-Circle-S3 V1.1. PDM mic on I2S0, MAX98357A on I2S1.
 // The speaker runs at 24 kHz for comma.voice.v1 pcm16_24k. The mic runs at MIC_SAMPLE_RATE_HZ:
-// 16 kHz with V2's noise suppressor (it upsamples to 24 kHz after), else 24 kHz.
+// 16 kHz with the voice_clean noise suppressor (it upsamples to 24 kHz after), else 24 kHz.
 // Filter corners match the 16 kHz T-Circle driver at either rate:
 // mic DC block 12.8 Hz, mic low-pass 4.83 kHz, speaker DC block 120 Hz.
 // The speaker fade-in stays 6 ms.

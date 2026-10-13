@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Replay captured answers through lan_discover_core.c and print the result JSON.
 // Files are named <mdns|ssdp|yl>_<n>_<source ip>.bin (one datagram each), as tools/capture.py writes.
 // Run: ./replay.sh <self ip> <netmask> <capture files...>

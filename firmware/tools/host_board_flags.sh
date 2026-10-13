@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Sourced after run.sh enters a LAN host-test directory. Numeric limits only;
 # host platform stubs stay unchanged. The overlay is the single source of values.
 COMMA_TEST_DEFINES=

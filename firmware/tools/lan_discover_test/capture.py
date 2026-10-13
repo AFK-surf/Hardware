@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Capture real discovery answers on this network for replay.sh.
 
 Sends the firmware's mDNS questions (main/lan_discover.c MDNS_TYPES, plus the DNS-SD meta query), its

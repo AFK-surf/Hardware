@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A minimal MCP server (streamable HTTP, plain JSON responses) to stand in for a LAN device.
 
 Register it as a device-placed remote MCP pointing at http://<this machine's LAN IP>:8765/mcp and
@@ -14,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TOOLS = [
     {
         "name": "lan_status",
-        "description": "Status of a test device on the office LAN: its local time and who asked.",
+        "description": "Status of a test device on the LAN: its local time and who asked.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {

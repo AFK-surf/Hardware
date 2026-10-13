@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // M5Stack StickS3 keys (board_input.h). No touch screen: KEY1, the big key on the front, is the
 // call key and reports BOARD_INPUT_TAP when a short press is released; KEY2, on the side, is the
 // board's BOOT for app_poll() (3-10 s pairing, > 10 s reset; a short press only wakes the screen).

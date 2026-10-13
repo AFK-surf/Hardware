@@ -1,5 +1,5 @@
 # ESP32-D0WD rev v1.0, 240 MHz, 4 MB flash, no PSRAM; CH340 USB UART.
-# Hardware identity measured with esptool flash-id (H1). BOOT is GPIO0.
+# Hardware identity measured with esptool flash-id. BOOT is GPIO0.
 CONFIG_IDF_TARGET="esp32"
 CONFIG_COMMA_BOARD_ESP32_DEVKIT=y
 CONFIG_COMMA_HAS_VOICE=n
@@ -23,7 +23,7 @@ CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
-# H1 hardware: with separate WebSocket RX/TX locks, dynamic RX buffer release
+# Measured on hardware: with separate WebSocket RX/TX locks, dynamic RX buffer release
 # clears in_ctr while the writer enters ssl_check_ctr_renegotiate (3 panics).
 # Keep TLS buffers allocated and disable renegotiation to avoid that race.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=n
@@ -47,7 +47,7 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32
-# H1: the inherited 64 KiB RX window left only ~44 KB internal RAM during
+# Measured: the inherited 64 KiB RX window left only ~44 KB internal RAM during
 # 1 MiB chunks; TLS send-buffer allocation failed. 16 KiB windows passed 3/3.
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
@@ -57,13 +57,13 @@ CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION=n
 CONFIG_ESP_WIFI_IRAM_OPT=n
 CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 
-# H1 WSS measurements: 16 KiB text failed 3/3; 8 KiB text passed 3/3.
+# WSS measurements: 16 KiB text failed 3/3; 8 KiB text passed 3/3.
 CONFIG_COMMA_LAN_HTTP_MAX_BYTES=8192
 CONFIG_COMMA_LAN_HTTP_CHUNK_BYTES=4096
 CONFIG_COMMA_LAN_HTTP_CHUNK_FRAME_BYTES=4096
 CONFIG_COMMA_CONNECTOR_RX_MAX=16384
 CONFIG_COMMA_LAN_DISCOVER_ARENA_BYTES=16384
-# H2 BLE-up discovery ran out of memory with the 34,048-byte host table.
+# BLE-up discovery ran out of memory with the 34,048-byte host table.
 # 6/6 saves 20 KiB (13,568-byte table); overflow still sets truncated=true.
 CONFIG_COMMA_LAN_DISCOVER_MAX_SERVICES=6
 CONFIG_COMMA_LAN_DISCOVER_MAX_SSDP=6
@@ -71,7 +71,7 @@ CONFIG_COMMA_LAN_DISCOVER_MAX_SSDP=6
 CONFIG_COMMA_LAN_DISCOVER_MAX_JSON=12288
 CONFIG_COMMA_LAN_UDP_MAX_ANSWER=2048
 CONFIG_COMMA_LAN_DISCOVER=y
-# H2b: with BLE up (phone still connected after setup), internal 8-bit RAM was too short for
+# With BLE up (phone still connected after setup), internal 8-bit RAM was too short for
 # the discovery result. End BLE 3 s after connector_up; lan_discover waits for BLE off.
 CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY=y
 # TLS leaves 36-49 KB largest blocks, insufficient for the server's 32 KiB
@@ -81,10 +81,10 @@ CONFIG_COMMA_LAN_TUNNELS=0
 CONFIG_COMMA_LAN_TUNNEL_WINDOW=32768
 CONFIG_COMMA_LAN_TUNNEL_MAX_FRAME=4096
 CONFIG_COMMA_CONNECTOR_WS_BUFFER_SIZE=2048
-# Hardware measurements are complete; see the e6ced9c retest in the H1 report.
+# Turn on in a test build to measure internal heap and stack watermarks.
 CONFIG_COMMA_HEAP_DIAGNOSTICS=n
 
-# H2: bound probe state/payloads on no-PSRAM hardware. 4 KiB of answers is ~5.5 KiB
+# Bound UDP discovery probe state/payloads on no-PSRAM hardware. 4 KiB of answers is ~5.5 KiB
 # of base64 within the unchanged 12 KiB result cap. Keep 1024-byte answers: a Gree
 # scan envelope can approach 512 bytes, and the backend discards cut answers.
 CONFIG_COMMA_LAN_DISCOVER_PROBES=4

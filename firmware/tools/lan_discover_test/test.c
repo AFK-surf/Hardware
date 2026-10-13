@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Host test for main/lan_discover_core.c: mDNS/SSDP parsing, the per-host merge, the caps, string
 // sanitising and the result JSON. Builds on the Mac against the stub ESP headers of lan_http_test.
 // Run: ./run.sh
@@ -48,7 +49,7 @@ static uint32_t ip(const char *s)
     return inet_addr(s);
 }
 
-#define SELF "192.168.5.17"
+#define SELF "192.168.1.17"
 #define MASK "255.255.255.0"
 
 // ---- DNS packet builder ------------------------------------------------------------------------
@@ -239,12 +240,12 @@ static void test_mdns_full_answer(void)
     rr_ptr(&p, "_wled|_tcp|local", "Desk Lamp v1.2|_wled|_tcp|local");
     rr_srv(&p, "Desk Lamp v1.2|_wled|_tcp|local", 80, "wled-desk|local");
     rr_txt(&p, "Desk Lamp v1.2|_wled|_tcp|local", "mac=aabbccddeeff|ver=0.14|flag|mac=dup");
-    rr_a(&p, "wled-desk|local", "192.168.5.40", 120);
+    rr_a(&p, "wled-desk|local", "192.168.1.40", 120);
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.40"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.40"), p.b, p.n);
 
     cJSON *r = result(ctx, NULL);
-    cJSON *h = host_in(r, "192.168.5.40");
+    cJSON *h = host_in(r, "192.168.1.40");
     CHECK(h != NULL, "host from mDNS");
     CHECK(h && strcmp(str(h, "hostname"), "wled-desk.local") == 0, "hostname from SRV target");
     cJSON *svcs = h ? cJSON_GetObjectItem(h, "services") : NULL;
@@ -279,7 +280,7 @@ static void test_mdns_split_and_compressed(void)
     put_ptr(&p, 12);  // -> "_hap._tcp.local"
     rr_end(&p, at);
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.50"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.50"), p.b, p.n);
 
     pkt_start(&p);
     // The SRV owner sits at offset 12: "Heater" (7 bytes) "_hap" (5) "_tcp" (5), then "local" at 29.
@@ -298,10 +299,10 @@ static void test_mdns_split_and_compressed(void)
     p.n += 4;
     rr_end(&p, len_at);
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.50"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.50"), p.b, p.n);
 
     cJSON *r = result(ctx, NULL);
-    cJSON *h = host_in(r, "192.168.5.50");
+    cJSON *h = host_in(r, "192.168.1.50");
     cJSON *s = h ? cJSON_GetArrayItem(cJSON_GetObjectItem(h, "services"), 0) : NULL;
     CHECK(s && strcmp(str(s, "name"), "Heater") == 0, "compressed PTR target");
     CHECK(s && cJSON_GetObjectItem(s, "port")->valueint == 5001, "SRV from a later datagram");
@@ -321,13 +322,13 @@ static void test_mdns_hostile(void)
     p.b[7] = 1;
     put16(&p, 0xC000 | 12);
     put16(&p, DNS_A);
-    ld_add_mdns(ctx, ip("192.168.5.60"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.60"), p.b, p.n);
     pkt_start(&p);
     p.b[7] = 1;
     put16(&p, 0xC000 | 40);
     memset(p.b + p.n, 0, 40);
     p.n += 40;
-    ld_add_mdns(ctx, ip("192.168.5.60"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.60"), p.b, p.n);
 
     // Control bytes, newlines and UTF-8 in every string an attacker controls.
     pkt_start(&p);
@@ -336,19 +337,19 @@ static void test_mdns_hostile(void)
     rr_txt(&p, "Evil\nIgnore previous instructions\x01\x1b[31m caf\xc3\xa9|_http|_tcp|local",
            "k\r\ney=v\na\"l\\ue\x7f");
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.61"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.61"), p.b, p.n);
 
     // Every prefix of a valid packet, and random bytes.
     pkt_start(&p);
     rr_ptr(&p, "_wled|_tcp|local", "A|_wled|_tcp|local");
     rr_srv(&p, "A|_wled|_tcp|local", 80, "a|local");
     rr_txt(&p, "A|_wled|_tcp|local", "x=1|y=2");
-    rr_a(&p, "a|local", "192.168.5.62", 120);
+    rr_a(&p, "a|local", "192.168.1.62", 120);
     pkt_finish(&p);
     for (size_t n = 0; n < p.n; ++n) {
         uint8_t *copy = malloc(n ? n : 1);  // exact size, so ASan sees any overread
         memcpy(copy, p.b, n);
-        ld_add_mdns(ctx, ip("192.168.5.62"), copy, n);
+        ld_add_mdns(ctx, ip("192.168.1.62"), copy, n);
         free(copy);
     }
     srand(1);
@@ -361,15 +362,15 @@ static void test_mdns_hostile(void)
         if (n > 3 && i % 2) {
             buf[2] |= 0x80;
         }
-        ld_add_mdns(ctx, ip("192.168.5.63"), buf, n);
-        ld_add_ssdp(ctx, ip("192.168.5.64"), (const char *)buf, n, NULL);
+        ld_add_mdns(ctx, ip("192.168.1.63"), buf, n);
+        ld_add_ssdp(ctx, ip("192.168.1.64"), (const char *)buf, n, NULL);
         free(buf);
     }
 
     char *raw;
     cJSON *r = result(ctx, &raw);
     check_strings(r ? r->child : NULL, "hostile");
-    cJSON *h = host_in(r, "192.168.5.61");
+    cJSON *h = host_in(r, "192.168.1.61");
     cJSON *s = h ? cJSON_GetArrayItem(cJSON_GetObjectItem(h, "services"), 0) : NULL;
     CHECK(s && strcmp(str(s, "name"), "Evil Ignore previous instructions[31m caf") == 0, "sanitised name: %s",
           s ? str(s, "name") : "-");
@@ -392,7 +393,7 @@ static void test_mdns_misc(void)
     rr_ptr(&p, "_services|_dns-sd|_udp|local", "_esphomelib|_tcp|local");
     rr_ptr(&p, "_services|_dns-sd|_udp|local", "_ssh|_tcp|local");
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.13"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.13"), p.b, p.n);
     char t[64];
     CHECK(ld_next_new_type(ctx, t, sizeof(t)) && strcmp(t, "_esphomelib._tcp.local") == 0, "meta type 1");
     CHECK(ld_next_new_type(ctx, t, sizeof(t)) && strcmp(t, "_ssh._tcp.local") == 0, "meta type 2");
@@ -400,10 +401,10 @@ static void test_mdns_misc(void)
 
     // A query (QR clear) is ignored; a goodbye (TTL 0) is ignored.
     pkt_start(&p);
-    rr_a(&p, "q|local", "192.168.5.70", 120);
+    rr_a(&p, "q|local", "192.168.1.70", 120);
     pkt_finish(&p);
     p.b[2] = 0;
-    ld_add_mdns(ctx, ip("192.168.5.70"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.70"), p.b, p.n);
     pkt_start(&p);
     {
         size_t at = rr_head(&p, "_hap|_tcp|local", DNS_PTR, 0);
@@ -411,41 +412,41 @@ static void test_mdns_misc(void)
         rr_end(&p, at);
     }
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.71"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.71"), p.b, p.n);
 
-    // Sleep proxy: 192.168.5.1 answers for a printer whose A record is 192.168.5.80.
+    // Sleep proxy: 192.168.1.1 answers for a printer whose A record is 192.168.1.80.
     pkt_start(&p);
     rr_ptr(&p, "_ipp|_tcp|local", "Printer|_ipp|_tcp|local");
     rr_srv(&p, "Printer|_ipp|_tcp|local", 631, "printer|local");
     rr_a(&p, "printer|local", "10.9.9.9", 120);  // another interface, not on our subnet
-    rr_a(&p, "printer|local", "192.168.5.80", 120);
+    rr_a(&p, "printer|local", "192.168.1.80", 120);
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.1"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.1"), p.b, p.n);
 
     // Reverse name for an ARP-only host; the device itself is ignored.
-    const uint8_t mac[6] = {0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03};
-    ld_add_arp(ctx, ip("192.168.5.13"), mac);
+    const uint8_t mac[6] = {0x02, 0x00, 0x00, 0x01, 0x02, 0x03};
+    ld_add_arp(ctx, ip("192.168.1.13"), mac);
     ld_add_arp(ctx, ip(SELF), mac);
     uint32_t ips[8];
     size_t n = ld_hosts_without_name(ctx, ips, 8);
-    CHECK(n == 1 && ips[0] == ip("192.168.5.13"), "one host without a name, got %zu", n);
+    CHECK(n == 1 && ips[0] == ip("192.168.1.13"), "one host without a name, got %zu", n);
     pkt_start(&p);
-    rr_ptr(&p, "13|5|168|192|in-addr|arpa", "Zhens-MacBook-Pro|local");
+    rr_ptr(&p, "13|1|168|192|in-addr|arpa", "Kitchen-Laptop|local");
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.13"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.13"), p.b, p.n);
     n = ld_hosts_without_name(ctx, ips, 8);
     CHECK(n == 0, "reverse name applied, %zu left", n);
 
     cJSON *r = result(ctx, NULL);
-    CHECK(host_in(r, "192.168.5.70") == NULL, "query ignored");
-    CHECK(host_in(r, "192.168.5.71") == NULL, "goodbye ignored");
+    CHECK(host_in(r, "192.168.1.70") == NULL, "query ignored");
+    CHECK(host_in(r, "192.168.1.71") == NULL, "goodbye ignored");
     CHECK(host_in(r, SELF) == NULL, "self ignored");
-    cJSON *pr = host_in(r, "192.168.5.80");
+    cJSON *pr = host_in(r, "192.168.1.80");
     CHECK(pr && count(cJSON_GetObjectItem(pr, "services")) == 1, "service on the A-record host");
-    CHECK(host_in(r, "192.168.5.1") == NULL, "nothing on the sleep proxy");
-    cJSON *mac_host = host_in(r, "192.168.5.13");
-    CHECK(mac_host && strcmp(str(mac_host, "hostname"), "Zhens-MacBook-Pro.local") == 0, "reverse hostname");
-    CHECK(mac_host && strcmp(str(mac_host, "mac"), "3c:22:fb:01:02:03") == 0, "mac");
+    CHECK(host_in(r, "192.168.1.1") == NULL, "nothing on the sleep proxy");
+    cJSON *mac_host = host_in(r, "192.168.1.13");
+    CHECK(mac_host && strcmp(str(mac_host, "hostname"), "Kitchen-Laptop.local") == 0, "reverse hostname");
+    CHECK(mac_host && strcmp(str(mac_host, "mac"), "02:00:00:01:02:03") == 0, "mac");
     cJSON_Delete(r);
     ld_free(ctx);
 }
@@ -459,19 +460,19 @@ static void test_ssdp(void)
     for (int round = 0; round < 2; ++round) {  // the second search's answers are duplicates
         for (int i = 0; i < 3; ++i) {
             int n = snprintf(pkt, sizeof(pkt),
-                             "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nlocation:   http://192.168.5.1:1900/igd.xml \r\n"
+                             "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nlocation:   http://192.168.1.1:1900/igd.xml \r\n"
                              "SERVER: Linux/4.4 UPnP/1.0 MiniUPnPd/2.1\r\nST: %s\r\nUSN: uuid:x::%s\r\n\r\n",
                              sts[i], sts[i]);
-            ld_add_ssdp(ctx, ip("192.168.5.1"), pkt, (size_t)n, NULL);
+            ld_add_ssdp(ctx, ip("192.168.1.1"), pkt, (size_t)n, NULL);
         }
     }
     // Yeelight: no ST header; the search's ST is reported.
-    const char yl[] = "HTTP/1.1 200 OK\r\nCache-Control: max-age=3600\r\nLocation: yeelight://192.168.5.90:55443\r\n"
+    const char yl[] = "HTTP/1.1 200 OK\r\nCache-Control: max-age=3600\r\nLocation: yeelight://192.168.1.90:55443\r\n"
                       "Server: POSIX UPnP/1.0 YGLC/1\r\nid: 0x000000000015243f\r\nmodel: color\r\n\r\n";
-    ld_add_ssdp(ctx, ip("192.168.5.90"), yl, sizeof(yl) - 1, "wifi_bulb");
+    ld_add_ssdp(ctx, ip("192.168.1.90"), yl, sizeof(yl) - 1, "wifi_bulb");
     // A NOTIFY, not an answer: ignored.
-    const char notify[] = "NOTIFY * HTTP/1.1\r\nLOCATION: http://192.168.5.91/\r\nNT: upnp:rootdevice\r\n\r\n";
-    ld_add_ssdp(ctx, ip("192.168.5.91"), notify, sizeof(notify) - 1, NULL);
+    const char notify[] = "NOTIFY * HTTP/1.1\r\nLOCATION: http://192.168.1.91/\r\nNT: upnp:rootdevice\r\n\r\n";
+    ld_add_ssdp(ctx, ip("192.168.1.91"), notify, sizeof(notify) - 1, NULL);
     // A 400-byte SERVER header, and a header with a bare CR inside.
     char big[1024];
     char longv[401];
@@ -479,24 +480,24 @@ static void test_ssdp(void)
     longv[400] = 0;
     int n = snprintf(big, sizeof(big), "HTTP/1.1 200 OK\r\nST: a\rinjected: 1\r\nSERVER: %s\r\nLOCATION: http://x/\r\n\r\n",
                      longv);
-    ld_add_ssdp(ctx, ip("192.168.5.92"), big, (size_t)n, NULL);
+    ld_add_ssdp(ctx, ip("192.168.1.92"), big, (size_t)n, NULL);
 
     cJSON *r = result(ctx, NULL);
     check_strings(r ? r->child : NULL, "ssdp");
-    cJSON *router = host_in(r, "192.168.5.1");
+    cJSON *router = host_in(r, "192.168.1.1");
     cJSON *arr = router ? cJSON_GetObjectItem(router, "ssdp") : NULL;
     CHECK(cJSON_IsArray(arr) && count(arr) == 3, "ssdp is an array of 3 STs, got %d", count(arr));
     cJSON *e = cJSON_GetArrayItem(arr, 0);
-    CHECK(e && strcmp(str(e, "location"), "http://192.168.5.1:1900/igd.xml") == 0, "location trimmed: [%s]",
+    CHECK(e && strcmp(str(e, "location"), "http://192.168.1.1:1900/igd.xml") == 0, "location trimmed: [%s]",
           e ? str(e, "location") : "-");
     CHECK(e && strcmp(str(e, "server"), "Linux/4.4 UPnP/1.0 MiniUPnPd/2.1") == 0, "server");
     CHECK(count(cJSON_GetObjectItem(router, "services")) == 0, "services always present");
-    cJSON *bulb = host_in(r, "192.168.5.90");
+    cJSON *bulb = host_in(r, "192.168.1.90");
     cJSON *be = bulb ? cJSON_GetArrayItem(cJSON_GetObjectItem(bulb, "ssdp"), 0) : NULL;
     CHECK(be && strcmp(str(be, "st"), "wifi_bulb") == 0, "yeelight st");
-    CHECK(be && strcmp(str(be, "location"), "yeelight://192.168.5.90:55443") == 0, "yeelight location");
-    CHECK(host_in(r, "192.168.5.91") == NULL, "NOTIFY ignored");
-    cJSON *bh = host_in(r, "192.168.5.92");
+    CHECK(be && strcmp(str(be, "location"), "yeelight://192.168.1.90:55443") == 0, "yeelight location");
+    CHECK(host_in(r, "192.168.1.91") == NULL, "NOTIFY ignored");
+    cJSON *bh = host_in(r, "192.168.1.92");
     cJSON *bhe = bh ? cJSON_GetArrayItem(cJSON_GetObjectItem(bh, "ssdp"), 0) : NULL;
     CHECK(bhe && strlen(str(bhe, "server")) == LD_STR_MAX, "server cut to 255");
     CHECK(bhe && strcmp(str(bhe, "st"), "a injected: 1") == 0, "bare CR -> space: [%s]", bhe ? str(bhe, "st") : "-");
@@ -515,7 +516,7 @@ static void test_per_host_caps(void)
         ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
         for (int host = 30; host <= 31; ++host) {
             char address[16];
-            snprintf(address, sizeof(address), "192.168.5.%d", host);
+            snprintf(address, sizeof(address), "192.168.1.%d", host);
             pkt_t p;
             pkt_start(&p);
             for (int entry = 0; entry < service_cap; ++entry) {
@@ -547,7 +548,7 @@ static void test_per_host_caps(void)
         ctx = ld_create(ip(SELF), ip(MASK));
         for (int h = 30; h <= 31; ++h) {
             char address[16];
-            snprintf(address, sizeof(address), "192.168.5.%d", h);
+            snprintf(address, sizeof(address), "192.168.1.%d", h);
             for (int entry = 0; entry < ssdp_cap + (h == 30 ? overflow : 0); ++entry) {
                 char pkt[200];
                 int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: urn:x:%d\r\nLOCATION: http://a/\r\n\r\n", entry);
@@ -597,9 +598,9 @@ static void test_caps(void)
     }
     rr_txt(&p, "S0|_http|_tcp|local", "a=1|b=1|c=1|d=1|e=1|f=1|g=1|h=1|i=1|j=1|k=1|l=1|m=1|n=1|o=1|p=1|q=1|r=1|s=1|t=1");
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.30"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.30"), p.b, p.n);
     r = result(ctx, NULL);
-    cJSON *h = host_in(r, "192.168.5.30");
+    cJSON *h = host_in(r, "192.168.1.30");
     cJSON *svcs = h ? cJSON_GetObjectItem(h, "services") : NULL;
     CHECK(count(svcs) == LD_MAX_SERVICES, "%d services, got %d", LD_MAX_SERVICES, count(svcs));
     cJSON *s0 = NULL, *s;
@@ -619,10 +620,10 @@ static void test_caps(void)
     for (int i = 0; i < 17; ++i) {
         char pkt[200];
         int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: urn:x:%d\r\nLOCATION: http://a/\r\n\r\n", i);
-        ld_add_ssdp(ctx, ip("192.168.5.1"), pkt, (size_t)n, NULL);
+        ld_add_ssdp(ctx, ip("192.168.1.1"), pkt, (size_t)n, NULL);
     }
     r = result(ctx, NULL);
-    CHECK(count(cJSON_GetObjectItem(host_in(r, "192.168.5.1"), "ssdp")) == LD_MAX_SSDP, "%d ssdp entries", LD_MAX_SSDP);
+    CHECK(count(cJSON_GetObjectItem(host_in(r, "192.168.1.1"), "ssdp")) == LD_MAX_SSDP, "%d ssdp entries", LD_MAX_SSDP);
     CHECK(truncated(r), "ssdp cap sets truncated");
     cJSON_Delete(r);
     ld_free(ctx);
@@ -701,7 +702,7 @@ static void test_json_budget(void)
         rr_ptr(&p, "_http|_tcp|local", instance);
         rr_txt(&p, instance, txt);
         pkt_finish(&p);
-        ld_add_mdns(ctx, ip("192.168.5.30"), p.b, p.n);
+        ld_add_mdns(ctx, ip("192.168.1.30"), p.b, p.n);
     }
     // The runner resolves services when requesting reverse names, before later
     // announcements can fill the arena. Preserve the large first host's TXT here.
@@ -712,7 +713,7 @@ static void test_json_budget(void)
     value[LD_STR_MAX] = 0;
     for (int host = 30; host < 36; ++host) {
         char address[16];
-        snprintf(address, sizeof(address), "192.168.5.%d", host);
+        snprintf(address, sizeof(address), "192.168.1.%d", host);
         for (int entry = 0; entry < LD_MAX_SSDP; ++entry) {
             char pkt[1024];
             int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %02d%s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n",
@@ -752,17 +753,17 @@ static void test_merge(void)
 {
     // ARP + mDNS + SSDP on one host -> one entry with all three sources, in a fixed order.
     ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
-    const char ans[] = "HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\nLOCATION: http://192.168.5.13:5000/\r\n\r\n";
-    ld_add_ssdp(ctx, ip("192.168.5.13"), ans, sizeof(ans) - 1, NULL);
+    const char ans[] = "HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\nLOCATION: http://192.168.1.13:5000/\r\n\r\n";
+    ld_add_ssdp(ctx, ip("192.168.1.13"), ans, sizeof(ans) - 1, NULL);
     pkt_t p;
     pkt_start(&p);
     rr_ptr(&p, "_smb|_tcp|local", "Mac|_smb|_tcp|local");
     rr_srv(&p, "Mac|_smb|_tcp|local", 445, "Mac|local");
     pkt_finish(&p);
-    ld_add_mdns(ctx, ip("192.168.5.13"), p.b, p.n);
+    ld_add_mdns(ctx, ip("192.168.1.13"), p.b, p.n);
     const uint8_t mac[6] = {1, 2, 3, 4, 5, 6};
-    ld_add_arp(ctx, ip("192.168.5.13"), mac);
-    ld_add_arp(ctx, ip("192.168.5.13"), mac);
+    ld_add_arp(ctx, ip("192.168.1.13"), mac);
+    ld_add_arp(ctx, ip("192.168.1.13"), mac);
     int hosts, a, m, s;
     bool t;
     ld_counts(ctx, &hosts, &a, &m, &s, &t);
@@ -774,7 +775,7 @@ static void test_merge(void)
     free(raw);
     cJSON_Delete(r);
     r = result(ctx, NULL);
-    CHECK(count(cJSON_GetObjectItem(host_in(r, "192.168.5.13"), "services")) == 1, "merge is idempotent");
+    CHECK(count(cJSON_GetObjectItem(host_in(r, "192.168.1.13"), "services")) == 1, "merge is idempotent");
     cJSON_Delete(r);
     ld_free(ctx);
 
@@ -913,7 +914,7 @@ static void test_probe_params(void)
         if (!bad) {
             ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
             CHECK(ld_probes_init(ctx, p), "payload allocation");
-            ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+            ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
             ld_probe_send_t send;
             CHECK(ld_probe_next(ctx, 0, &send) && send.len == (size_t)n && !memcmp(send.payload, bytes, n), "decoded payload bytes");
             ld_free(ctx);
@@ -930,12 +931,12 @@ static void test_no_probes(void)
         ld_ctx_t *ctx = ld_create(ip(SELF), ip(MASK));
         cJSON *p = cJSON_Parse(params[i]);
         CHECK(ld_probes_init(ctx, p) && !ld_has_probes(ctx), "no probe allocation for missing/null");
-        ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+        ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
         ld_mark_probes_truncated(ctx);
-        ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, (const uint8_t *)"noise", 5);
+        ld_add_probe_answer(ctx, ip("192.168.1.40"), 7000, (const uint8_t *)"noise", 5);
         ld_probes_finish(ctx);
         char *raw = ld_result_json(ctx);
-        CHECK(!strcmp(raw, "{\"hosts\":[{\"ip\":\"192.168.5.40\",\"mac\":\"01:02:03:04:05:06\",\"sources\":[\"arp\"],\"services\":[]}],\"truncated\":false}"), "legacy result bytes unchanged: %s", raw);
+        CHECK(!strcmp(raw, "{\"hosts\":[{\"ip\":\"192.168.1.40\",\"mac\":\"01:02:03:04:05:06\",\"sources\":[\"arp\"],\"services\":[]}],\"truncated\":false}"), "legacy result bytes unchanged: %s", raw);
         free(raw);
         ld_free(ctx);
         cJSON_Delete(p);
@@ -955,28 +956,28 @@ static void test_probe_matching(void)
     ld_ctx_t *ctx = probing(2);
     const uint8_t bytes[] = {0, 1, 254, 255};
     const char ssdp[] = "HTTP/1.1 200 OK\r\nST: x\r\nLOCATION: http://x/\r\n\r\n";
-    ld_add_ssdp(ctx, ip("192.168.5.40"), ssdp, sizeof(ssdp)-1, NULL);
+    ld_add_ssdp(ctx, ip("192.168.1.40"), ssdp, sizeof(ssdp)-1, NULL);
     ld_probe_send_t send;
     CHECK(!ld_probe_next(ctx, 0, &send), "mDNS/SSDP alone never authorizes probes");
-    const char *invalid[] = {SELF, "192.168.5.255", "255.255.255.255", "224.1.2.3", "192.168.5.0", "10.0.0.1", "127.0.0.1", "0.0.0.0"};
+    const char *invalid[] = {SELF, "192.168.1.255", "255.255.255.255", "224.1.2.3", "192.168.1.0", "10.0.0.1", "127.0.0.1", "0.0.0.0"};
     for (unsigned i=0; i < sizeof(invalid)/sizeof(invalid[0]); ++i) ld_add_arp(ctx, ip(invalid[i]), PROBE_MAC);
     CHECK(!ld_probe_next(ctx, 0, &send), "self, multicast, broadcast, network and other subnets excluded");
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
-    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, bytes, sizeof(bytes)); // before send
-    CHECK(ld_probe_next(ctx, 0, &send) && send.port == 7000 && send.ip == ip("192.168.5.40"), "first probe on ARP confirmation");
+    ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
+    ld_add_probe_answer(ctx, ip("192.168.1.40"), 7000, bytes, sizeof(bytes)); // before send
+    CHECK(ld_probe_next(ctx, 0, &send) && send.port == 7000 && send.ip == ip("192.168.1.40"), "first probe on ARP confirmation");
     CHECK(send.len == sizeof(bytes) && !memcmp(send.payload, bytes, sizeof(bytes)), "binary payload preserved");
     ld_probe_sent(ctx, &send, 0, true);
-    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7001, bytes, sizeof(bytes)); // this port not sent yet
-    ld_add_probe_answer(ctx, ip("192.168.5.41"), 7000, bytes, sizeof(bytes));
-    ld_add_probe_answer(ctx, ip("192.168.5.40"), 9000, bytes, sizeof(bytes));
+    ld_add_probe_answer(ctx, ip("192.168.1.40"), 7001, bytes, sizeof(bytes)); // this port not sent yet
+    ld_add_probe_answer(ctx, ip("192.168.1.41"), 7000, bytes, sizeof(bytes));
+    ld_add_probe_answer(ctx, ip("192.168.1.40"), 9000, bytes, sizeof(bytes));
     CHECK(ctx->probes->answered == 0, "only a sent host/port pair can answer");
     CHECK(send_ready(ctx, 0) == 1, "second probe sent once");
-    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7001, (const uint8_t *)"hi", 2);
-    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, bytes, sizeof(bytes));
-    ld_add_probe_answer(ctx, ip("192.168.5.40"), 7000, (const uint8_t *)"replace", 7);
+    ld_add_probe_answer(ctx, ip("192.168.1.40"), 7001, (const uint8_t *)"hi", 2);
+    ld_add_probe_answer(ctx, ip("192.168.1.40"), 7000, bytes, sizeof(bytes));
+    ld_add_probe_answer(ctx, ip("192.168.1.40"), 7000, (const uint8_t *)"replace", 7);
     CHECK(send_ready(ctx, 1000) == 0, "answered pairs never resent");
     ld_probes_finish(ctx);
-    cJSON *r = result(ctx, NULL), *h = host_in(r, "192.168.5.40");
+    cJSON *r = result(ctx, NULL), *h = host_in(r, "192.168.1.40");
     cJSON *arr = cJSON_GetObjectItem(h, "probes");
     CHECK(count(arr) == 2 && !strcmp(str(cJSON_GetArrayItem(arr, 0), "id"), "p0") &&
           !strcmp(str(cJSON_GetArrayItem(arr, 1), "id"), "p1"), "answers in request order");
@@ -1002,7 +1003,7 @@ static ld_probe_counts_t counts_of(ld_ctx_t *ctx)
 static void test_probe_retry_and_caps(void)
 {
     ld_ctx_t *ctx = probing(1);
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
     CHECK(send_ready(ctx, 20) == 1 && send_ready(ctx, 519) == 0 && send_ready(ctx, 520) == 1 &&
           send_ready(ctx, 5000) == 0, "one retry, no earlier than 500 ms");
     ld_probes_finish(ctx);
@@ -1011,19 +1012,19 @@ static void test_probe_retry_and_caps(void)
     CHECK(c.sent == 2 && c.resent == 1 && c.answered == 0 && c.send_failed == 0 && c.unsent == 0,
           "counts after two sends");
     CHECK(!truncated(r) && !probes_truncated(r), "unanswered after two sends isn't truncation");
-    CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.5.40"), "probes"), "unanswered host has no probes key");
+    CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.1.40"), "probes"), "unanswered host has no probes key");
     cJSON_Delete(r);
-    ld_add_arp(ctx, ip("192.168.5.41"), PROBE_MAC); // final harvest, no time to send
+    ld_add_arp(ctx, ip("192.168.1.41"), PROBE_MAC); // final harvest, no time to send
     ld_probes_finish(ctx);
     r = result(ctx, NULL);
     CHECK(!truncated(r) && probes_truncated(r) && counts_of(ctx).unsent == 1,
           "late host: unsent, probes_truncated only");
-    CHECK(host_in(r, "192.168.5.41") != NULL, "the unprobed host itself is kept");
+    CHECK(host_in(r, "192.168.1.41") != NULL, "the unprobed host itself is kept");
     cJSON_Delete(r);
     ld_free(ctx);
 
     ctx = probing(1);
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
     CHECK(send_ready(ctx, 0) == 1, "send before short tail");
     ld_probes_finish(ctx);
     r = result(ctx, NULL);
@@ -1034,7 +1035,7 @@ static void test_probe_retry_and_caps(void)
 
     ctx = probing(CONFIG_COMMA_LAN_DISCOVER_PROBES);
     for (int i = 30; i < 30 + LD_MAX_HOSTS + 1; ++i) {
-        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", i);
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", i);
         ld_add_arp(ctx, ip(addr), PROBE_MAC);
     }
     CHECK(send_ready(ctx, 0) == LD_MAX_HOSTS * CONFIG_COMMA_LAN_DISCOVER_PROBES, "all capped hosts get each probe once");
@@ -1051,7 +1052,7 @@ static void test_probe_retry_and_caps(void)
 static void test_probe_failed_sends(void)
 {
     ld_ctx_t *ctx = probing(1);
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
     ld_probe_send_t send;
     assert(ld_probe_next(ctx, 0, &send));
     ld_probe_sent(ctx, &send, 0, false);
@@ -1069,7 +1070,7 @@ static void test_probe_failed_sends(void)
     ld_probe_counts_t c = counts_of(ctx);
     CHECK(c.sent == 2 && c.resent == 1 && c.send_failed == 1 && c.unsent == 0 && c.answered == 1, "failed-then-sent counts");
     cJSON *r = result(ctx, NULL);
-    cJSON *a = cJSON_GetArrayItem(cJSON_GetObjectItem(host_in(r, "192.168.5.40"), "probes"), 0);
+    cJSON *a = cJSON_GetArrayItem(cJSON_GetObjectItem(host_in(r, "192.168.1.40"), "probes"), 0);
     CHECK(a && !strcmp(str(a, "payload_b64"), ""), "zero-byte answer is a valid datagram");
     CHECK(!truncated(r) && !probes_truncated(r), "a failed send that was retried in time flags nothing");
     cJSON_Delete(r);
@@ -1077,7 +1078,7 @@ static void test_probe_failed_sends(void)
 
     // A failed resend is retried as well.
     ctx = probing(1);
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
     send_ready(ctx, 0);
     assert(ld_probe_next(ctx, 500, &send));
     ld_probe_sent(ctx, &send, 500, false);
@@ -1091,7 +1092,7 @@ static void test_probe_failed_sends(void)
 
     // Still failing when the window ends: unsent, probes_truncated only.
     ctx = probing(1);
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
     int attempts = 0;
     for (uint32_t ms = 0; ms < 750; ms += 25) {
         while (ld_probe_next(ctx, ms, &send)) {
@@ -1104,7 +1105,7 @@ static void test_probe_failed_sends(void)
     CHECK(attempts == 15 && c.send_failed == 15 && c.sent == 0 && c.unsent == 1,
           "one attempt per failure delay, then unsent (%d attempts)", attempts);
     r = result(ctx, NULL);
-    CHECK(!truncated(r) && probes_truncated(r) && host_in(r, "192.168.5.40"), "unsent pair: host kept, probes_truncated only");
+    CHECK(!truncated(r) && probes_truncated(r) && host_in(r, "192.168.1.40"), "unsent pair: host kept, probes_truncated only");
     cJSON_Delete(r);
     ld_free(ctx);
 }
@@ -1113,30 +1114,30 @@ static void test_probe_failed_sends(void)
 static void test_probe_fairness(void)
 {
     ld_ctx_t *ctx = probing(1);
-    ld_add_arp(ctx, ip("192.168.5.40"), PROBE_MAC);
-    ld_add_arp(ctx, ip("192.168.5.41"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.1.40"), PROBE_MAC);
+    ld_add_arp(ctx, ip("192.168.1.41"), PROBE_MAC);
     ld_probe_send_t send;
-    assert(ld_probe_next(ctx, 0, &send) && send.ip == ip("192.168.5.40"));
+    assert(ld_probe_next(ctx, 0, &send) && send.ip == ip("192.168.1.40"));
     ld_probe_sent(ctx, &send, 0, false);
-    CHECK(ld_probe_next(ctx, 0, &send) && send.ip == ip("192.168.5.41"), "the next host is not held up by a failure");
+    CHECK(ld_probe_next(ctx, 0, &send) && send.ip == ip("192.168.1.41"), "the next host is not held up by a failure");
     ld_probe_sent(ctx, &send, 0, true);
-    ld_add_arp(ctx, ip("192.168.5.42"), PROBE_MAC);
-    CHECK(ld_probe_next(ctx, 60, &send) && send.ip == ip("192.168.5.42"), "untried first send before a failed one");
+    ld_add_arp(ctx, ip("192.168.1.42"), PROBE_MAC);
+    CHECK(ld_probe_next(ctx, 60, &send) && send.ip == ip("192.168.1.42"), "untried first send before a failed one");
     ld_probe_sent(ctx, &send, 60, true);
-    CHECK(ld_probe_next(ctx, 60, &send) && send.ip == ip("192.168.5.40"), "failed first send before any resend");
+    CHECK(ld_probe_next(ctx, 60, &send) && send.ip == ip("192.168.1.40"), "failed first send before any resend");
     ld_probe_sent(ctx, &send, 60, true);
     ld_free(ctx);
 
     // Pairs that always fail, ahead of every other host, still leave the others their sends.
     ctx = probing(1);
     for (int h = 30; h < 40; ++h) {
-        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", h);
         ld_add_arp(ctx, ip(addr), PROBE_MAC);
     }
     for (uint32_t ms = 0; ms < 750; ms += 25) {
         for (int i = 0; i < 4; ++i) { // the runner's per-tick batch
             if (!ld_probe_next(ctx, ms, &send)) break;
-            const bool bad = send.ip == ip("192.168.5.30") || send.ip == ip("192.168.5.31");
+            const bool bad = send.ip == ip("192.168.1.30") || send.ip == ip("192.168.1.31");
             ld_probe_sent(ctx, &send, ms, !bad);
         }
     }
@@ -1152,7 +1153,7 @@ static void test_result_frame(void)
     ld_ctx_t *ctx = CONFIG_COMMA_LAN_DISCOVER_PROBES > 0 ? probing(1) : ld_create(ip(SELF), ip(MASK));
     char value[LD_STR_MAX + 1]; memset(value, 'v', LD_STR_MAX); value[LD_STR_MAX] = 0;
     for (int h = 30; h < 40; ++h) {
-        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", h);
         ld_add_arp(ctx, ip(addr), PROBE_MAC);
         char pkt[1024];
         int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n", value, value, value);
@@ -1180,7 +1181,7 @@ static void test_result_frame(void)
     ctx = ld_create(ip(SELF), ip(MASK));
     char big[LD_STR_MAX + 1]; for (int i = 0; i < LD_STR_MAX; ++i) big[i] = i % 2 ? '\\' : '"'; big[LD_STR_MAX] = 0;
     for (int h = 30; h < 94; ++h) {
-        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", h);
         for (int e = 0; e < 2; ++e) {
             char pkt[1024];
             int n = snprintf(pkt, sizeof(pkt), "HTTP/1.1 200 OK\r\nST: %d%s\r\nLOCATION: %s\r\nSERVER: %s\r\n\r\n", e, big, big, big);
@@ -1224,14 +1225,14 @@ static void test_probe_answer_budget(void)
     uint8_t data[CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER + 1];
     memset(data, 0xFF, sizeof(data));
     for (int h = 30; h < 40; ++h) {
-        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", h);
         ld_add_arp(ctx, ip(addr), PROBE_MAC);
     }
     send_ready(ctx, 0);
     size_t expected = 0;
     int retained = 0;
     for (int h = 30; h < 40; ++h) {
-        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", h);
         for (int p = 0; p < CONFIG_COMMA_LAN_DISCOVER_PROBES; ++p) {
             // The first answer is oversized, the second exact-cap, the rest fill the shared budget.
             ld_add_probe_answer(ctx, ip(addr), 7000 + p, data,
@@ -1243,10 +1244,10 @@ static void test_probe_answer_budget(void)
         }
     }
     // A dropped answer must not be replaced with a later smaller one that would fit.
-    ld_add_probe_answer(ctx, ip("192.168.5.39"), 7000, NULL, 0);
+    ld_add_probe_answer(ctx, ip("192.168.1.39"), 7000, NULL, 0);
     ld_probes_finish(ctx);
     cJSON *r = result(ctx, NULL);
-    cJSON *first = cJSON_GetObjectItem(host_in(r, "192.168.5.30"), "probes");
+    cJSON *first = cJSON_GetObjectItem(host_in(r, "192.168.1.30"), "probes");
     cJSON *a = cJSON_GetArrayItem(first, 0), *b = cJSON_GetArrayItem(first, 1);
     CHECK(a && cJSON_IsTrue(cJSON_GetObjectItem(a, "cut")), "oversized answer cut");
     CHECK(b && !cJSON_GetObjectItem(b, "cut"), "exact-cap answer not cut");
@@ -1255,7 +1256,7 @@ static void test_probe_answer_budget(void)
     cJSON *host;
     cJSON_ArrayForEach(host, cJSON_GetObjectItem(r, "hosts")) count_answers += count(cJSON_GetObjectItem(host, "probes"));
     CHECK(count_answers == retained && ctx->probes->used == expected, "decoded run budget: %d answers, %zu bytes", count_answers, ctx->probes->used);
-    CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.5.39"), "probes"), "budget drops the whole first answer");
+    CHECK(!cJSON_GetObjectItem(host_in(r, "192.168.1.39"), "probes"), "budget drops the whole first answer");
     CHECK(!truncated(r) && probes_truncated(r), "answer loss and cut answers set probes_truncated only");
     cJSON_Delete(r);
     ld_free(ctx);
@@ -1267,7 +1268,7 @@ static void test_probe_json_budget(void)
     uint8_t data[CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER]; memset(data, 0, sizeof(data));
     char value[LD_STR_MAX + 1]; memset(value, '"', LD_STR_MAX); value[LD_STR_MAX] = 0;
     for (int h = 30; h < 35; ++h) {
-        char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+        char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", h);
         ld_add_arp(ctx, ip(addr), PROBE_MAC);
         send_ready(ctx, 0);
         ld_add_probe_answer(ctx, ip(addr), 7000, data, sizeof(data));
@@ -1298,7 +1299,7 @@ static void test_probe_fuzz(void)
     for (int run = 0; run < 500; ++run) {
         ld_ctx_t *ctx = probing(CONFIG_COMMA_LAN_DISCOVER_PROBES);
         for (int h = 30; h < 34; ++h) {
-            char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", h);
+            char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", h);
             ld_add_arp(ctx, ip(addr), PROBE_MAC);
         }
         send_ready(ctx, 0);
@@ -1306,7 +1307,7 @@ static void test_probe_fuzz(void)
             size_t n = (size_t)(rand() % 2200);
             uint8_t *bytes = malloc(n ? n : 1); // exact allocation makes overreads visible to ASan
             for (size_t j = 0; j < n; ++j) bytes[j] = (uint8_t)rand();
-            char addr[16]; snprintf(addr, sizeof(addr), "192.168.5.%d", 30 + rand() % 6);
+            char addr[16]; snprintf(addr, sizeof(addr), "192.168.1.%d", 30 + rand() % 6);
             ld_add_probe_answer(ctx, ip(addr), 7000 + rand() % (CONFIG_COMMA_LAN_DISCOVER_PROBES + 2), bytes, n);
             free(bytes);
         }

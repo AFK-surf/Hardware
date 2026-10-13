@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "wifi.h"
 
 #include <stdatomic.h>
@@ -105,7 +106,7 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
             on_trial_disconnect(reason);
         }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
-        // Logged for every join: ToEverything-IOT has more than one BSSID, and a stuck link may follow
+        // Logged for every join: a network can have more than one BSSID, and a stuck link may follow
         // a move between them.
         const wifi_event_sta_connected_t *event = data;
         if (event) {

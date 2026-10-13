@@ -18,7 +18,7 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # Agent audio stalls for 2-4 s on lossy Wi-Fi, which the server closes as 4410. SACK lets the
 # server resend just the lost segment instead of waiting out a retransmission timeout, and a
 # receive mailbox of 64 holds a full 64 KB window (32 x 1440 B is only 46 KB).
-# lan_discover (A5): a router answering SSDP ssdp:all sends a dozen or more datagrams at once, and
+# lan_discover: a router answering SSDP ssdp:all sends a dozen or more datagrams at once, and
 # mDNS answers arrive in bursts while the call tasks keep the discovery task waiting. The default
 # mailbox of 6 drops the rest.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y

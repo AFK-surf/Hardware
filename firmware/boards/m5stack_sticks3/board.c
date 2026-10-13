@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // M5Stack StickS3: M5PM1 power chip (pmic.c), ES8311 audio (board_audio.c), KEY1/KEY2
 // (board_input.c), ST7789 135x240 LCD (panel.c). Calls, the screen and KEY2 holds are shared
 // (voice/call.c, ui/display.c, main.c): KEY1 is the call key, KEY2 the board's BOOT.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Host test for main/lan_udp.c: builds it on the Mac with BSD sockets. Every datagram the firmware
 // sends goes to a local peer socket instead (stubs/lwip/sockets.h); the peer's answers are rewritten
 // to look like they came from the LAN addresses the test chose.
@@ -26,7 +27,7 @@ static int g_checks, g_failed;
 
 // ---- Network stand-in --------------------------------------------------------------------------
 
-#define SELF "192.168.5.17"
+#define SELF "192.168.1.17"
 
 bool wifi_ip_info(uint32_t *ip, uint32_t *netmask)
 {
@@ -107,8 +108,8 @@ static void setup(void)
         getsockname(g_peer[k], (struct sockaddr *)&a, &l);
         g_peer_port[k] = a.sin_port;
     }
-    g_fake[0] = (struct sockaddr_in){.sin_family = AF_INET, .sin_port = htons(54321), .sin_addr.s_addr = inet_addr("192.168.5.19")};
-    g_fake[1] = (struct sockaddr_in){.sin_family = AF_INET, .sin_port = htons(54321), .sin_addr.s_addr = inet_addr("192.168.5.99")};
+    g_fake[0] = (struct sockaddr_in){.sin_family = AF_INET, .sin_port = htons(54321), .sin_addr.s_addr = inet_addr("192.168.1.19")};
+    g_fake[1] = (struct sockaddr_in){.sin_family = AF_INET, .sin_port = htons(54321), .sin_addr.s_addr = inet_addr("192.168.1.99")};
 }
 
 // ---- Helpers -----------------------------------------------------------------------------------
@@ -203,15 +204,15 @@ static void test_exchange(void)
     char b64[64], params[256];
     b64_encode(hello, sizeof(hello), b64);
     answer(0, reply, sizeof(reply));
-    snprintf(params, sizeof(params), "{\"host\":\"192.168.5.19\",\"port\":54321,\"payload_b64\":\"%s\",\"timeout_ms\":2000}", b64);
+    snprintf(params, sizeof(params), "{\"host\":\"192.168.1.19\",\"port\":54321,\"payload_b64\":\"%s\",\"timeout_ms\":2000}", b64);
     run(params);
     CHECK(!error_text(), "no error: %s", error_text());
     CHECK(g_sent_len == 32 && memcmp(g_sent, hello, 32) == 0, "payload sent as decoded bytes");
-    CHECK(g_sent_to.sin_addr.s_addr == inet_addr("192.168.5.19") && ntohs(g_sent_to.sin_port) == 54321, "destination");
+    CHECK(g_sent_to.sin_addr.s_addr == inet_addr("192.168.1.19") && ntohs(g_sent_to.sin_port) == 54321, "destination");
     cJSON *rs = responses();
     CHECK(cJSON_GetArraySize(rs) == 1, "one answer");
     cJSON *r0 = cJSON_GetArrayItem(rs, 0);
-    CHECK(r0 && strcmp(cJSON_GetObjectItem(r0, "from")->valuestring, "192.168.5.19:54321") == 0, "from ip:port");
+    CHECK(r0 && strcmp(cJSON_GetObjectItem(r0, "from")->valuestring, "192.168.1.19:54321") == 0, "from ip:port");
     char want[64];
     b64_encode(reply, sizeof(reply), want);
     CHECK(r0 && strcmp(cJSON_GetObjectItem(r0, "payload_b64")->valuestring, want) == 0, "answer bytes");
@@ -222,7 +223,7 @@ static void test_exchange(void)
     answer(0, "a", 1);
     answer(1, "spoof", 5);
     answer(0, "b", 1);
-    run("{\"host\":\"192.168.5.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"timeout_ms\":300,\"max_responses\":3}");
+    run("{\"host\":\"192.168.1.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"timeout_ms\":300,\"max_responses\":3}");
     rs = responses();
     CHECK(cJSON_GetArraySize(rs) == 2, "two answers from the destination, got %d", cJSON_GetArraySize(rs));
     CHECK(rs && strcmp(cJSON_GetObjectItem(cJSON_GetArrayItem(rs, 1), "payload_b64")->valuestring, "Yg==") == 0,
@@ -231,34 +232,34 @@ static void test_exchange(void)
     CHECK(g_ms >= 290 && g_ms < 800, "waited ~300 ms (%d)", g_ms);
 
     // No answer.
-    run("{\"host\":\"192.168.5.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"timeout_ms\":5}");
+    run("{\"host\":\"192.168.1.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"timeout_ms\":5}");
     CHECK(cJSON_GetArraySize(responses()) == 0 && timed_out(), "no answer: empty and timed out");
     CHECK(g_ms >= 95 && g_ms < 500, "timeout_ms 5 raised to 100 (%d ms)", g_ms);
 
     // max_responses 0: fire and forget.
-    run("{\"host\":\"192.168.5.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"max_responses\":0}");
+    run("{\"host\":\"192.168.1.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"max_responses\":0}");
     CHECK(cJSON_GetArraySize(responses()) == 0 && !timed_out() && g_ms < 100, "max_responses 0 returns at once");
     CHECK(g_sent_len == 1, "but still sends");
 
     // Empty payload, a hostname, the largest payload.
-    run("{\"host\":\"192.168.5.19\",\"port\":9,\"payload_b64\":\"\",\"max_responses\":0}");
+    run("{\"host\":\"192.168.1.19\",\"port\":9,\"payload_b64\":\"\",\"max_responses\":0}");
     CHECK(!error_text() && g_sent_len == 0, "empty datagram");
     static uint8_t big[LAN_UDP_MAX_PAYLOAD + 1];
     memset(big, 0xA5, sizeof(big));
     static char bigb64[(sizeof(big) + 2) / 3 * 4 + 16];
     static char bigparams[sizeof(bigb64) + 128];
     b64_encode(big, LAN_UDP_MAX_PAYLOAD, bigb64);
-    snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.5.19\",\"port\":9,\"payload_b64\":\"%s\",\"max_responses\":0}",
+    snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.1.19\",\"port\":9,\"payload_b64\":\"%s\",\"max_responses\":0}",
              bigb64);
     run(bigparams);
     CHECK(!error_text() && g_sent_len == LAN_UDP_MAX_PAYLOAD, "1472 bytes sent: %s", error_text());
     b64_encode(big, LAN_UDP_MAX_PAYLOAD + 1, bigb64);
-    snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.5.19\",\"port\":9,\"payload_b64\":\"%s\"}", bigb64);
+    snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.1.19\",\"port\":9,\"payload_b64\":\"%s\"}", bigb64);
     run(bigparams);
     CHECK(is_error("longer than 1472 bytes") && g_sent_len < 0, "1473 bytes refused: %s", error_text());
     b64_encode(big, LAN_UDP_MAX_PAYLOAD - 2, bigb64);  // 1470 bytes, no padding
     strcat(bigb64, "QUJDREVG");                      // + 6 = 1476 bytes
-    snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.5.19\",\"port\":9,\"payload_b64\":\"%s\"}", bigb64);
+    snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.1.19\",\"port\":9,\"payload_b64\":\"%s\"}", bigb64);
     run(bigparams);
     CHECK(is_error("longer than 1472 bytes"), "1476 bytes refused: %s", error_text());
 
@@ -269,7 +270,7 @@ static void test_exchange(void)
     }
     answer(0, ans, LAN_UDP_MAX_ANSWER);
     answer(0, ans, sizeof(ans));
-    run("{\"host\":\"192.168.5.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"max_responses\":2,\"timeout_ms\":1000}");
+    run("{\"host\":\"192.168.1.19\",\"port\":54321,\"payload_b64\":\"eA==\",\"max_responses\":2,\"timeout_ms\":1000}");
     rs = responses();
     CHECK(cJSON_GetArraySize(rs) == 2, "two big answers");
     for (int i = 0; i < 2 && rs; ++i) {
@@ -289,20 +290,20 @@ static void test_params(void)
         {"{\"port\":1,\"payload_b64\":\"\"}", "'host' is required"},
         {"{\"host\":\"\",\"port\":1,\"payload_b64\":\"\"}", "'host' is required"},
         {"{\"host\":5,\"port\":1,\"payload_b64\":\"\"}", "'host' is required"},
-        {"{\"host\":\"192.168.5.19\",\"payload_b64\":\"\"}", "'port' must be"},
-        {"{\"host\":\"192.168.5.19\",\"port\":0,\"payload_b64\":\"\"}", "'port' must be"},
-        {"{\"host\":\"192.168.5.19\",\"port\":65536,\"payload_b64\":\"\"}", "'port' must be"},
-        {"{\"host\":\"192.168.5.19\",\"port\":80.5,\"payload_b64\":\"\"}", "'port' must be"},
-        {"{\"host\":\"192.168.5.19\",\"port\":\"80\",\"payload_b64\":\"\"}", "'port' must be"},
-        {"{\"host\":\"192.168.5.19\",\"port\":80}", "'payload_b64' is required"},
-        {"{\"host\":\"192.168.5.19\",\"port\":80,\"payload_b64\":\"abc\"}", "not valid standard base64"},
-        {"{\"host\":\"192.168.5.19\",\"port\":80,\"payload_b64\":\"ab c\"}", "not valid standard base64"},
-        {"{\"host\":\"192.168.5.19\",\"port\":80,\"payload_b64\":\"\",\"timeout_ms\":\"1000\"}", "'timeout_ms' must be"},
-        {"{\"host\":\"192.168.5.19\",\"port\":80,\"payload_b64\":\"\",\"timeout_ms\":1.5}", "'timeout_ms' must be"},
-        {"{\"host\":\"192.168.5.19\",\"port\":80,\"payload_b64\":\"\",\"max_responses\":true}", "'max_responses' must be"},
+        {"{\"host\":\"192.168.1.19\",\"payload_b64\":\"\"}", "'port' must be"},
+        {"{\"host\":\"192.168.1.19\",\"port\":0,\"payload_b64\":\"\"}", "'port' must be"},
+        {"{\"host\":\"192.168.1.19\",\"port\":65536,\"payload_b64\":\"\"}", "'port' must be"},
+        {"{\"host\":\"192.168.1.19\",\"port\":80.5,\"payload_b64\":\"\"}", "'port' must be"},
+        {"{\"host\":\"192.168.1.19\",\"port\":\"80\",\"payload_b64\":\"\"}", "'port' must be"},
+        {"{\"host\":\"192.168.1.19\",\"port\":80}", "'payload_b64' is required"},
+        {"{\"host\":\"192.168.1.19\",\"port\":80,\"payload_b64\":\"abc\"}", "not valid standard base64"},
+        {"{\"host\":\"192.168.1.19\",\"port\":80,\"payload_b64\":\"ab c\"}", "not valid standard base64"},
+        {"{\"host\":\"192.168.1.19\",\"port\":80,\"payload_b64\":\"\",\"timeout_ms\":\"1000\"}", "'timeout_ms' must be"},
+        {"{\"host\":\"192.168.1.19\",\"port\":80,\"payload_b64\":\"\",\"timeout_ms\":1.5}", "'timeout_ms' must be"},
+        {"{\"host\":\"192.168.1.19\",\"port\":80,\"payload_b64\":\"\",\"max_responses\":true}", "'max_responses' must be"},
         // Destinations: the same rule as http_request.
         {"{\"host\":\"8.8.8.8\",\"port\":53,\"payload_b64\":\"\"}", "public address"},
-        {"{\"host\":\"192.168.5.255\",\"port\":54321,\"payload_b64\":\"\"}", "broadcast address of the local subnet"},
+        {"{\"host\":\"192.168.1.255\",\"port\":54321,\"payload_b64\":\"\"}", "broadcast address of the local subnet"},
         {"{\"host\":\"255.255.255.255\",\"port\":54321,\"payload_b64\":\"\"}", "multicast, broadcast or reserved"},
         {"{\"host\":\"239.255.255.250\",\"port\":1982,\"payload_b64\":\"\"}", "multicast, broadcast or reserved"},
         {"{\"host\":\"" SELF "\",\"port\":54321,\"payload_b64\":\"\"}", "the T-Circle itself"},

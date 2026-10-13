@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Real cJSON parser with deterministic allocation failures and the IDF failure-hook stand-in.
 set -e
 cd "$(dirname "$0")"

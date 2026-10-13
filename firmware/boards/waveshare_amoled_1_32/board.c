@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Waveshare ESP32-S3-Touch-AMOLED-1.32: display and Connector gateway, no voice. The board has a mic
 // (ES8311) but no speaker, only a speaker header, so the codec is never set up and the speaker PA
 // (GPIO46) is held low. CST820 touch and BOOT (board_touch.c), CO5300 AMOLED (panel.c); the screen

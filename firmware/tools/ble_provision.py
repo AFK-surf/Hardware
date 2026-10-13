@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Provision a Comma board over BLE, the way the Comma app does. Contract: docs/ble-provisioning.md.
 
     pip install bleak
     tools/ble_provision.py scan
     tools/ble_provision.py info
     tools/ble_provision.py wifi-scan
-    tools/ble_provision.py provision --ssid ToEverything-IOT --password ... \
-        --server https://salix-staging.cue.surf --workspace ws_... --group grp1_... --name "Kitchen"
+    tools/ble_provision.py provision --ssid Home-2.4G --workspace ws_... --group grp1_... \
+        --device-name Kitchen
+    (--server and --connect-url default to production; pass both to use another backend)
     tools/ble_provision.py bad-writes      # malformed writes must fail with the documented errors
 
 Secrets come from the environment so they stay out of shell history:
@@ -272,7 +274,7 @@ async def cmd_bad_writes(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--name", help="advertised name, e.g. Comma-5D28 (default: first found)")
+    p.add_argument("--name", help="advertised name, e.g. Comma-1A2B (default: first found)")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("scan")
     s.add_argument("--timeout", type=float, default=8)
@@ -284,8 +286,9 @@ def main():
     pr = sub.add_parser("provision")
     pr.add_argument("--ssid", required=True)
     pr.add_argument("--password")
-    pr.add_argument("--server", default="https://salix-staging.cue.surf")
-    pr.add_argument("--connect-url", default="wss://salix-staging.comma.surf/v1/connect")
+    pr.add_argument("--server", default="https://salix.comma.surf", help="voice server (default: production)")
+    pr.add_argument("--connect-url", default="wss://salix.comma.surf/v1/connect",
+                    help="Connector URL, the connect_url minted with the token (default: production)")
     pr.add_argument("--workspace", required=True)
     pr.add_argument("--group", required=True)
     pr.add_argument("--device-name", dest="name_to_set", default="T-Circle")

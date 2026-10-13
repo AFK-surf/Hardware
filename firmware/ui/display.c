@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "memory_caps.h"
-// Screen shared by the display boards. Idle screen is the Cue logo, still; calls and setup
+// Screen shared by the display boards. Idle screen is the Comma logo, still; calls and setup
 // show text cards. The screen redraws only when what it shows changes, and sleeps (light off, panel
 // in SLPIN) after DISPLAY_SLEEP_US without activity. The panel itself is the board's
 // (board_display.h).

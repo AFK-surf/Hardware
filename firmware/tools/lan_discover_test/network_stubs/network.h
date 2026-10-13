@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 // Deterministic stand-ins for the discovery runner's clock, ARP table and socket system calls.
 #include <arpa/inet.h>

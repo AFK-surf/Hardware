@@ -18,7 +18,7 @@
  * ST7789 1.14" 135x240 LCD, portrait (board_display.h), M5Stack StickS3. The panel setup (SPI3 at
  * 40 MHz, mode 0, inverted colours, the 135x240 window at x 52, y 40 of the controller's 240x320,
  * a 20 kHz LEDC backlight) is from muse-gadget-sdk's board_m5stack_sticks3.c. The transfer is
- * H3's Waveshare scheme (ours).
+ * the Waveshare AMOLED's scheme (ours).
  *
  * The 64.8 KB framebuffer is in PSRAM. The SPI DMA never reads PSRAM: each frame goes out in
  * 16-row stripes copied into one 4.3 KB internal DMA buffer, so the SPI driver never has to find a

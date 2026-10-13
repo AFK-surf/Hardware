@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Host test for main/lan_http.c: builds it on the Mac against stub ESP headers (stubs/), with
 // POSIX sockets standing in for esp_transport. Every connection goes to the local server.py,
 // whatever IP the firmware picked; the IP it asked for is recorded and checked. Chunk mode
@@ -23,7 +24,7 @@ static char g_connect_host[64];
 static bool g_wifi_up = true;
 static uint32_t g_self;
 static uint32_t g_mask;
-// Non-zero: connect fails with this errno, as lwIP fails a refused connect with ECONNRESET (G3).
+// Non-zero: connect fails with this errno, as lwIP fails a refused connect with ECONNRESET.
 static int g_connect_errno;
 // Non-zero: connect goes to this port instead of the server's (a closed one, for a real refusal).
 static int g_connect_port;
@@ -385,21 +386,21 @@ static cJSON *echo_of(const cJSON *frame)
 static void test_destinations(void)
 {
     char err[ERR_MAX];
-    set_net("192.168.5.17", "255.255.255.0");
-    const char *allowed[] = {"192.168.5.50", "192.168.5.1", "10.0.0.1",    "172.16.0.1",
-                             "172.31.255.1", "169.254.1.1", "192.168.1.1", "10.255.255.254"};
+    set_net("192.168.1.17", "255.255.255.0");
+    const char *allowed[] = {"192.168.1.50", "192.168.1.1", "10.0.0.1",    "172.16.0.1",
+                             "172.31.255.1", "169.254.1.1", "192.168.2.1", "10.255.255.254"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(*allowed); ++i) {
         CHECK(lan_dest_check(ip(allowed[i]), err), "%s should be allowed: %s", allowed[i], err);
     }
-    const char *refused[] = {"127.0.0.1",    "127.8.8.8",     "192.168.5.17",   "8.8.8.8",       "172.32.0.1",
+    const char *refused[] = {"127.0.0.1",    "127.8.8.8",     "192.168.1.17",   "8.8.8.8",       "172.32.0.1",
                              "172.15.255.1", "0.0.0.0",       "224.0.0.251",    "239.255.255.250", "255.255.255.255",
-                             "192.168.5.255", "192.168.5.0",  "100.64.0.1",     "1.1.1.1"};
+                             "192.168.1.255", "192.168.1.0",  "100.64.0.1",     "1.1.1.1"};
     for (size_t i = 0; i < sizeof(refused) / sizeof(*refused); ++i) {
         err[0] = 0;
         CHECK(!lan_dest_check(ip(refused[i]), err) && err[0], "%s should be refused", refused[i]);
     }
     CHECK(!lan_dest_check(ip("8.8.8.8"), err) && strstr(err, "public address"), "public wording: %s", err);
-    CHECK(!lan_dest_check(ip("192.168.5.17"), err) && strstr(err, "T-Circle itself"), "self wording: %s", err);
+    CHECK(!lan_dest_check(ip("192.168.1.17"), err) && strstr(err, "T-Circle itself"), "self wording: %s", err);
     CHECK(!lan_dest_check(ip("127.0.0.1"), err) && strstr(err, "loopback"), "loopback wording: %s", err);
 
     // A LAN on non-private space (carrier-grade NAT here): its own subnet counts, the rest doesn't.
@@ -410,13 +411,13 @@ static void test_destinations(void)
     set_net("11.1.1.1", "255.0.0.0");
     CHECK(!lan_dest_check(ip("11.2.2.2"), err), "public /8 subnet should be refused");
     // /31 and /32 have no network/broadcast addresses.
-    set_net("192.168.9.0", "255.255.255.254");
-    CHECK(lan_dest_check(ip("192.168.9.1"), err), "/31 peer should be allowed: %s", err);
+    set_net("192.168.2.0", "255.255.255.254");
+    CHECK(lan_dest_check(ip("192.168.2.1"), err), "/31 peer should be allowed: %s", err);
 
     g_wifi_up = false;
-    CHECK(!lan_dest_check(ip("192.168.5.50"), err) && strstr(err, "not on a network"), "wifi down: %s", err);
+    CHECK(!lan_dest_check(ip("192.168.1.50"), err) && strstr(err, "not on a network"), "wifi down: %s", err);
     g_wifi_up = true;
-    set_net("192.168.5.17", "255.255.255.0");
+    set_net("192.168.1.17", "255.255.255.0");
 
     uint32_t v;
     const char *bad_ips[] = {"010.0.0.1", "10.1", "1.2.3.256", "1.2.3.4x", "1..2.3", "", "1.2.3.4.5", "0x7f.0.0.1"};
@@ -428,10 +429,10 @@ static void test_destinations(void)
 static void test_bad_params(void)
 {
     cJSON *f;
-    f = run("{\"url\":\"ftp://192.168.5.50/\"}");
+    f = run("{\"url\":\"ftp://192.168.1.50/\"}");
     CHECK(is_error(f, "must use http or https"), "ftp: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"url\":\"192.168.5.50/x\"}");
+    f = run("{\"url\":\"192.168.1.50/x\"}");
     CHECK(is_error(f, "absolute http or https URL"), "no scheme: %s", g_frame);
     cJSON_Delete(f);
     f = run("{\"url\":\"http:///x\"}");
@@ -443,19 +444,19 @@ static void test_bad_params(void)
     f = run("{\"url\":\"http://[fe80::1]/\"}");
     CHECK(is_error(f, "IPv6"), "ipv6: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"url\":\"http://u:p@192.168.5.50/\"}");
+    f = run("{\"url\":\"http://u:p@192.168.1.50/\"}");
     CHECK(is_error(f, "credentials in the URL"), "userinfo: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"url\":\"http://192.168.5.50:99999/\"}");
+    f = run("{\"url\":\"http://192.168.1.50:99999/\"}");
     CHECK(is_error(f, "invalid port"), "port: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"url\":\"http://192.168.5.50:8a/\"}");
+    f = run("{\"url\":\"http://192.168.1.50:8a/\"}");
     CHECK(is_error(f, "invalid port"), "port letters: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"url\":\"http://192.168.5.50/a b\"}");
+    f = run("{\"url\":\"http://192.168.1.50/a b\"}");
     CHECK(is_error(f, "spaces"), "space: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"method\":\"TRACE\",\"url\":\"http://192.168.5.50/\"}");
+    f = run("{\"method\":\"TRACE\",\"url\":\"http://192.168.1.50/\"}");
     CHECK(is_error(f, "unsupported HTTP method: TRACE"), "trace: %s", g_frame);
     cJSON_Delete(f);
     f = run("{\"url\":\"http://8.8.8.8/\"}");
@@ -468,11 +469,11 @@ static void test_bad_params(void)
     f = run("{\"url\":\"http://no-such-host.invalid/\"}");
     CHECK(is_error(f, "could not resolve"), "dns: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"url\":\"http://192.168.5.50:%d/echo\",\"headers\":{\"X-Bad\":\"a\\r\\nInjected: 1\"}}", g_port);
+    f = run("{\"url\":\"http://192.168.1.50:%d/echo\",\"headers\":{\"X-Bad\":\"a\\r\\nInjected: 1\"}}", g_port);
     CHECK(is_error(f, "line break"), "header injection: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"url\":\"http://192.168.5.50:1/\",\"method\":\"GET\"}");
-    CHECK(is_error(f, "connect to 192.168.5.50:1 refused"), "refused: %s", g_frame);
+    f = run("{\"url\":\"http://192.168.1.50:1/\",\"method\":\"GET\"}");
+    CHECK(is_error(f, "connect to 192.168.1.50:1 refused"), "refused: %s", g_frame);
     cJSON_Delete(f);
 }
 
@@ -482,7 +483,7 @@ static void test_responses(void)
     cJSON *f;
     const cJSON *r;
 
-    snprintf(url, sizeof(url), "http://192.168.5.50:%d/cl", g_port);
+    snprintf(url, sizeof(url), "http://192.168.1.50:%d/cl", g_port);
     f = run("{\"url\":\"%s\"}", url);
     r = result(f);
     CHECK(strcmp(str(f, "type"), "response") == 0 && strcmp(str(f, "id"), "req_test") == 0, "%s", g_frame);
@@ -494,78 +495,78 @@ static void test_responses(void)
     CHECK(strcmp(str(r, "method"), "POST") == 0, "default method POST");
     CHECK(header_has(r, "Content-Type", 0, "text/plain") && header_has(r, "Content-Length", 0, "5"),
           "headers as arrays: %s", g_frame);
-    CHECK(strcmp(g_connect_host, "192.168.5.50") == 0, "connects to the checked IP, got %s", g_connect_host);
+    CHECK(strcmp(g_connect_host, "192.168.1.50") == 0, "connects to the checked IP, got %s", g_connect_host);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"get\",\"url\":\"http://192.168.5.50:%d/chunked\"}", g_port);
+    f = run("{\"method\":\"get\",\"url\":\"http://192.168.1.50:%d/chunked\"}", g_port);
     r = result(f);
     CHECK(str(r, "body") && strcmp(str(r, "body"), "hello world") == 0, "chunked: %s", g_frame);
     CHECK(strcmp(str(r, "method"), "GET") == 0, "method upper-cased");
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/close\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/close\"}", g_port);
     r = result(f);
     CHECK(str(r, "body") && strcmp(str(r, "body"), "no length here") == 0, "close-delimited: %s", g_frame);
     CHECK(header_has(r, "Server", 0, "tiny"), "http/1.0 headers");
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/big\",\"max_bytes\":10485760}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/big\",\"max_bytes\":10485760}", g_port);
     r = result(f);
     CHECK(num(r, "body_bytes") == LAN_HTTP_MAX_BYTES && strlen(str(r, "body")) == LAN_HTTP_MAX_BYTES,
           "capped at the device max: %g", num(r, "body_bytes"));
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(r, "truncated")), "truncated");
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/big\",\"max_bytes\":100}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/big\",\"max_bytes\":100}", g_port);
     r = result(f);
     CHECK(num(r, "body_bytes") == 100 && cJSON_IsTrue(cJSON_GetObjectItem(r, "truncated")), "max_bytes 100");
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/exact\",\"max_bytes\":10}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/exact\",\"max_bytes\":10}", g_port);
     r = result(f);
     CHECK(num(r, "body_bytes") == 10 && cJSON_IsFalse(cJSON_GetObjectItem(r, "truncated")),
           "exactly max_bytes is not truncated: %s", g_frame);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/redirect\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/redirect\"}", g_port);
     r = result(f);
-    CHECK(num(r, "status") == 302 && header_has(r, "Location", 0, "http://192.168.5.50/elsewhere"),
+    CHECK(num(r, "status") == 302 && header_has(r, "Location", 0, "http://192.168.1.50/elsewhere"),
           "redirect returned as is: %s", g_frame);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/dup\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/dup\"}", g_port);
     r = result(f);
     CHECK(header_has(r, "Set-Cookie", 0, "a=1") && header_has(r, "Set-Cookie", 1, "b=2") &&
               header_has(r, "X-Thing", 0, "y"),
           "repeated headers, canonical names: %s", g_frame);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/binary\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/binary\"}", g_port);
     CHECK(strstr(g_frame, "\"body\":\"A\\u0000B\xEF\xBF\xBD\\\"\\\\\\n\xEF\xBF\xBD\xEF\xBF\xBD\"") != NULL,
           "NUL escaped, invalid UTF-8 replaced: %s", g_frame);
     CHECK(num(result(f), "body_bytes") == 9, "body_bytes counts raw bytes");
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/utf8\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/utf8\"}", g_port);
     CHECK(strcmp(str(result(f), "body"), "灯 on ✓") == 0, "utf-8 kept: %s", g_frame);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/status500\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/status500\"}", g_port);
     CHECK(num(result(f), "status") == 500 && strcmp(str(result(f), "body"), "oops") == 0, "500 is a response");
     cJSON_Delete(f);
 
     const int64_t t0 = esp_timer_get_time();
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/slow\",\"timeout_seconds\":1}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/slow\",\"timeout_seconds\":1}", g_port);
     const int64_t took_ms = (esp_timer_get_time() - t0) / 1000;
     CHECK(is_error(f, "timed out after 1 s"), "timeout: %s", g_frame);
     CHECK(took_ms >= 900 && took_ms < 2000, "timeout honoured, took %lld ms", (long long)took_ms);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/early-close\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/early-close\"}", g_port);
     CHECK(is_error(f, "closed the connection before"), "early close: %s", g_frame);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/garbage\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/garbage\"}", g_port);
     CHECK(is_error(f, "invalid HTTP response"), "garbage: %s", g_frame);
     cJSON_Delete(f);
 }
@@ -576,9 +577,9 @@ static void test_requests(void)
     cJSON *echo;
     const char *v = NULL;
     char host[64];
-    snprintf(host, sizeof(host), "192.168.5.50:%d", g_port);
+    snprintf(host, sizeof(host), "192.168.1.50:%d", g_port);
 
-    f = run("{\"url\":\"http://192.168.5.50:%d/echo?x=1#frag\",\"body\":\"{\\\"a\\\":1}\"}", g_port);
+    f = run("{\"url\":\"http://192.168.1.50:%d/echo?x=1#frag\",\"body\":\"{\\\"a\\\":1}\"}", g_port);
     echo = echo_of(f);
     CHECK(echo && strcmp(str(echo, "method"), "POST") == 0 && strcmp(str(echo, "path"), "/echo?x=1") == 0,
           "request line, no fragment: %s", g_frame);
@@ -592,7 +593,7 @@ static void test_requests(void)
     cJSON_Delete(echo);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"PUT\",\"url\":\"http://192.168.5.50:%d/echo\",\"body\":\"on\","
+    f = run("{\"method\":\"PUT\",\"url\":\"http://192.168.1.50:%d/echo\",\"body\":\"on\","
             "\"headers\":{\"content-type\":\"text/plain\",\"X-Num\":5,\"X-Flag\":true,\"Host\":\"evil\","
             "\"User-Agent\":\"me\",\"Content-Length\":\"999\",\"\":\"skip\"}}",
             g_port);
@@ -607,7 +608,7 @@ static void test_requests(void)
     cJSON_Delete(echo);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d\"}", g_port);
     echo = echo_of(f);
     CHECK(echo && strcmp(str(echo, "path"), "/") == 0, "empty path becomes /: %s", g_frame);
     CHECK(echo && echo_header_count(echo, "Content-Length", NULL) == 0, "GET without body has no length");
@@ -615,13 +616,13 @@ static void test_requests(void)
     cJSON_Delete(echo);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"DELETE\",\"url\":\"http://192.168.5.50:%d/echo\"}", g_port);
+    f = run("{\"method\":\"DELETE\",\"url\":\"http://192.168.1.50:%d/echo\"}", g_port);
     echo = echo_of(f);
     CHECK(echo && echo_header_count(echo, "Content-Length", NULL) == 0, "DELETE without body: %s", g_frame);
     cJSON_Delete(echo);
     cJSON_Delete(f);
 
-    f = run("{\"method\":\"POST\",\"url\":\"http://192.168.5.50:%d/echo\"}", g_port);
+    f = run("{\"method\":\"POST\",\"url\":\"http://192.168.1.50:%d/echo\"}", g_port);
     echo = echo_of(f);
     CHECK(echo && echo_header_count(echo, "Content-Length", &v) == 1 && strcmp(v, "0") == 0,
           "empty POST sends Content-Length: 0");
@@ -635,7 +636,7 @@ static void check_chunked(const char *path, const char *extra, size_t frame_byte
                           bool want_truncated)
 {
     sink_reset(frame_bytes, 0);
-    cJSON *f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d%s\",\"response_mode\":\"chunks\"%s}", g_port,
+    cJSON *f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d%s\",\"response_mode\":\"chunks\"%s}", g_port,
                    path, extra);
     const cJSON *r = result(f);
     CHECK(strcmp(str(f, "type"), "response") == 0 && num(r, "status") == 200, "%s: %.300s", path, g_frame);
@@ -696,17 +697,17 @@ static void test_chunks(void)
 
     // Empty body: no chunk frames, the digest of nothing.
     sink_reset(8192, 0);
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/redirect\",\"response_mode\":\"chunks\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/redirect\",\"response_mode\":\"chunks\"}", g_port);
     CHECK(num(result(f), "status") == 302 && num(result(f), "chunks") == 0 && num(result(f), "body_bytes") == 0 &&
               g_sink.frames == 0 &&
               strcmp(str(result(f), "sha256"), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0,
           "empty body: %s", g_frame);
-    CHECK(header_has(result(f), "Location", 0, "http://192.168.5.50/elsewhere"), "headers in the final frame");
+    CHECK(header_has(result(f), "Location", 0, "http://192.168.1.50/elsewhere"), "headers in the final frame");
     cJSON_Delete(f);
 
     // The sink fails on the 3rd frame: an error frame with its message, nothing after.
     sink_reset(8192, 3);
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
             g_port);
     CHECK(is_error(f, "socket closed during the transfer") && g_sink.frames == 2, "send failure: %u frames, %s",
           g_sink.frames, g_frame);
@@ -714,7 +715,7 @@ static void test_chunks(void)
 
     // Failures before any body: plain error frames, no chunks.
     sink_reset(8192, 0);
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/early-close\",\"response_mode\":\"chunks\"}",
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/early-close\",\"response_mode\":\"chunks\"}",
             g_port);
     CHECK(is_error(f, "closed the connection before"), "early close in chunk mode: %s", g_frame);
     cJSON_Delete(f);
@@ -723,23 +724,23 @@ static void test_chunks(void)
     cJSON_Delete(f);
 
     // Unknown modes are refused; null means text mode.
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/cl\",\"response_mode\":\"binary\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/cl\",\"response_mode\":\"binary\"}", g_port);
     CHECK(is_error(f, "unsupported response_mode"), "unknown mode: %s", g_frame);
     cJSON_Delete(f);
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/cl\",\"response_mode\":null}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/cl\",\"response_mode\":null}", g_port);
     CHECK(strcmp(str(result(f), "body"), "hello") == 0, "null mode is text: %s", g_frame);
     cJSON_Delete(f);
 
     // Without a sink (no Connector to stream to), chunk mode is refused.
     g_use_sink = NULL;
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/cl\",\"response_mode\":\"chunks\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/cl\",\"response_mode\":\"chunks\"}", g_port);
     CHECK(is_error(f, "not available"), "no sink: %s", g_frame);
     cJSON_Delete(f);
     g_use_sink = &SINK;
 
     // Text mode never touches the sink.
     sink_reset(8192, 0);
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/pattern/100000\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/pattern/100000\"}", g_port);
     CHECK(num(result(f), "body_bytes") == LAN_HTTP_MAX_BYTES && cJSON_IsTrue(cJSON_GetObjectItem(result(f), "truncated")) &&
               g_sink.calls == 0 && g_sink.frames == 0 && cJSON_GetObjectItem(result(f), "body_encoding") == NULL,
           "text mode unchanged: %.200s", g_frame);
@@ -749,7 +750,7 @@ static void test_chunks(void)
     // (no DNS, no connect, no frames); text mode carries on as usual.
     sink_reset(8192, 0);
     g_sink.busy = "busy: voice call active";
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
             g_port);
     CHECK(is_error(f, "busy: voice call active") && strcmp(str(f, "error"), "busy: voice call active") == 0,
           "busy: %s", g_frame);
@@ -760,7 +761,7 @@ static void test_chunks(void)
     CHECK(is_error(f, "busy: voice call active"), "busy before DNS: %s", g_frame);
     cJSON_Delete(f);
     const unsigned asked = g_sink.refuse_calls;
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/cl\"}", g_port);
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/cl\"}", g_port);
     CHECK(strcmp(str(result(f), "body"), "hello") == 0 && g_sink.refuse_calls == asked, "text mode during a call: %s",
           g_frame);
     cJSON_Delete(f);
@@ -768,7 +769,7 @@ static void test_chunks(void)
     // message (as connector.c does), and the transfer ends with that error after 3 frames.
     sink_reset(8192, 4);
     g_sink.fail_msg = "busy: voice call active";
-    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
+    f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.50:%d/pattern/819200\",\"response_mode\":\"chunks\"}",
             g_port);
     CHECK(strcmp(str(f, "error"), "busy: voice call active") == 0 && g_sink.frames == 3 && g_sink.refuse_calls == 1,
           "call mid-transfer: %u frames, %s", g_sink.frames, g_frame);
@@ -786,7 +787,7 @@ static void test_chunks(void)
     sink_reset(0, 0);
 }
 
-// G2 saw "the gateway reset" for a request to the camera's closed port 8800. lwIP reports the refused
+// A request to a camera's closed port once came back as "the gateway reset". lwIP reports the refused
 // connect as ECONNRESET, whose text is "Connection reset by peer". Both modes must say refused, and
 // nothing must crash (this runs under ASan).
 static void test_connect_refused(void)
@@ -809,8 +810,8 @@ static void test_connect_refused(void)
                 g_connect_errno = ECONNRESET;
             }
             sink_reset(8192, 0);
-            cJSON *f = run("{\"method\":\"GET\",\"url\":\"http://192.168.5.33:8800/onvif/snapshot\"%s}", modes[m]);
-            CHECK(is_error(f, "connect to 192.168.5.33:8800 refused: nothing is listening on that port"),
+            cJSON *f = run("{\"method\":\"GET\",\"url\":\"http://192.168.1.33:8800/onvif/snapshot\"%s}", modes[m]);
+            CHECK(is_error(f, "connect to 192.168.1.33:8800 refused: nothing is listening on that port"),
                   "%s refused (%s): %s", m ? "chunk mode" : "text mode", real ? "real" : "lwIP errno", g_frame);
             CHECK(!strstr(g_frame, "reset"), "refused reads as a reset: %s", g_frame);
             CHECK(g_sink.frames == 0, "chunks sent for a refused connect");

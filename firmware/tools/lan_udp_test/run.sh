@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Host test for main/lan_udp.c (and the shared lan_dest.c). Needs cc; uses lan_http_test's stub ESP
 # headers and the cJSON sources from managed_components (run one idf.py build first).
 set -e

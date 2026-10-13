@@ -1,4 +1,4 @@
-# lan_discover (A5) sweeps the subnet with ARP and reads the replies out of lwIP's ARP table. With
+# lan_discover sweeps the subnet with ARP and reads the replies out of lwIP's ARP table. With
 # the default 10 entries, one batch of replies pushes out the next and the router's own entry.
 # No Kconfig for it in IDF 6.0.2; PUBLIC so main's loop over the table sees the same size.
 idf_component_get_property(lwip_lib lwip COMPONENT_LIB)

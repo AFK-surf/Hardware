@@ -1,30 +1,24 @@
+# Build outputs and generated per-board configuration.
 build/
 build-*/
-build-preview/
-build-selftest/
 build.log
+sdkconfig
 sdkconfig.old
 managed_components/
-.cache/
-secrets.h
-.DS_Store
-tools/.venv/
-tools/.mini-device-access.json*
-build-v2/
-build-v2off/
-build-bench/
-build-ns/
-build-fake/
 fake_connector_out/
 
-# Local environments, caches, and history backups (may contain old credentials).
-.local-backups/
-.venv/
-__pycache__/
-*.py[cod]
+# Local credentials and environments (may contain secrets).
+secrets.h
 .env
 .env.*
 !.env.example
+.local-backups/
+.venv/
+tools/.venv/
+tools/.mini-device-access.json*
 
-# Generated per-board configuration.
-sdkconfig
+# Caches.
+.cache/
+__pycache__/
+*.py[cod]
+.DS_Store

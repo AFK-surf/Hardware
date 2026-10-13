@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Execute the real runner with a virtual clock/ARP cache/socket layer. No boards or LAN traffic.
 // Built with the DevKit's wait for BLE off, so the wait runs against the same virtual clock.
 #define CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY 1
@@ -25,7 +26,7 @@ esp_netif_t *esp_netif_get_handle_from_ifkey(const char *key) { return &netif; }
 void *esp_netif_get_netif_impl(esp_netif_t *n) { return n; }
 bool wifi_ip_info(uint32_t *ip, uint32_t *mask)
 {
-    *ip = inet_addr("192.168.5.17");
+    *ip = inet_addr("192.168.1.17");
     *mask = inet_addr("255.255.255.0");
     return true;
 }
@@ -37,7 +38,7 @@ int etharp_get_entry(size_t i, ip4_addr_t **ip, struct netif **n, struct eth_add
     static struct eth_addr ether = {{1, 2, 3, 4, 5, 6}};
     if (i >= (size_t)hosts) return 0;
     unsigned h = (unsigned)i + (hosts > 32 && clock_ms >= 600 ? 32 : 0);
-    char text[16]; snprintf(text, sizeof(text), "192.168.5.%u", 30 + h);
+    char text[16]; snprintf(text, sizeof(text), "192.168.1.%u", 30 + h);
     address.addr = inet_addr(text);
     *ip = &address; *n = &netif; *mac = &ether;
     return 1;

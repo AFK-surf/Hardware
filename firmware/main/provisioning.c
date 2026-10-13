@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "heap_diag.h"
 // BLE provisioning over NimBLE. Contract: docs/ble-provisioning.md.
 //

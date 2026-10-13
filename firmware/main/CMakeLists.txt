@@ -65,7 +65,7 @@ idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../voice" "
 if(COMMA_LAN_DISCOVER_SELFTEST_S)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_LAN_DISCOVER_SELFTEST_S=${COMMA_LAN_DISCOVER_SELFTEST_S})
 endif()
-# Dev only, with the self-test: `-DCOMMA_UDP_SELFTEST_HOST=192.168.5.19` also sends a miIO hello there
+# Dev only, with the self-test: `-DCOMMA_UDP_SELFTEST_HOST=192.168.1.19` also sends a miIO hello there
 # each round (udp_request).
 if(COMMA_LAN_DISCOVER_SELFTEST_S AND COMMA_UDP_SELFTEST_HOST)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_UDP_SELFTEST_HOST="${COMMA_UDP_SELFTEST_HOST}")
@@ -76,12 +76,12 @@ endif()
 if(COMMA_CONNECT_URL_OVERRIDE)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_CONNECT_URL_OVERRIDE="${COMMA_CONNECT_URL_OVERRIDE}")
 endif()
-# V2 off (one flag): `idf.py -B build-v2off -DCOMMA_VOICE_CLEAN_OFF=1 build` keeps the raw 24 kHz mic on
-# the wire, as before V2, for comparison (voice_clean.h).
+# Mic cleanup off (one flag): `idf.py -B build-clean-off -DCOMMA_VOICE_CLEAN_OFF=1 build` keeps the raw 24 kHz mic on
+# the wire, without the AFE, for comparison (voice_clean.h).
 if(COMMA_VOICE_CLEAN_OFF)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_VOICE_CLEAN=0)
 endif()
-# nsnet2 before the VAD (V2 as first shipped): `idf.py -B build-ns -DCOMMA_VOICE_NS_OFF=0 build`. The default
+# nsnet2 before the VAD: `idf.py -B build-ns -DCOMMA_VOICE_NS_OFF=0 build`. The default
 # is VAD only (voice_clean.h).
 if(DEFINED COMMA_VOICE_NS_OFF)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_VOICE_NS_OFF=${COMMA_VOICE_NS_OFF})

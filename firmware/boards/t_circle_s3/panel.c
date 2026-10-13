@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "memory_caps.h"
 // GC9D01 160x160 round panel (board_display.h). Pins match the T-Circle-S3 panel used by the
 // previous logo firmware. Sleep turns the backlight off and puts the panel in SLPIN.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // What each touch board implements (boards/<board>/): the screen or key that starts and ends a

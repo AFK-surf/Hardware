@@ -1,7 +1,7 @@
 # Waveshare ESP32-S3-Touch-AMOLED-1.32: ESP32-S3-PICO-1, 8 MB flash, 8 MB octal PSRAM.
 # CO5300 466x466 QSPI AMOLED, CST820 touch, ES8311 codec, PA on GPIO46, BOOT on GPIO0.
 # Display and gateway, no voice: the board has a mic but no speaker (only a speaker header).
-# Flash and PSRAM modes are the ones the reference project (voice-box-agent) ran on this board.
+# Flash and PSRAM modes follow Waveshare's board support package for this board.
 CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32=y
 CONFIG_COMMA_HAS_VOICE=n
 CONFIG_COMMA_HAS_DISPLAY=y

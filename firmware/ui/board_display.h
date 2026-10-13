@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // What each display board implements (boards/<board>/). ui/display.c decides what to show and when

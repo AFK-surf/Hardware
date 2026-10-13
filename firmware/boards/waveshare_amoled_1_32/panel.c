@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /*
  * CO5300 466x466 AMOLED over QSPI (board_display.h), Waveshare ESP32-S3-Touch-AMOLED-1.32.
  *

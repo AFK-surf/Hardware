@@ -1,136 +1,133 @@
-# Hardware
+![Comma firmware running on small ESP32 boards](docs/assets/comma-hardware-banner.png)
 
-Comma hardware firmware: one ESP-IDF project, shared gateway code, and per-board overlays.
+# Comma Hardware
 
-| Folder | Purpose |
-| --- | --- |
-| `firmware/main/` | Shared Connector, LAN methods, Wi-Fi, BLE provisioning and BOOT controls |
-| `firmware/voice/` | Shared voice call: Cue voice session, playback, noise/VAD, call controller |
-| `firmware/ui/` | Shared screen cards, fonts and logo, drawn at the board's screen size (round, or 135x240 on the StickS3) |
-| `firmware/boards/t_circle_s3/` | T-Circle pins and drivers: GC9D01 panel, CST816D touch, PDM mic, MAX98357A |
-| `firmware/boards/waveshare_amoled_1_32/` | Waveshare AMOLED pins and drivers: CO5300 panel, CST820 touch (no voice: no speaker on board) |
-| `firmware/boards/m5stack_sticks3/` | M5Stack StickS3 pins and drivers: M5PM1 power chip, ES8311 audio, ST7789 panel, two keys |
-| `firmware/boards/esp32_devkit/` | DevKit GPIO0 BOOT and GPIO2 status LED |
-| `devices/` | Board configurations and [porting instructions](devices/README.md) |
-| `tools/board.sh` | Build and flash one board with its own generated config and build directory |
+Firmware that turns a small ESP32 board into a home gateway for the [Comma](https://comma.surf) app.
+The board stays plugged in at home, connects out to the Comma backend, and lets your Comma agent
+reach devices on your home network (lights, air conditioners, cameras, local web APIs) even when
+your phone or computer is away. On boards with a microphone and a speaker, it is also a voice
+terminal: press once to talk to Comma, press again to hang up.
 
-### Boards
+The board knows no device protocols. It forwards HTTP requests, UDP datagrams and TCP streams that
+the backend asks for, only to addresses on its own network, and only after you allow device
+operations in the app. New appliances need no firmware change.
 
-A supported ESP32 board with Wi-Fi and BLE can serve as a home Connector. Voice requires a microphone
-and speaker. TCP snapshots additionally need enough RAM for the server's 32 KiB tunnel frames
-([protocol §4](docs/connector-protocol.md)). Build support alone does not establish that these workloads fit.
+## Boards
 
-| Board | Chip / memory | Connector | Snapshots (TCP tunnel) | Voice | Pairing |
-| --- | --- | --- | --- | --- | --- |
-| LilyGO T-Circle-S3 | ESP32-S3, 16 MB flash, 8 MB PSRAM | Running: HTTP, UDP, discovery | 2, board-tested in G3 | Yes | On-screen passkey, MITM |
-| Waveshare ESP32-S3-Touch-AMOLED-1.32 | ESP32-S3-PICO-1, 8 MB flash, 8 MB PSRAM | Display + gateway, no voice (no speaker on board); T-Circle limits; display, touch and passkey setup board-tested | 2 configured; unverified | No (no speaker on board) | On-screen passkey, MITM |
-| ESP32-S3 AUDIO-Board | ESP32-S3 with PSRAM | Planned, not added | Expected; unverified | Planned | Planned spoken passkey |
-| M5Stack StickS3 | ESP32-S3-PICO-1, 8 MB flash, 8 MB PSRAM | Board-tested: setup, Connector online, discovery with probes and HTTP (1 MiB chunks) 3/3; T-Circle limits | 2 configured; unverified | Yes: KEY1 calls board-tested, mic rate 16 kHz checked each call | On-screen passkey, MITM (board-tested) |
-| ESP32 DevKit | ESP32-D0WD rev v1.0, 4 MB flash, no PSRAM | Board-tested: HTTP (8 KiB text, 1 MiB in chunks), UDP, discovery (12 KiB result cap), 3/3 each | **Unsupported: `lan_tcp_dial` disabled** | No | Secure Connections Just Works, no MITM |
+| Board | Chip, flash / PSRAM | Gateway | Voice | Screen | Pairing | Build |
+| --- | --- | --- | --- | --- | --- | --- |
+| [LilyGO T-Circle-S3](https://lilygo.cc/products/t-circle-s3) | ESP32-S3, 16 MB / 8 MB | HTTP, UDP, discovery, 2 TCP tunnels | Yes (tap the screen) | 160 px round | Passkey on screen | `tools/board.sh t-circle-s3 build` |
+| [M5Stack StickS3](https://shop.m5stack.com/products/m5stack-sticks3-esp32s3-mini-iot-dev-kit) | ESP32-S3-PICO-1, 8 MB / 8 MB | HTTP, UDP, discovery, 2 TCP tunnels | Yes (front key) | 135x240 | Passkey on screen | `tools/board.sh m5stack-sticks3 build` |
+| [Waveshare ESP32-S3-Touch-AMOLED-1.32](https://www.waveshare.com/esp32-s3-touch-amoled-1.32.htm) | ESP32-S3-PICO-1, 8 MB / 8 MB | HTTP, UDP, discovery, 2 TCP tunnels | No (no speaker on the board) | 466 px round AMOLED | Passkey on screen | `tools/board.sh waveshare-amoled-1-32 build` |
+| [ESP32 DevKit](https://www.espressif.com/en/products/devkits/esp32-devkitc) (classic ESP32, e.g. ESP32-DevKitC) | ESP32-D0WD, 4 MB / none | HTTP (8 KiB text, 4 KiB chunks), UDP, discovery (12 KiB result); no TCP tunnels | No | No (status LED on GPIO2) | Just Works, no MITM protection | `tools/board.sh esp32-devkit build` |
 
-DevKit uses an 8 KiB text cap, 4 KiB HTTP chunks, 16 KiB incoming JSON frames, a 16 KiB discovery
-arena, 6 services / 6 SSDP entries per host and a 12 KiB discovery JSON cap. In H1, with BLE off
-and local WSS, the Connector idled at about
-130 KB free internal RAM (57 KB largest block) and never dropped below 57 KB during three rounds of
-discovery, 8 KiB text and 1 MiB chunk transfers, with no crash or reconnect. Physical BOOT pairing,
-factory reset and unplug/replug were also checked.
+The DevKit build targets the classic ESP32 with 4 MB flash and no PSRAM. ESP32-S3 development
+boards are not supported by that build. Board details, limits and test status are in
+[devices/README.md](devices/README.md).
 
-DevKit does not support `lan_tcp_dial`: the server's 32 KiB raw frames need about 43.7 KB of base64
-buffer plus JSON, which does not reliably fit the measured 36–49 KB largest blocks after TLS.
-To support tunnels, the backend must honor the device's `max_frame`; the smaller-frame path must
-then pass hardware memory tests before tunnels are enabled again.
-See [H1's measurements and remaining checks](docs/reports/H1-report.md).
+## Quick start
 
-The BLE UUIDs and credential fields are unchanged; even the no-voice board still accepts the existing
-`server` and `voice_key` fields for app compatibility. BOOT grants a provisioned board a temporary
-pairing window; Just Works encryption cannot stop an active man-in-the-middle.
+### 1. Install ESP-IDF 6.0.2
 
-## Set up the toolchain
-
-Install **ESP-IDF v6.0.2** with the ESP32 and ESP32-S3 tools, following the
-[official installation guide](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32s3/get-started/index.html).
-The guide covers macOS, Linux, and Windows. Activate that installation in your terminal
-(or open its ESP-IDF terminal on Windows), then check:
+Install **ESP-IDF v6.0.2** with the ESP32 and ESP32-S3 tools, following Espressif's
+[installation guide](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32s3/get-started/index.html)
+(macOS, Linux and Windows). Activate it in your terminal, then check:
 
 ```sh
-idf.py --version
+idf.py --version   # ESP-IDF v6.0.2
 ```
 
-It should report `ESP-IDF v6.0.2`. Use this exact version: the project patches the NimBLE pairing
-timeout during CMake configuration and relies on this version's lwIP internals. Do not edit the
-installed SDK. A newer SDK needs separate validation.
+Use this exact version. The build patches a NimBLE pairing timeout at configure time and relies on
+this version's lwIP internals. A newer IDF needs its own validation.
 
-## Clone and build
+### 2. Build
 
-You need read access to this private repository and GitHub authentication configured for Git.
+From the repository root:
 
 ```sh
-git clone https://github.com/AFK-surf/Hardware.git
-cd Hardware
 tools/board.sh t-circle-s3 build
-tools/board.sh esp32-devkit build
-tools/board.sh waveshare-amoled-1-32 build
-tools/board.sh m5stack-sticks3 build
 ```
 
-No board, Wi-Fi password, backend credential, or `secrets.h` is needed to compile. The target and
-board settings come from `firmware/sdkconfig.defaults` plus `devices/sdkconfig.<board>`. Each build
-generates `firmware/build-<board>/sdkconfig`; no generated sdkconfig is committed. Dependencies are
-locked in `firmware/dependencies.lock` (T-Circle), `firmware/dependencies.lock.esp32` (DevKit) and
-`firmware/dependencies.lock.waveshare-amoled-1-32` (Waveshare: adds the CO5300 panel driver, which
-only that build pulls) and `firmware/dependencies.lock.m5stack-sticks3` (StickS3: adds esp_codec_dev
-for its ES8311). Build the Waveshare and StickS3 boards with `tools/board.sh`, which tells
-CMake the board before Kconfig runs.
-The first build needs internet access. DevKit excludes ESP-SR and the LCD/audio stack. Build boards
-sequentially: the component manager uses one shared `firmware/managed_components/` directory.
-Do not run `idf.py update-dependencies` as part of ordinary setup.
+Replace `t-circle-s3` with your board from the table. No Wi-Fi password, account or credential is
+needed to build. The first build downloads the locked managed components, so it needs internet
+access. Build one board at a time: all boards share `firmware/managed_components/`. Output goes to
+`firmware/build-<board>/`.
 
-Display assets, fonts, and the logo binary are already checked in. Their generator scripts are
-optional and are not part of the firmware build. Outputs are under `firmware/build-<board>/`.
+### 3. Flash
 
-## Flash and provision a board
-
-Connect the intended board with a USB data cable. Replace `PORT` with its actual serial port, for example
-`/dev/cu.usbmodem1101` on macOS, `/dev/ttyACM0` on Linux, or `COM5` on Windows. Run from the repository root:
+Connect the board with a USB data cable and find its serial port (`/dev/cu.usbmodem*` or
+`/dev/cu.usbserial-*` on macOS, `/dev/ttyACM*` or `/dev/ttyUSB*` on Linux, `COMx` on Windows):
 
 ```sh
 tools/board.sh t-circle-s3 flash-monitor PORT
-# DevKit on this Mac (check the port before using):
-tools/board.sh esp32-devkit flash-monitor /dev/cu.usbserial-0001
 ```
 
-The first flash must include the bootloader, partition table and application (plus the ESP-SR model
-partition on T-Circle); use `flash`, not just `app-flash`. Exit the serial monitor with Ctrl+]. Do not erase
-flash when updating a configured board unless you intend to remove its saved credentials.
+The first flash must write everything (bootloader, partition table, app and, on voice boards, the
+speech model partition): use `flash`, not `app-flash`. Exit the monitor with Ctrl+]. Flashing does
+not erase saved settings; erase flash only if you want the board to forget its setup.
 
-An unconfigured board advertises over BLE. Use the Comma app to set up **2.4 GHz Wi-Fi** and issue
-the board its own Connector token and voice key. See the [BLE setup contract](docs/ble-provisioning.md).
-Runtime calls and LAN control require a compatible Comma/Salix backend; this repository contains
-the firmware and development tools, not the backend or Android app.
+Download mode, per board:
 
-- T-Circle: tap the screen to call; tap again to hang up.
-- Waveshare AMOLED: no calls (no speaker on board). A tap or a short BOOT press wakes the screen.
-- StickS3: press the front key (KEY1) to call, again to hang up. The side key (KEY2) is its BOOT
-  for the holds below; a short press only wakes the screen.
-- DevKit: LED off normally, slow blink while advertising, fast blink while BLE connected, solid 3 s after saved.
-- Hold BOOT for at least 3 seconds and release before 10 seconds to enter pairing mode.
-- Hold BOOT for 10 seconds to factory reset and erase the saved configuration.
-- Enable device operations in the app before using the gateway; it starts read-only.
+- **T-Circle-S3 and Waveshare AMOLED** (native USB): esptool enters download mode by itself. If it
+  cannot connect, hold BOOT while plugging in USB, then flash. If the Waveshare stays silent with a
+  blank screen after flashing on macOS, unplug and replug USB without touching BOOT.
+- **StickS3** (native USB): download mode is automatic, no key needed. Opening the serial port resets
+  the board. A long press on the separate power button also enters download mode.
+- **ESP32 DevKit** (USB-UART bridge, often a CH340 or CP210x): install the bridge's driver if no port
+  appears. If esptool stays at `Connecting...`, hold BOOT until it starts writing.
 
-For local development only, copy `firmware/main/secrets.h.example` to `firmware/main/secrets.h`, fill in your own
-credentials, and set `COMMA_DEV_SECRETS` to `1`. That overrides BLE/NVS settings and embeds those
-credentials in the firmware. `secrets.h` and build directories are ignored by Git. Ordinary builds
-and shared firmware should use BLE provisioning instead.
+### 4. Set up from the app
 
-H2 adds caller-supplied UDP discovery probes on both boards. DevKit received an uncut 399-byte
-Gree reply; BLE-up discovery hit OOM with the old per-host caps. The DevKit 6/6 caps save 20 KiB,
-with build/host checks passing and BLE-up hardware retesting pending. See the
-[H2 report](docs/reports/H2-report.md) for measurements and remaining checks.
+A new board advertises over Bluetooth as `Comma-XXXX` (the last four hex digits of its MAC). In the
+Comma Android app, add a device, enter the code shown on the board's screen (screen boards), choose a
+**2.4 GHz** Wi-Fi network, and wait for the board to come online. The app issues the board its own
+Connector token and voice key, which it keeps in flash. Then allow device operations for it in the
+app's device settings: a new board starts read-only and refuses every network request.
 
-## Development tools and tests
+The setup protocol is documented in [docs/ble-provisioning.md](docs/ble-provisioning.md), and the
+gateway protocol in [docs/connector-protocol.md](docs/connector-protocol.md). Runtime calls and LAN
+control need the Comma backend; this repository has the firmware and development tools only.
 
-The following commands are for macOS/Linux shells, from the repository root. Keep tool dependencies
-in a separate virtual environment from ESP-IDF:
+### 5. Keys
+
+| | T-Circle-S3 | StickS3 | Waveshare AMOLED | ESP32 DevKit |
+| --- | --- | --- | --- | --- |
+| Call / hang up | Tap the screen | KEY1 (front) | — | — |
+| Wake the screen | Tap (a tap also calls) | Short KEY2 press | Tap or short BOOT press | — |
+| Pairing mode: hold 3–10 s, then release | BOOT | KEY2 (side) | BOOT | BOOT |
+| Factory reset: hold more than 10 s | BOOT | KEY2 | BOOT | BOOT |
+
+Pairing mode lets the app reconfigure a board that is already set up (new Wi-Fi, new credentials);
+it ends after 5 minutes without a connection. Factory reset erases Wi-Fi, credentials and Bluetooth
+keys, and the board restarts unconfigured. A key still held when the board starts is ignored until
+released. The DevKit's LED is off normally, blinks slowly while advertising, quickly while the app is
+connected, and stays on for about 3 s after setup is saved.
+
+## Security notes
+
+- **Pairing.** Every board uses LE Secure Connections only (legacy pairing is refused) and requires an
+  encrypted link before any setup characteristic can be read or written. Screen boards show a random
+  six-digit passkey (MITM protection). The ESP32 DevKit has no display or keypad, so it pairs with
+  **Just Works**: the link is encrypted, but an attacker within Bluetooth range during setup can
+  intercept it. Physical access (holding BOOT) is required to reopen setup on a configured board, but
+  that is not cryptographic protection. Set up a DevKit where nobody else is in radio range.
+- **Bluetooth is off** on a configured board except in pairing mode, and never on during a call.
+- **Stored credentials are not encrypted.** These builds do not enable Secure Boot, flash encryption
+  or NVS encryption, so anyone holding the board can read its Wi-Fi password, Connector token and
+  voice key over USB. Both credentials are per device and are revoked when you remove the device in
+  the app; factory reset erases them.
+- **The gateway is read-only until you allow it.** The board itself enforces this: while device
+  operations are off, it refuses every LAN request without touching the network. Requests may only
+  go to addresses on the board's own subnet and private ranges, never to the board itself, loopback,
+  broadcast or multicast addresses.
+- The Bluetooth advertising data uses the test company ID `0xFFFF`.
+- There is no OTA update; update by USB.
+
+## Development
+
+### Host tests
+
+Python tools and tests use their own virtual environment, separate from ESP-IDF:
 
 ```sh
 python3 -m venv tools/.venv
@@ -139,12 +136,9 @@ python -m pip install -r tools/requirements.txt
 python -m unittest discover -s firmware/tools -p 'test_*.py'
 ```
 
-The Python tests use simulated BLE data and local HTTP/WebSocket servers; they do not need a board
-or backend credentials. The BLE client is `firmware/tools/ble_provision.py`, and
-`firmware/tools/fake_connector.py` provides a local test Connector.
-
-The C host tests currently target **macOS** (the HTTP test uses CommonCrypto). Run one firmware build
-first to download the managed cJSON component, activate ESP-IDF so `IDF_PATH` is set, and run:
+The C host tests compile the real LAN, JSON and audio code against small ESP-IDF stubs with
+AddressSanitizer and UndefinedBehaviorSanitizer. They currently target **macOS** (the HTTP test uses
+CommonCrypto). Build one board first (for the managed cJSON component), activate ESP-IDF, then:
 
 ```sh
 sh firmware/tools/lan_discover_test/run.sh
@@ -154,32 +148,69 @@ sh firmware/tools/lan_tunnel_test/run.sh
 sh firmware/tools/connector_json_test/run.sh
 sh firmware/tools/resample_test/run.sh
 sh firmware/tools/mic_path_test/run.sh
-# Smaller DevKit limits (from its overlay):
+# The DevKit's smaller limits:
 sh firmware/tools/lan_http_test/run.sh --devkit
 sh firmware/tools/lan_udp_test/run.sh --devkit
 sh firmware/tools/lan_discover_test/run.sh --devkit
 ```
 
-These compile the real LAN implementations with ESP stubs and AddressSanitizer/UndefinedBehaviorSanitizer.
-They need a C compiler and permission to open local sockets. They do not replace board tests for
-Wi-Fi, BLE, audio, or the lwIP receive-window adjustment.
+They do not replace board tests for Wi-Fi, Bluetooth or audio.
 
-## Project map and current limits
+### Tools
 
-- `firmware/main/`: shared gateway, setup, controls, Kconfig and memory policy.
-- `firmware/voice/` and `firmware/ui/`: voice call and screen code shared by the voice boards. A board
-  implements `voice/board_audio.h`, `voice/board_input.h` and `ui/board_display.h`.
-- `firmware/boards/`: board pins and drivers only.
-- `devices/`: per-board sdkconfig overlays; [add-a-board guide](devices/AGENTS.md).
-- `firmware/cmake/idf_patches.cmake`: shared NimBLE timeout patch and ARP table configuration.
-- `firmware/components/`: checked-in LCD driver.
-- `firmware/tools/` and `tools/`: provisioning clients, protocol simulators, and host tests.
-- [Connector protocol](docs/connector-protocol.md): backend integration contract.
-- [Project plan](docs/connector-plan.md) and [reports](docs/reports/): design decisions and historical
-  board results. Paths, ports, device IDs, and commit IDs in older reports describe the original
-  test environment; use your own device and checkout.
-- [Code review, 2026-10-09](docs/reports/2026-10-09-code-review.md): newly identified issues awaiting fixes.
+- `firmware/tools/ble_provision.py`: set up a board over Bluetooth from a computer, as the app does
+  (`scan`, `info`, `wifi-scan`, `provision`). Its `--server` and `--connect-url` default to the
+  production backend; pass both to use another one. Secrets come from environment variables.
+- `firmware/tools/fake_connector.py`: a local Connector server for testing a board without the
+  backend. Build with `-DCOMMA_CONNECT_URL_OVERRIDE=ws://<your-computer>:8765/v1/connect` in a
+  separate build directory (see [devices/README.md](devices/README.md)).
+- `tools/lan_mcp_server.py`: a tiny MCP server to stand in for a device on your network.
+- For a development board, `firmware/main/secrets.h.example` shows how to compile credentials in
+  instead of using Bluetooth setup. `secrets.h` is ignored by Git; never ship such an image.
 
-Chunked HTTP transfers and TCP tunnels are refused during voice calls. T-Circle supports two simultaneous tunnels, with a 5-minute idle limit. The [G3 report](docs/reports/G3-report.md) describes a known
-stall under bidirectional backpressure. OTA is not implemented. Secure Boot, flash encryption, and
-NVS encryption are not enabled in the current development configuration.
+### Layout
+
+| Path | Contents |
+| --- | --- |
+| `firmware/main/` | Shared gateway: Connector, LAN methods, Wi-Fi, Bluetooth setup, keys, Kconfig |
+| `firmware/voice/` | Shared voice call: voice session, playback, noise suppression and VAD |
+| `firmware/ui/` | Shared screen cards, fonts and logo for each screen size |
+| `firmware/boards/<board>/` | Pins and drivers for one board |
+| `firmware/components/` | Vendored GC9D01 LCD driver (Espressif, Apache-2.0) |
+| `devices/` | Per-board configuration overlays and board notes |
+| `tools/board.sh` | Build, flash and monitor one board with its own config and build directory |
+
+### Adding a board
+
+1. Read [docs/connector-protocol.md](docs/connector-protocol.md),
+   [docs/ble-provisioning.md](docs/ble-provisioning.md) and [devices/README.md](devices/README.md).
+2. Put pins and drivers in `firmware/boards/<board>/`. A board with voice or a screen reuses
+   `firmware/voice/` and `firmware/ui/` and implements only `voice/board_audio.h` (mic and speaker
+   at the pipeline's rates), `voice/board_input.h` (tap and keys) and `ui/board_display.h` (panel,
+   framebuffer, sleep). Shared code never includes a board's own headers.
+3. Add a `COMMA_BOARD` choice and board ID in `firmware/main/Kconfig.projbuild`, an overlay
+   `devices/sdkconfig.<board>`, the board/target mapping in `tools/board.sh`, and source selection
+   in `firmware/main/CMakeLists.txt`. Choose voice, display, pairing method, GPIOs and limits from
+   the actual hardware.
+4. Choose a partition table, flash size and mode, chip revision and memory settings. Put movable
+   buffers and stacks under `COMMA_BUFFER_CAPS`. On boards without PSRAM, measure free internal heap
+   and the largest block with `CONFIG_COMMA_HEAP_DIAGNOSTICS` before enabling a feature.
+5. A board without a display must use Just Works pairing (encryption-only GATT, Secure Connections
+   on, legacy off, NimBLE `SM_SC_ONLY=0`) and document that it cannot stop an active MITM.
+6. Keep the Bluetooth UUIDs, JSON fields and Connector protocol unchanged. Keep the existing boards'
+   generated configs and behaviour unchanged: build every board, run the host tests, and do not
+   update the dependency lock files as a side effect.
+7. Test on the hardware: text at the configured cap, 1 MiB chunked transfers, discovery and tunnels,
+   three times each. Enable features from measurements, not from a successful build. The backend
+   sends 32 KiB tunnel frames, so tunnels need that much headroom.
+
+[devices/AGENTS.md](devices/AGENTS.md) has the same checklist in more detail.
+
+## License
+
+The firmware and tools are licensed under the [Apache License 2.0](LICENSE). Some files are adapted
+from Meta's muse-gadget-sdk and from Espressif and Waveshare code, also under Apache-2.0, and keep
+their original headers. The Inter font and the glyph tables generated from it are under the SIL Open
+Font License 1.1. See [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+"Comma" and the Comma logo are trademarks. The code license does not grant rights to use them.

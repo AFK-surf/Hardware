@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // The call controller shared by the voice boards: tap (or a short BOOT press, where the board has
@@ -5,7 +6,7 @@
 // temperature log. Boards provide audio (board_audio.h), input (board_input.h) and the panel
 // (board_display.h).
 
-// ESP-SR AFE (V2). Before the display and Wi-Fi take their share of internal RAM.
+// ESP-SR AFE (voice_clean.h). Before the display and Wi-Fi take their share of internal RAM.
 void call_voice_clean_init(void);
 
 // Temperature sensor and the playback task.

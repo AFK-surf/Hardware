@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include <stdbool.h>
@@ -11,7 +12,7 @@
 _Static_assert(AUDIO_FRAME_SAMPLES == 480, "20 ms at 24 kHz is 480 samples");
 _Static_assert(AUDIO_FRAME_SAMPLES * (int)sizeof(int16_t) == 960, "one uplink frame is 960 bytes");
 
-// The mic runs at the speaker's 24 kHz, or at 16 kHz for the noise suppressor (V2, voice_clean.h).
+// The mic runs at the speaker's 24 kHz, or at 16 kHz for the noise suppressor (voice_clean.h).
 #include "voice_clean.h"
 #if COMMA_VOICE_CLEAN
 #define MIC_SAMPLE_RATE_HZ VOICE_CLEAN_RATE_HZ

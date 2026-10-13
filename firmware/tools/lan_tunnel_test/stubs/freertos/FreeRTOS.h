@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 // FreeRTOS on pthreads, just what lan_tunnel.c uses. A tick is a millisecond.
 #include <stdint.h>

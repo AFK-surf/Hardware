@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Pre-render the Cue logo, as CueLogoAnimation leaves it at rest, for the round screen.
+# SPDX-License-Identifier: Apache-2.0
+"""Pre-render the Comma logo, as the app's logo animation leaves it at rest, for the screen.
 
 Usage: gen_cue_logo.py [SIZE]   (screen: 160, the default, or 466 round; WxH, e.g. 135x240)
 
-Geometry, keyframe matrices and easing are copied from
-reference/cue-logo/CueLogoAnimation.tsx (defaults: easeInOut, zoom 2 s,
-hold 1.4 s, nested delay 1 %). The CSS timeline is evaluated on the host, so
-the device only has to blit one frame.
+Geometry, keyframe matrices and easing are those of the Comma app's logo
+animation (defaults: easeInOut, zoom 2 s, hold 1.4 s, nested delay 1 %). The
+CSS timeline is evaluated on the host, so the device only has to blit one frame.
+The logo is a Comma trademark; see THIRD_PARTY_NOTICES.md.
 
 Output:
   ui/<SIZE>/cue_logo.bin           the screen, 4 bpp, high nibble = left pixel, raster order (ui/cue_logo.h)
@@ -107,7 +108,7 @@ def render(ease, t):
 
 def main():
     # The screen only shows the logo at rest: the last frame of the zoom (the device used to play
-    # the whole zoom during calls; D1 dropped that to save power).
+    # the whole zoom during calls; that was dropped to save power).
     still = render(bezier(*BEZIER), ZOOM_S)
     q = np.clip(np.rint(still * 15), 0, 15).astype(np.uint8)
     # Pairs in raster order: the same bytes as row by row for an even width, and an odd width

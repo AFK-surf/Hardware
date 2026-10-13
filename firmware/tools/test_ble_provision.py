@@ -1,4 +1,5 @@
-"""Offline checks for the E1 scan contract: python -m unittest discover -s tools -v."""
+# SPDX-License-Identifier: Apache-2.0
+"""Offline checks for the BLE scan contract: python -m unittest discover -s tools -v."""
 
 import contextlib
 import io
@@ -21,8 +22,8 @@ class SetupSummaryTests(unittest.TestCase):
         for state, label in ((0, "unprovisioned"), (1, "provisioned-pairing")):
             with self.subTest(state=state):
                 self.assertEqual(
-                    ble.setup_summary(bytes([1, 1, state, 0x5D, 0x28])),
-                    f"state={label}(0x{state:02X}) short_id=5D28",
+                    ble.setup_summary(bytes([1, 1, state, 0x1A, 0x2B])),
+                    f"state={label}(0x{state:02X}) short_id=1A2B",
                 )
 
     def test_short_id_keeps_leading_zeroes(self):
@@ -34,14 +35,14 @@ class SetupSummaryTests(unittest.TestCase):
                 self.assertIn("state=unknown short_id=unknown", ble.setup_summary(data))
 
     def test_unsupported_version_or_model_is_not_decoded(self):
-        for data in ("02 01 00 5D 28", "01 02 00 5D 28"):
+        for data in ("02 01 00 1A 2B", "01 02 00 1A 2B"):
             with self.subTest(data=data):
                 self.assertIn("state=unknown short_id=unknown", ble.setup_summary(bytes.fromhex(data)))
 
     def test_unknown_state_is_not_unprovisioned(self):
         self.assertEqual(
-            ble.setup_summary(bytes.fromhex("01 01 02 5D 28")),
-            "state=unknown(0x02) short_id=5D28",
+            ble.setup_summary(bytes.fromhex("01 01 02 1A 2B")),
+            "state=unknown(0x02) short_id=1A2B",
         )
 
 
@@ -71,23 +72,23 @@ class ScanTests(unittest.IsolatedAsyncioTestCase):
     async def test_delayed_scan_response_is_merged_and_preserved(self):
         output = await self.scan([
             report(services=[ble.SERVICE.upper()]),
-            report(name="Comma-5D28", data={0xFFFF: bytes.fromhex("01 01 00 5D 28")}),
+            report(name="Comma-1A2B", data={0xFFFF: bytes.fromhex("01 01 00 1A 2B")}),
             report(services=[ble.SERVICE], device_name="stale OS name"),
         ])
-        self.assertEqual(output, "Comma-5D28  board  state=unprovisioned(0x00) short_id=5D28  rssi -48\n")
+        self.assertEqual(output, "Comma-1A2B  board  state=unprovisioned(0x00) short_id=1A2B  rssi -48\n")
 
     async def test_service_filter_and_company_id(self):
         output = await self.scan([
-            report("unrelated", name="Comma-other", data={0xFFFF: bytes.fromhex("01 01 00 5D 28")}),
-            report(name="Comma-5D28", services=[ble.SERVICE], data={0x1234: bytes.fromhex("01 01 00 5D 28")}),
+            report("unrelated", name="Comma-other", data={0xFFFF: bytes.fromhex("01 01 00 1A 2B")}),
+            report(name="Comma-1A2B", services=[ble.SERVICE], data={0x1234: bytes.fromhex("01 01 00 1A 2B")}),
         ])
         self.assertNotIn("unrelated", output)
         self.assertIn("state=unknown short_id=unknown (no setup data)", output)
 
     async def test_new_unsupported_payload_replaces_old_decoded_state(self):
         output = await self.scan([
-            report(services=[ble.SERVICE], data={0xFFFF: bytes.fromhex("01 01 00 5D 28")}),
-            report(name="Comma-5D28", data={0xFFFF: bytes.fromhex("02 01 00 5D 28")}),
+            report(services=[ble.SERVICE], data={0xFFFF: bytes.fromhex("01 01 00 1A 2B")}),
+            report(name="Comma-1A2B", data={0xFFFF: bytes.fromhex("02 01 00 1A 2B")}),
         ])
         self.assertIn("unsupported version 0x02", output)
         self.assertNotIn("unprovisioned", output)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 // The PSA hash calls lan_http.c uses, on macOS CommonCrypto.
 #include <CommonCrypto/CommonDigest.h>

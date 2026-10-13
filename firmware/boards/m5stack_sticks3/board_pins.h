@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // M5Stack StickS3 (K150, ESP32-S3-PICO-1-N8R8). Pins from M5's K150 schematic v0.6, as used by

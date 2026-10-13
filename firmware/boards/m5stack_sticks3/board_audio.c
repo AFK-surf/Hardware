@@ -18,13 +18,13 @@
  * M5Stack StickS3: ES8311 codec, one I2S port, full duplex; speaker amp enabled through the M5PM1.
  * The duplex stereo I2S setup, the mic on the left slot and the codec configuration (MCLK, the amp
  * through the PMIC) follow muse-gadget-sdk's board_m5stack_sticks3.c and muse_audio.c. The rest is
- * H3's Waveshare driver (ours): channels owned here, the codec through esp_codec_dev's codec
+ * the Waveshare AMOLED's earlier ES8311 driver (ours): channels owned here, the codec through esp_codec_dev's codec
  * interface (registers only), filters and the resampler.
  *
  * Mic and speaker share the port's clock, so it runs at the speaker's 24 kHz (comma.voice.v1
  * pcm16_24k, played as received). Slot mode is stereo in both directions: the mic is one slot of
  * each frame (mic_path.c), playback writes the same sample to both slots. The mic is resampled to
- * MIC_SAMPLE_RATE_HZ (16 kHz for V2's AFE); with COMMA_VOICE_CLEAN off it stays at 24 kHz.
+ * MIC_SAMPLE_RATE_HZ (16 kHz for the voice_clean AFE); with COMMA_VOICE_CLEAN off it stays at 24 kHz.
  *
  * On the S3, disabling the RX channel also stops TX on the same port, so RX stays enabled.
  *
@@ -420,7 +420,7 @@ esp_err_t board_audio_set_recording(bool enabled)
 }
 
 // Once per recording, STICK_RATE_CHECK_US after it started: samples delivered against the clock.
-// Must be MIC_SAMPLE_RATE_HZ +-1 %; H3's Waveshare delivered ~1.9x.
+// Must be MIC_SAMPLE_RATE_HZ +-1 %; the ES8311 in mono slot mode once delivered ~1.9x.
 static void rate_check(int n)
 {
     s_rate_samples += (uint32_t)n;

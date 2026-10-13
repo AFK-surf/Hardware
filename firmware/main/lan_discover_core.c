@@ -848,7 +848,7 @@ static void add_meta_type(ld_ctx_t *ctx, const char *type)
     }
 }
 
-// "13.5.168.192.in-addr.arpa" -> 192.168.5.13 (network byte order).
+// "13.1.168.192.in-addr.arpa" -> 192.168.1.13 (network byte order).
 static bool reverse_ip(const char *name, uint32_t *ip)
 {
     unsigned a, b, c, d;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // M5PM1 power chip on the StickS3 (pmic.c).

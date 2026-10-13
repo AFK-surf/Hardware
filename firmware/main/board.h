@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "sdkconfig.h"
 typedef enum { BOARD_PAIRING_OFF, BOARD_PAIRING_ADVERTISING,

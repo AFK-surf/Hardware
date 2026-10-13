@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 typedef struct transport *esp_transport_handle_t;
 enum {

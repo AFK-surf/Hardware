@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 // BSD sockets stand in for lwIP's. connect() goes through test.c, which sends every LAN address the
 // firmware dials to a local server chosen by the test (and records what was asked for).

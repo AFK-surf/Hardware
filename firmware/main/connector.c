@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "heap_diag.h"
 #include "firmware_config.h"
 #include "memory_caps.h"
@@ -46,7 +47,7 @@
 // gets an error so the caller does not wait out its timeout. PSRAM.
 #define RX_MAX CONFIG_COMMA_CONNECTOR_RX_MAX
 #define ID_MAX 64
-// The server heartbeats every 15 s. Like salix-connect, 45 s without any frame means the link is dead.
+// The server heartbeats every 15 s. Like the desktop Connector, 45 s without any frame means the link is dead.
 #define READ_TIMEOUT_US (45LL * 1000000)
 #define STATS_PERIOD_US (30LL * 1000000)
 #define BACKOFF_MIN_MS 1000
@@ -65,17 +66,17 @@
 #define LAN_WORKER_STACK 8192
 #define LAN_QUEUE_LEN 4
 
-// Chunked http_request replies (G1) go out from the LAN worker as they are read, never through the
-// event queue, so a body is never held whole. Like the voice sender (V1), a frame is written only
+// Chunked http_request replies go out from the LAN worker as they are read, never through the
+// event queue, so a body is never held whole. Like the voice sender, a frame is written only
 // when the Connector socket passes lwIP's select() writable test, which guarantees more than
 // TCP_SNDLOWAT (12 KB of the 24 KB send buffer) free. A frame of 8 KB raw is ~11 KB of JSON, so the
 // write neither waits in poll_write nor blocks in the socket while holding the client's TX lock, and
 // the websocket task's PING/PONG never times out on that lock behind it.
 #define CHUNK_GATED_BYTES CONFIG_COMMA_LAN_HTTP_CHUNK_FRAME_BYTES
-// No room for a frame for this long: give up with an error frame (V1's no-progress limit).
+// No room for a frame for this long: give up with an error frame (the voice sender's no-progress limit).
 #define CHUNK_STALL_LIMIT_MS 10000
 // No chunk transfers during a voice call, for now: on the board a transfer alongside a call froze
-// the whole Wi-Fi link (docs/reports/G1-report.md). A request that arrives during a call is refused
+// the whole Wi-Fi link. A request that arrives during a call is refused
 // before any network use; a call that starts mid-transfer ends the transfer with the same error.
 #define CALL_BUSY_MESSAGE "busy: voice call active"
 
@@ -219,7 +220,7 @@ static const char *current_scope(void)
     return s_allow_operations ? SCOPE_OPERATIONS : SCOPE_READ_ONLY;
 }
 
-// Read-only until the user allows operations in Settings, like salix-connect --device.
+// Read-only until the user allows operations in Settings, like the desktop Connector in device mode.
 static void load_access(void)
 {
     nvs_handle_t nvs;
@@ -430,7 +431,7 @@ static void send_metadata(void)
                      "\"capabilities\":{\"scope\":\"%s\",\"device_access\":true,\"execution_boundary\":\"lan-gateway\","
                      "\"persistent_processes\":false,\"computer_use_tool\":false,\"host_access_required\":false,"
                      "\"runtime_probe\":false,\"meeting_runtime\":false,"
-                     // Not part of salix-connect's set: tells the backend (C2) what this gateway does.
+                     // Not part of the desktop Connector's set: tells the backend what this gateway does.
                      "\"lan_gateway\":{\"methods\":[\"http_request\",\"udp_request\""
 #if CONFIG_COMMA_LAN_DISCOVER
                      ",\"lan_discover\""
@@ -540,7 +541,7 @@ static const char *lan_method_name(lan_method_t method)
     return method == LAN_DISCOVER ? "lan_discover" : method == LAN_UDP_REQUEST ? "udp_request" : "http_request";
 }
 
-// The read-only wording matches salix-connect, so the agent sees the same refusal.
+// The read-only wording matches the desktop Connector, so the agent sees the same refusal.
 static void send_read_only_refusal(const char *id, lan_method_t method)
 {
     char message[96];
@@ -705,7 +706,7 @@ static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_byte
     return true;
 }
 
-// ---- TCP tunnels (lan_tcp_dial, G3) -----------------------------------------------------------------
+// ---- TCP tunnels (lan_tcp_dial) ---------------------------------------------------------------------
 
 // Tunnel frames are at most LAN_TUNNEL_MAX_FRAME (8 KB) raw, so they pass the same writable gate as
 // chunks and never block holding the client's TX lock.
@@ -732,7 +733,7 @@ static lan_tunnel_verdict_t tunnel_check(void *arg, unsigned session, const char
         *reason = "method \"lan_tcp_dial\" is not permitted for a local_file_read connector";
         return LAN_TUNNEL_END;
     }
-    // Like chunk mode (G1): no LAN transfer alongside a call. Checked again on every pass of the
+    // Like chunk mode: no LAN transfer alongside a call. Checked again on every pass of the
     // tunnel loop, so a call that starts ends any open tunnel within ~20 ms.
     if (call_active()) {
         *reason = CALL_BUSY_MESSAGE;

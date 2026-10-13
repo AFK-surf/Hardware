@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include <stdlib.h>
 #define MALLOC_CAP_SPIRAM 0

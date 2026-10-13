@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "heap_diag.h"
 // Plain ESP32 DevKit: no audio/display. GPIO0 BOOT; optional active-high LED.
 #include "board.h"

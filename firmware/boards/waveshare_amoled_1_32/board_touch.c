@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Waveshare ESP32-S3-Touch-AMOLED-1.32: CST820 touch on the shared I2C bus, BOOT on GPIO0.
 // The screen is polled, as on the T-Circle's CST816D (same register layout: finger count at 0x02,
 // chip ID at 0xA7, I2C address 0x15). A failed read counts as no finger, so a controller that

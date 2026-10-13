@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "mic_path.h"
 
 #include <math.h>
@@ -102,7 +103,7 @@ int main(void)
         CHECK(out[i] == 1000);
     }
 
-    // mic_take_slot on its own (the 24 kHz path with V2 off).
+    // mic_take_slot on its own (the 24 kHz path with voice_clean off).
     const int16_t two[] = {1, -1, 2, -2, 3, -3};
     int16_t picked[3];
     CHECK(mic_take_slot(two, 3, 0, picked) == 3);

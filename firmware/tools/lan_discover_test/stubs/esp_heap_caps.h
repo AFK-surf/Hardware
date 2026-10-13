@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "../../lan_http_test/stubs/esp_heap_caps.h"
 #undef heap_caps_realloc

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Smallest working Comma Connector (A1 spike). stdlib + websockets only.
 
 Speaks the /v1/connect protocol the way salix-connect does in device mode,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // 24 kHz -> 16 kHz (3:2) for a board whose codec runs mic and speaker on one 24 kHz clock while the

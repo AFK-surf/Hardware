@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 // The device's Wi-Fi and Comma credentials. The Comma app writes them over BLE
@@ -15,7 +16,7 @@
 typedef struct {
     char wifi_ssid[33];
     char wifi_password[65];
-    char server[128];            // https://salix-staging.cue.surf (voice)
+    char server[128];            // voice server, e.g. https://salix.comma.surf
     char connect_url[160];       // wss://<salix host>/v1/connect (Connector), as minted
     char workspace_id[96];
     char group_id[96];

@@ -1,7 +1,9 @@
-# Comma Connector protocol: the subset T-Circle implements
+# Comma Connector protocol: the subset this firmware implements
 
-2026-10-05 · verified by `tools/mini_connector.py` against a local Salix (A1). Evidence and reasoning are in `reports/A1-report.md`.
-Line numbers refer to Cue `main` at `d52347f1e`, under `systems/`.
+The Connector is the device's outbound WebSocket to the Comma backend (Salix). Through it, the
+backend asks the device to make HTTP, UDP and TCP requests on the home network. This document
+describes what the firmware sends and accepts. Limits are given for the T-Circle-S3, the reference
+board; other boards advertise their own limits in `metadata` (§6).
 
 ## 1. Credential
 
@@ -9,20 +11,20 @@ A connector token (`salix_conn_…`) is minted per device:
 
 ```
 POST /v1/comma/workspaces/:ws/connector-token      (user session, full workspace session)
-{"name": "Comma-5D28"}      (the Android app: the device_name it then writes over BLE)
+{"name": "Comma-1A2B"}      (the Android app: the device_name it then writes over BLE)
 → 201 {"token": "salix_conn_…", "device_id": "dev_…", "connector_id": "conn_…",
         "connect_url": "wss://<salix-host>/v1/connect", "server": "wss://<salix-host>",
         "credential_generation": 1, "expires_at": null, …}
 ```
 
-- Store `token` and `connect_url` in NVS. **Use `connect_url` as given.** It is the Salix host, not the Comma API host (locally `ws://127.0.0.1:4000`, not `:4200`).
+- Store `token` and `connect_url` in NVS. **Use `connect_url` as given**; do not derive it from the app's API host, which can differ (in production it is `wss://salix.comma.surf/v1/connect`).
 - `expires_at: null` means it never expires. Revocation shows up as HTTP 401/403 on the next dial (or as the socket closing).
 - The token fixes `device_id`, so every reconnect lands on the same device record.
 
 ## 2. Dial
 
 ```
-GET {connect_url}?name=Comma-5D28&alias=comma-5d28&os=esp-idf&arch=xtensa&scope=<scope>
+GET {connect_url}?name=Comma-1A2B&alias=comma-1a2b&os=esp-idf&arch=xtensa&scope=<scope>
 Authorization: Bearer salix_conn_…
 X-Salix-Connector-Instance-ID: <random UUID per boot>
 (normal WebSocket upgrade, no permessage-deflate)
@@ -47,8 +49,8 @@ One JSON object per WebSocket **text** frame. The server ignores binary frames, 
 ### Server → device
 
 ```json
-{"type":"connected","connector_run_id":"run_voWRnWbVJmOE1kJJ","device_id":"dev_Pc8wBuEUfP5LT55XBx3qBw",
- "connector_id":"conn_ZnWGBt3zzh8-ZSiYBjW5lQ","owner_user_id":"usr_HT4lByGvItZN","connection_generation":12}
+{"type":"connected","connector_run_id":"run_Example1","device_id":"dev_Example1",
+ "connector_id":"conn_Example1","owner_user_id":"usr_Example1","connection_generation":12}
 ```
 Sent once, right after the upgrade. Logging it is enough; no reply is needed.
 
@@ -58,15 +60,15 @@ Sent once, right after the upgrade. Logging it is enough; no reply is needed.
 Sent every 15 s. **Reply with `{"type":"heartbeat"}` every time.**
 
 ```json
-{"id":"req_7GSGEDzFTz13NEO9","type":"request","method":"http_request",
- "params":{"method":"POST","url":"http://192.168.5.19:8765/mcp",
+{"id":"req_Example1","type":"request","method":"http_request",
+ "params":{"method":"POST","url":"http://192.168.1.19:8765/mcp",
            "headers":{"accept":"application/json, text/event-stream","content-type":"application/json"},
            "body":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
            "timeout_seconds":115,"max_bytes":10485760}}
 ```
 
 ```json
-{"id":"req_LB4ksvfUcC8ykGEY","type":"request","method":"device_access","params":{"allow_operations":true}}
+{"id":"req_Example2","type":"request","method":"device_access","params":{"allow_operations":true}}
 ```
 
 The server may send **any** method name. Capabilities don't declare methods, so every request needs an answer (§4).
@@ -81,7 +83,7 @@ The server may send **any** method name. Capabilities don't declare methods, so 
                  "runtime_probe":false,"meeting_runtime":false,
                  "component_versions":{"t-circle":"0.1.0"}},
  "skills":[],
- "system_info":{"client_source":"t-circle","hostname":"Comma-5D28","os_type":"esp-idf","arch":"xtensa",
+ "system_info":{"client_source":"t-circle","hostname":"Comma-1A2B","os_type":"esp-idf","arch":"xtensa",
                 "collected_at":1791187838}}
 ```
 - `capabilities.scope` must match the current access state (`""` or `"local_file_read"`).
@@ -93,19 +95,19 @@ The server may send **any** method name. Capabilities don't declare methods, so 
 
 **response**: echo `id` exactly.
 ```json
-{"id":"req_7GSGEDzFTz13NEO9","type":"response",
+{"id":"req_Example1","type":"response",
  "result":{"status":200,"headers":{"Content-Type":["application/json"]},"body":"{…}",
-           "truncated":false,"final_url":"http://192.168.5.19:8765/mcp","method":"POST","body_bytes":118}}
+           "truncated":false,"final_url":"http://192.168.1.19:8765/mcp","method":"POST","body_bytes":118}}
 ```
 
-**response_chunk** (G1): one piece of a binary `http_request` body, only for a request that asked for `"response_mode":"chunks"`. Echo `id`; `seq` counts from 0 per request. See §4.
+**response_chunk**: one piece of a binary `http_request` body, only for a request that asked for `"response_mode":"chunks"`. Echo `id`; `seq` counts from 0 per request. See §4.
 ```json
-{"id":"req_7GSGEDzFTz13NEO9","type":"response_chunk","seq":0,"data_b64":"/9j/4AAQSkZJRgABAQ…"}
+{"id":"req_Example1","type":"response_chunk","seq":0,"data_b64":"/9j/4AAQSkZJRgABAQ…"}
 ```
 
 **error**: echo `id`. The `error` string reaches the agent verbatim.
 ```json
-{"id":"req_eR4BgPf5e2AK4xTo","type":"error","error":"method \"http_request\" is not permitted for a local_file_read connector"}
+{"id":"req_Example3","type":"error","error":"method \"http_request\" is not permitted for a local_file_read connector"}
 ```
 
 ## 4. Methods
@@ -120,9 +122,9 @@ Params: `method` (GET/POST/PUT/PATCH/DELETE; default **POST**), `url` (absolute 
 - Errors (bad URL, unsupported method, connect failure, timeout): send an `error` frame with a short message.
 - **Gate:** while access is read-only, reply `error` without touching the network (§5).
 
-#### Chunk mode: binary bodies (G1)
+#### Chunk mode: binary bodies
 
-For bodies that are binary or bigger than the text cap, e.g. a camera snapshot (~800 KB JPEG). Shared with the backend task G2.
+For bodies that are binary or bigger than the text cap, e.g. a camera snapshot (~800 KB JPEG).
 
 **Capability.** The gateway advertises it in `metadata`; the server uses chunk mode only on gateways that do:
 ```json
@@ -148,7 +150,7 @@ For bodies that are binary or bigger than the text cap, e.g. a camera snapshot (
 
 Same gates as text mode: access (read-only → `error`, no network), LAN destinations only, no redirects. **While a voice call is active, T-Circle refuses chunk mode** with `error` `busy: voice call active` without touching the network, and a call that starts mid-transfer ends the transfer with that `error`; text mode is unaffected. `timeout_seconds` is capped at 110 s in chunk mode (30 s in text mode) and covers the whole transfer.
 
-### `lan_discover` (A5, H2)
+### `lan_discover`
 
 Find IPv4 hosts on the board's own network with ARP, mDNS/DNS-SD, SSDP and Yeelight's search.
 The Connector's existing read-only gate refuses this method before network work, with or without
@@ -156,7 +158,7 @@ probes; it is checked again when the queued job starts.
 
 **Params:** missing/null params use defaults. `sources` is a nonempty array containing only
 `"arp"`, `"mdns"`, `"ssdp"`; missing/null means all three. `timeout_ms` defaults to 3000 and is
-clamped to 1000..8000. H2 adds optional, caller-built UDP datagrams:
+clamped to 1000..8000. Optional, caller-built UDP datagrams can be added:
 
 ```json
 {"sources":["arp","mdns","ssdp"],"timeout_ms":5000,
@@ -164,7 +166,7 @@ clamped to 1000..8000. H2 adds optional, caller-built UDP datagrams:
                {"id":"miio","port":54321,"payload_b64":"ITEAIP////////////////////////////////////8="}]}
 ```
 
-- Missing/null `udp_probes` sends no probes and preserves the pre-H2 result bytes within the
+- Missing/null `udp_probes` sends no probes and preserves the result bytes of firmware without probes within the
   current board caps below.
 - Otherwise, it must be an array of 1..`max_probes` objects, and `sources` must include ARP.
 - Each `id` is 1..16 characters of `[a-z0-9_]`, unique within the request. Each `port` is an integer
@@ -176,7 +178,7 @@ clamped to 1000..8000. H2 adds optional, caller-built UDP datagrams:
 
 **Probe capability:** `capabilities.lan_gateway.discover_probes` advertises the board's actual limits.
 It is omitted when discovery is disabled or the probe count is zero. The backend must check it
-before sending `udp_probes`; pre-H2 firmware silently ignores that parameter.
+before sending `udp_probes`; older firmware silently ignores that parameter.
 
 ```json
 "discover_probes":{"max_probes":8,"max_payload_bytes":512,"max_answer_bytes":1024,"max_total_answer_bytes":16384}
@@ -204,8 +206,7 @@ First sends take priority. Unanswered pairs get one retry at least 500 ms after 
 successful send, if it fits before the listen-only tail (the final `min(timeout_ms / 4, 400)` ms).
 At most four send attempts occur per 25 ms; no catch-up burst is accumulated. A failed `sendto` is
 not final: the pair is tried again no sooner than 50 ms later, after untried pairs, for as long as
-the send window lasts. Silence after two successful sends is not truncation. See
-[H2](reports/H2-report.md) for timing and pending hardware tests.
+the send window lasts. Silence after two successful sends is not truncation.
 
 **Result:** hosts are sorted by IP; at most 64 hosts. Per-host service and SSDP caps are configured by
 `COMMA_LAN_DISCOVER_MAX_SERVICES` and `COMMA_LAN_DISCOVER_MAX_SSDP`: 16/16 on T-Circle, 6/6 on DevKit.
@@ -225,7 +226,7 @@ datagrams are valid and encode as `""`. An oversized answer is cut to `max_answe
 `cut`; base64 is exempt from the 255-byte text limit.
 
 Stored decoded answers share `max_total_answer_bytes`. An answer that would exceed it is dropped
-whole; a later duplicate cannot replace it. The two flags mean different things (H2b):
+whole; a later duplicate cannot replace it. The two flags mean different things:
 
 - `truncated:true` — something of the host list was dropped: a host (64-host cap, ARP sweep not
   covering a large subnet), a service, an SSDP entry, a TXT key or part of a string, or a host rolled
@@ -238,23 +239,23 @@ whole; a later duplicate cannot replace it. The two flags mean different things 
 A host rolled back at the result cap, or dropped at the host cap, sets both. `probes_truncated` is
 omitted when false or when probes were not requested. The whole result stays within 48 KiB on
 T-Circle / 12 KiB on DevKit: a host that does not fit is rolled back whole, including its probe
-answers; remaining hosts are omitted and both flags are set. Backend Cue `f0a91d861` discards cut/over-limit answers and interprets the remaining bytes.
+answers; remaining hosts are omitted and both flags are set. The backend discards cut answers and interprets the remaining bytes.
 
-### `lan_tcp_dial` (G3)
+### `lan_tcp_dial`
 
-A raw TCP tunnel from the gateway to a LAN host, the same protocol as salix-connect (`systems/connector/salix-connect/lan_tunnel.go`) and station (`systems/station/src/connector/lan-tunnel.ts`). The backend uses it for SSH through a gateway, and G3 for RTSP to the camera. Advertised as `"lan_tcp_dial"` in `capabilities.lan_gateway.methods`.
+A raw TCP tunnel from the gateway to a LAN host, the same protocol as the backend's other Connector clients. The backend uses it, for example, for SSH through a gateway or RTSP to a camera. Advertised as `"lan_tcp_dial"` in `capabilities.lan_gateway.methods`.
 
 **Request:**
 ```json
-{"id":"tun_…","type":"request","method":"lan_tcp_dial","params":{"host":"192.168.5.33","port":554,"timeout_seconds":15}}
+{"id":"tun_…","type":"request","method":"lan_tcp_dial","params":{"host":"192.168.1.33","port":554,"timeout_seconds":15}}
 ```
 - `host` (required): dotted quad or a name (resolved once, IPv4). `port` (required): 1–65535. `timeout_seconds`: dial timeout; missing, ≤ 0 or > 15 means 15. The server waits 20 s for the answer.
 
 **Answer**, once the TCP connection is up:
 ```json
-{"id":"tun_…","type":"response","result":{"status":"connected","remote_address":"192.168.5.33:554","window":131072,"max_frame":8192}}
+{"id":"tun_…","type":"response","result":{"status":"connected","remote_address":"192.168.1.33:554","window":131072,"max_frame":8192}}
 ```
-Or an `error` frame: `connect to 192.168.5.33:8800 refused: nothing is listening on that port`, `connect to … timed out after 15 s`, `tunnel capacity exhausted`, `tunnel already exists`, `'host' is required`, `'port' must be between 1 and 65535`, a LAN-destination refusal, the read-only refusal, or `busy: voice call active`.
+Or an `error` frame: `connect to 192.168.1.33:8800 refused: nothing is listening on that port`, `connect to … timed out after 15 s`, `tunnel capacity exhausted`, `tunnel already exists`, `'host' is required`, `'port' must be between 1 and 65535`, a LAN-destination refusal, the read-only refusal, or `busy: voice call active`.
 
 **Then `stream` frames under the same `id`, both ways:**
 ```json
@@ -263,10 +264,10 @@ Or an `error` frame: `connect to 192.168.5.33:8800 refused: nothing is listening
 {"id":"tun_…","type":"stream","error":"…","stream":{"channel":"tcp","eof":true}}
 {"id":"tun_…","type":"stream","stream":{"channel":"tcp_ack","seq":<n>}}
 ```
-- `data`: standard base64 with padding. The device sends at most `max_frame` (8 KiB) raw per frame. **The server sends up to 32 KiB per frame regardless of `max_frame`** (DeviceRelay's own `@max_frame`); the device accepts that.
+- `data`: standard base64 with padding. The device sends at most `max_frame` (8 KiB) raw per frame. **The server sends up to 32 KiB per frame regardless of `max_frame`**; the device accepts that.
 - `tcp_ack`: "I have written `seq` bytes in total", sent by whichever side receives data, after it writes it.
 - Each sender keeps at most `window` bytes unacknowledged. The server reads `window` from the answer (if ≥ 32 KiB, else it assumes 512 KiB). The device ends the tunnel with `tunnel window exceeded` if the server overruns it, or `invalid tunnel frame` for bad base64 or a frame over 32 KiB.
-- `eof` from the device: the LAN host closed (no `error`), or a failure (`error`: `192.168.5.33:554 reset the connection`, `tunnel idle for 300 s`, the read-only refusal, `busy: voice call active`). After an `eof` from the server the device writes what it still holds (≤ 2 s), closes the LAN socket and sends nothing more.
+- `eof` from the device: the LAN host closed (no `error`), or a failure (`error`: `192.168.1.33:554 reset the connection`, `tunnel idle for 300 s`, the read-only refusal, `busy: voice call active`). After an `eof` from the server the device writes what it still holds (≤ 2 s), closes the LAN socket and sends nothing more.
 
 **Gates:** access (read-only → `error`, no network; turned read-only mid-tunnel → `eof` with the refusal), LAN destinations only (same rule as `http_request`), at most 2 tunnels. **Refused during a voice call** (`busy: voice call active`), and a call that starts ends every open tunnel with `eof` + that error. A tunnel with no data either way for 300 s (5 min) ends. A Connector socket that closes ends its tunnels silently.
 
@@ -281,31 +282,30 @@ Reply with `error` `unknown method: <name>`. The server hands that string to the
 
 ## 5. Access state
 
-- On first boot, or when nothing is stored, the device is **read-only** (`local_file_read`), like salix-connect `--device`.
+- On first boot, or when nothing is stored, the device is **read-only** (`local_file_read`), like the desktop Connector in device mode.
 - Always send the current state as the dial `scope` and as `metadata.capabilities.scope`. Once a device has reported a scope, a later connection that reports none is shown with **no command environment** at all; the server treats the old scope as stale (verified).
 - The server does **not** enforce access on the device-placed MCP path. Settings toggles the device's own state, and only the device's check stops `http_request` (verified: with access off, the call reached the device and was refused there). **The firmware gate is the real gate.**
 
 ## 6. Liveness, timeouts, limits
 
-Limits below describe T-Circle unless a board is named. Firmware now loads per-board limits from
+Limits below describe T-Circle unless a board is named. Firmware loads per-board limits from
 `devices/sdkconfig.<board>`; consumers must read the actual `metadata` and tunnel dial response.
 DevKit's hardware-tuned profile is: text 8 KiB, HTTP chunks 4 KiB (total cap still 4 MiB), RX JSON
 16 KiB, discovery arena 16 KiB / result JSON 12 KiB, UDP answers 2 KiB, a 2 KiB WebSocket buffer,
 and no TCP tunnels. `lan_tcp_dial` cannot be supported on DevKit until the backend honors the
 device's `max_frame` and the smaller-frame path passes hardware tests.
 `client_source` and `component_versions` use `esp32-devkit`; T-Circle keeps `t-circle`. Disabled
-methods disappear from `lan_gateway.methods`. See [H1](reports/H1-report.md) before relying on DevKit
-capacity. H1 local-WSS discovery/text/chunk runs passed 3/3 with the 12 KiB discovery cap;
-H2 received an uncut 399-byte Gree reply on DevKit. BLE-up discovery hit OOM at the old 16/16
-per-host caps; the 6/6 reduction awaits a board retest. Remaining probe heap/voice/device checks
-are tracked in [H2](reports/H2-report.md).
+methods disappear from `lan_gateway.methods`. On the DevKit, discovery, 8 KiB text and 1 MiB
+chunk transfers passed three runs each over local WSS with the 12 KiB discovery cap, and a 399-byte
+Gree reply arrived uncut. Discovery while BLE was still up ran out of memory at 16/16 per-host caps;
+the 6/6 caps have not yet been retested in that state.
 
 
 | Item | Value |
 |---|---|
 | Server heartbeat interval | 15 s |
 | Server drops the socket when | ≥45 s since the last **device** `heartbeat` frame. Checked on each 15 s tick; closes with code 1011. Other frames don't count. |
-| Device read timeout (salix-connect) | 45 s without any frame → treat as dead, reconnect |
+| Device read timeout (desktop Connector) | 45 s without any frame → treat as dead, reconnect |
 | Server wait on `http_request` | 120 s (or `timeout_seconds`+5 s, capped at 120 s) |
 | Server wait on `device_access` / other methods | 30 s |
 | Late reply (after the server timed out) | Silently dropped |
@@ -313,9 +313,9 @@ are tracked in [H2](reports/H2-report.md).
 | Max frame | 16 MiB server side. T-Circle: cap `http_request` bodies at e.g. 32 KiB and report `truncated` (the MCP path asks for `max_bytes` = 10 MiB) |
 | T-Circle `http_request` caps | Text mode: 64 KiB body, 30 s. Chunk mode: 4 MiB in all, 110 s for the whole transfer |
 | T-Circle chunk frames | 8 KiB raw (~11 KB of JSON), so each frame fits the free send buffer lwIP's `select()` guarantees and never blocks holding the TX lock. 32 KiB when the Connector socket couldn't be identified |
-| Chunk mode during a voice call | Refused: `error` `busy: voice call active`, before any network use. A call that starts mid-transfer ends it with the same `error`. Retry after the call (G1 report: a transfer alongside a call froze the board's Wi-Fi) |
+| Chunk mode during a voice call | Refused: `error` `busy: voice call active`, before any network use. A call that starts mid-transfer ends it with the same `error`. Retry after the call (on the board, a transfer alongside a call froze its Wi-Fi) |
 | Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |
-| Server wait on `lan_tcp_dial` | 20 s for the answer (`SalixEnv.Protocol`) |
+| Server wait on `lan_tcp_dial` | 20 s for the answer |
 | T-Circle `lan_tcp_dial` | 2 tunnels; `window` 128 KiB, `max_frame` 8 KiB toward the server; accepts 32 KiB frames from it; dial ≤ 15 s; 300 s idle; LAN socket receive window cut to 16 KiB |
 
 ## 7. Reconnect

@@ -1,4 +1,5 @@
-// The LAN destination rule shared by http_request and udp_request (moved out of lan_http.c for A4).
+// SPDX-License-Identifier: Apache-2.0
+// The LAN destination rule shared by http_request and udp_request.
 
 #include "lan_dest.h"
 

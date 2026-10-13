@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Raw HTTP server for lan_http_test: one scenario per path. Prints its port, then serves."""
 import json
 import socket
@@ -46,7 +47,7 @@ def handle(conn):
     elif path == "/exact":
         send(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789")
     elif path == "/redirect":
-        send(b"HTTP/1.1 302 Found\r\nLocation: http://192.168.5.50/elsewhere\r\nContent-Length: 0\r\n\r\n")
+        send(b"HTTP/1.1 302 Found\r\nLocation: http://192.168.1.50/elsewhere\r\nContent-Length: 0\r\n\r\n")
     elif path == "/dup":
         send(b"HTTP/1.1 200 OK\r\nset-cookie: a=1\r\nSET-COOKIE: b=2\r\nx-thing: y\r\nContent-Length: 0\r\n\r\n")
     elif path == "/binary":

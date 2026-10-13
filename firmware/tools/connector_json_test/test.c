@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "connector_json.h"
 #include "esp_heap_caps.h"
 #include <pthread.h>

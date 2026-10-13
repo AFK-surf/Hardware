@@ -1,4 +1,5 @@
-// Host test for main/lan_tunnel.c (lan_tcp_dial, G3): builds it on the Mac with BSD sockets and a
+// SPDX-License-Identifier: Apache-2.0
+// Host test for main/lan_tunnel.c (lan_tcp_dial): builds it on the Mac with BSD sockets and a
 // pthread stand-in for FreeRTOS (stubs/), so the tunnel task really runs on its own thread while
 // this one plays the Connector task and the server. Every LAN address the firmware dials goes to a
 // local server picked per test (test_connect); frames to the server are captured and checked.
@@ -151,7 +152,7 @@ static int64_t now_ms(void)
 
 // ---- The network ---------------------------------------------------------------------------------
 
-#define SELF "192.168.5.17"
+#define SELF "192.168.1.17"
 
 bool wifi_ip_info(uint32_t *ip, uint32_t *netmask)
 {
@@ -624,18 +625,18 @@ static void test_connect_answer_and_echo(server_t *echo)
 {
     route(echo);
     cJSON *a = NULL;
-    CHECK(open_tunnel("tun_1", "{\"host\":\"192.168.5.33\",\"port\":554,\"timeout_seconds\":15}", &a), "no answer");
-    CHECK(strcmp(g_dialed, "192.168.5.33:554") == 0, "dialed %s", g_dialed);
+    CHECK(open_tunnel("tun_1", "{\"host\":\"192.168.1.33\",\"port\":554,\"timeout_seconds\":15}", &a), "no answer");
+    CHECK(strcmp(g_dialed, "192.168.1.33:554") == 0, "dialed %s", g_dialed);
     const cJSON *r = obj(a, "result");
     CHECK(count_keys(a) == 3 && count_keys(r) == 4, "answer shape");
     CHECK(str(r, "status") && strcmp(str(r, "status"), "connected") == 0, "status");
-    CHECK(str(r, "remote_address") && strcmp(str(r, "remote_address"), "192.168.5.33:554") == 0, "remote_address %s",
+    CHECK(str(r, "remote_address") && strcmp(str(r, "remote_address"), "192.168.1.33:554") == 0, "remote_address %s",
           str(r, "remote_address"));
     CHECK(obj(r, "window")->valuedouble == LAN_TUNNEL_WINDOW, "window");
     CHECK(obj(r, "max_frame")->valuedouble == LAN_TUNNEL_MAX_FRAME, "max_frame");
     cJSON_Delete(a);
 
-    const char *req = "OPTIONS rtsp://192.168.5.33:554/stream1 RTSP/1.0\r\nCSeq: 1\r\n\r\n";
+    const char *req = "OPTIONS rtsp://192.168.1.33:554/stream1 RTSP/1.0\r\nCSeq: 1\r\n\r\n";
     server_data("tun_1", (const unsigned char *)req, strlen(req));
     unsigned char back[256];
     long long device_ack = 0;
@@ -665,7 +666,7 @@ static void test_connect_answer_and_echo(server_t *echo)
 static void test_megabyte_echo(server_t *echo)
 {
     route(echo);
-    CHECK(open_tunnel("tun_mb", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+    CHECK(open_tunnel("tun_mb", "{\"host\":\"192.168.1.33\",\"port\":7}", NULL), "no answer");
     const size_t total = 1024 * 1024;
     unsigned char *src = pattern(total, 1);
     unsigned char *back = malloc(total);
@@ -729,7 +730,7 @@ static void test_window(void)
     src->source = pattern(total, 2);
     src->source_len = total;
     route(src);
-    CHECK(open_tunnel("tun_win", "{\"host\":\"192.168.5.40\",\"port\":8554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_win", "{\"host\":\"192.168.1.40\",\"port\":8554}", NULL), "no answer");
     unsigned char *buf = malloc(total);
     size_t got = collect("tun_win", buf, total, false, 400, NULL, NULL, NULL);
     CHECK(got == LAN_TUNNEL_WINDOW, "without acks the device sent %zu B, window %d", got, LAN_TUNNEL_WINDOW);
@@ -792,19 +793,19 @@ static void test_dial_errors(server_t *echo)
     int s = listen_on(&port, 1);
     close(s);
     g_route_port = port;
-    dial("tun_refused", "{\"host\":\"192.168.5.33\",\"port\":8800}");
-    expect_error("refused", "tun_refused", "connect to 192.168.5.33:8800 refused", 3000);
+    dial("tun_refused", "{\"host\":\"192.168.1.33\",\"port\":8800}");
+    expect_error("refused", "tun_refused", "connect to 192.168.1.33:8800 refused", 3000);
 
     // Timeout: the SYN is never answered.
     g_route_blackhole = true;
     const int64_t t0 = now_ms();
-    dial("tun_slow", "{\"host\":\"192.168.5.33\",\"port\":554,\"timeout_seconds\":1}");
-    expect_error("timeout", "tun_slow", "connect to 192.168.5.33:554 timed out after 1 s", 4000);
+    dial("tun_slow", "{\"host\":\"192.168.1.33\",\"port\":554,\"timeout_seconds\":1}");
+    expect_error("timeout", "tun_slow", "connect to 192.168.1.33:554 timed out after 1 s", 4000);
     const int64_t took = now_ms() - t0;
     CHECK(took >= 950 && took < 1500, "timeout took %lld ms", (long long)took);
     // timeout_seconds over the cap (or missing) means 15 s: check the message only via a short
     // server eof while dialing instead of waiting 15 s.
-    dial("tun_slow2", "{\"host\":\"192.168.5.33\",\"port\":554,\"timeout_seconds\":600}");
+    dial("tun_slow2", "{\"host\":\"192.168.1.33\",\"port\":554,\"timeout_seconds\":600}");
     usleep(100000);
     server_eof("tun_slow2");
     expect_error("eof while dialing", "tun_slow2", "tunnel closed before the connection opened", 2000);
@@ -820,19 +821,19 @@ static void test_dial_errors(server_t *echo)
     expect_error("loopback", "tun_lo", "loopback", 2000);
     dial("tun_self", "{\"host\":\"" SELF "\",\"port\":22}");
     expect_error("self", "tun_self", "the T-Circle itself", 2000);
-    dial("tun_bcast", "{\"host\":\"192.168.5.255\",\"port\":22}");
+    dial("tun_bcast", "{\"host\":\"192.168.1.255\",\"port\":22}");
     expect_error("broadcast", "tun_bcast", "broadcast", 2000);
     dial("tun_nohost", "{\"port\":22}");
     expect_error("no host", "tun_nohost", "'host' is required", 2000);
     dial("tun_noparams", NULL);
     expect_error("no params", "tun_noparams", "'host' is required", 2000);
-    dial("tun_port0", "{\"host\":\"192.168.5.33\",\"port\":0}");
+    dial("tun_port0", "{\"host\":\"192.168.1.33\",\"port\":0}");
     expect_error("port 0", "tun_port0", "'port' must be between 1 and 65535", 2000);
-    dial("tun_portbig", "{\"host\":\"192.168.5.33\",\"port\":70000}");
+    dial("tun_portbig", "{\"host\":\"192.168.1.33\",\"port\":70000}");
     expect_error("port 70000", "tun_portbig", "'port' must be", 2000);
-    dial("tun_portstr", "{\"host\":\"192.168.5.33\",\"port\":\"554\"}");
+    dial("tun_portstr", "{\"host\":\"192.168.1.33\",\"port\":\"554\"}");
     expect_error("port string", "tun_portstr", "'port' must be", 2000);
-    dial("tun_portfrac", "{\"host\":\"192.168.5.33\",\"port\":55.5}");
+    dial("tun_portfrac", "{\"host\":\"192.168.1.33\",\"port\":55.5}");
     expect_error("port 55.5", "tun_portfrac", "'port' must be", 2000);
     CHECK(g_connects == connects, "%d connect(s) for refused destinations", g_connects - connects);
 }
@@ -842,17 +843,17 @@ static void test_gates(server_t *echo)
     route(echo);
     int connects = g_connects;
     g_call = true;
-    dial("tun_call", "{\"host\":\"192.168.5.33\",\"port\":554}");
+    dial("tun_call", "{\"host\":\"192.168.1.33\",\"port\":554}");
     expect_error("call at dial", "tun_call", "busy: voice call active", 2000);
     g_call = false;
     g_read_only = true;
-    dial("tun_ro", "{\"host\":\"192.168.5.33\",\"port\":554}");
+    dial("tun_ro", "{\"host\":\"192.168.1.33\",\"port\":554}");
     expect_error("read-only at dial", "tun_ro", "not permitted for a local_file_read connector", 2000);
     g_read_only = false;
     CHECK(g_connects == connects, "connect while refused");
 
     // A call that starts while a tunnel is open ends it with the same error, and closes the socket.
-    CHECK(open_tunnel("tun_c2", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_c2", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     int closed = echo->closed;
     const int64_t t0 = now_ms();
     g_call = true;
@@ -861,13 +862,13 @@ static void test_gates(server_t *echo)
     CHECK(wait_until(&echo->closed, closed + 1, 1000), "LAN socket left open during the call");
     g_call = false;
 
-    CHECK(open_tunnel("tun_r2", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_r2", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     g_read_only = true;
     expect_eof_error("read-only mid-tunnel", "tun_r2", "not permitted", 1000);
     g_read_only = false;
 
     // The Connector socket went away: the tunnel closes without a word (nothing could carry it).
-    CHECK(open_tunnel("tun_s", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_s", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     closed = echo->closed;
     g_session = SESSION + 1;
     CHECK(wait_until(&echo->closed, closed + 1, 1000), "LAN socket left open after the Connector socket closed");
@@ -882,11 +883,11 @@ static void test_gates(server_t *echo)
 static void test_capacity(server_t *echo)
 {
     route(echo);
-    CHECK(open_tunnel("tun_a", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "a");
-    CHECK(open_tunnel("tun_b", "{\"host\":\"192.168.5.34\",\"port\":554}", NULL), "b");
-    dial("tun_c", "{\"host\":\"192.168.5.35\",\"port\":554}");
+    CHECK(open_tunnel("tun_a", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "a");
+    CHECK(open_tunnel("tun_b", "{\"host\":\"192.168.1.34\",\"port\":554}", NULL), "b");
+    dial("tun_c", "{\"host\":\"192.168.1.35\",\"port\":554}");
     expect_error("third tunnel", "tun_c", "tunnel capacity exhausted", 2000);
-    dial("tun_a", "{\"host\":\"192.168.5.33\",\"port\":554}");
+    dial("tun_a", "{\"host\":\"192.168.1.33\",\"port\":554}");
     expect_error("same id", "tun_a", "tunnel already exists", 2000);
     // The same id on a different socket is another tunnel, but capacity still counts.
     server_eof("tun_a");
@@ -907,18 +908,18 @@ static void test_capacity(server_t *echo)
 static void test_bad_frames(server_t *echo)
 {
     route(echo);
-    CHECK(open_tunnel("tun_bad", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_bad", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     server_frame("{\"id\":\"tun_bad\",\"type\":\"stream\",\"stream\":{\"channel\":\"tcp\",\"data\":\"not base64!\"}}");
     expect_eof_error("bad base64", "tun_bad", "invalid tunnel frame", 1000);
 
-    CHECK(open_tunnel("tun_big", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_big", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     unsigned char *big = pattern(LAN_TUNNEL_SERVER_FRAME_MAX + 3, 3);
     server_data("tun_big", big, LAN_TUNNEL_SERVER_FRAME_MAX + 3);
     expect_eof_error("frame over 32 KB", "tun_big", "invalid tunnel frame", 1000);
     free(big);
 
     // Exactly 32 KB is fine (the server's own frame size).
-    CHECK(open_tunnel("tun_32k", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_32k", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     unsigned char *ok = pattern(LAN_TUNNEL_SERVER_FRAME_MAX, 4);
     server_data("tun_32k", ok, LAN_TUNNEL_SERVER_FRAME_MAX);
     unsigned char *back = malloc(LAN_TUNNEL_SERVER_FRAME_MAX);
@@ -937,7 +938,7 @@ static void test_window_exceeded(void)
     server_t *stall = server(SRV_STALL);
     route(stall);
     g_route_sndbuf = 4096;
-    CHECK(open_tunnel("tun_full", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_full", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     g_route_sndbuf = 0;
     unsigned char *chunk = pattern(32768, 5);
     // A server that ignores the window: 5 x 32 KB with no ack back.
@@ -955,7 +956,7 @@ static void test_lan_reset(void)
 {
     server_t *rst = server(SRV_RESET);
     route(rst);
-    CHECK(open_tunnel("tun_rst", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_rst", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     server_data("tun_rst", (const unsigned char *)"hello", 5);
     expect_eof_error("LAN reset", "tun_rst", "reset the connection", 2000);
     CHECK(wait_no_tunnels(1000), "tunnel left");
@@ -964,7 +965,7 @@ static void test_lan_reset(void)
 static void test_idle(server_t *echo)
 {
     route(echo);
-    CHECK(open_tunnel("tun_idle", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_idle", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     const int64_t t0 = now_ms();
     char want[32];
     snprintf(want, sizeof(want), "tunnel idle for %d s", LAN_TUNNEL_IDLE_S);
@@ -978,7 +979,7 @@ static void test_idle(server_t *echo)
 static void test_drain_on_eof(server_t *echo)
 {
     route(echo);
-    CHECK(open_tunnel("tun_drain", "{\"host\":\"192.168.5.33\",\"port\":554}", NULL), "no answer");
+    CHECK(open_tunnel("tun_drain", "{\"host\":\"192.168.1.33\",\"port\":554}", NULL), "no answer");
     const long before = echo->received;
     const int closed = echo->closed;
     unsigned char *p = pattern(100000, 6);
@@ -1019,8 +1020,8 @@ static void test_out_of_memory(server_t *echo)
     // A decode allocation, command allocation, and command queue send can each fail.
     for (int failure = 0; failure < 4; ++failure) {
         route(echo);
-        CHECK(open_tunnel("tun_oom", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
-        CHECK(open_tunnel("tun_survivor", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+        CHECK(open_tunnel("tun_oom", "{\"host\":\"192.168.1.33\",\"port\":7}", NULL), "no answer");
+        CHECK(open_tunnel("tun_survivor", "{\"host\":\"192.168.1.33\",\"port\":7}", NULL), "no answer");
         const size_t n = 32768;
         unsigned char *data = pattern(n, 42);
         if (failure == 3 && pause_consumer()) {
@@ -1058,8 +1059,8 @@ static void *post_another_failure(void *arg)
 static void test_failure_backlog(server_t *echo)
 {
     route(echo);
-    CHECK(open_tunnel("tun_backlog", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
-    CHECK(open_tunnel("tun_survivor", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+    CHECK(open_tunnel("tun_backlog", "{\"host\":\"192.168.1.33\",\"port\":7}", NULL), "no answer");
+    CHECK(open_tunnel("tun_survivor", "{\"host\":\"192.168.1.33\",\"port\":7}", NULL), "no answer");
     if (!pause_consumer()) return;
     command_failed("tun_backlog", g_session);
     command_failed("unknown_before_full", g_session);
@@ -1090,8 +1091,8 @@ static void test_failure_backlog(server_t *echo)
 static void test_failure_identity(server_t *echo)
 {
     route(echo);
-    CHECK(open_tunnel("tun_same_id", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
-    CHECK(open_tunnel("tun_other", "{\"host\":\"192.168.5.33\",\"port\":7}", NULL), "no answer");
+    CHECK(open_tunnel("tun_same_id", "{\"host\":\"192.168.1.33\",\"port\":7}", NULL), "no answer");
+    CHECK(open_tunnel("tun_other", "{\"host\":\"192.168.1.33\",\"port\":7}", NULL), "no answer");
     cJSON *ack = cJSON_Parse("{\"stream\":{\"channel\":\"tcp_ack\",\"seq\":0}}");
     g_fail_alloc_size = sizeof(cmd_t);
     CHECK(lan_tunnel_frame("tun_same_id", ack, g_session - 1), "old session frame not taken");

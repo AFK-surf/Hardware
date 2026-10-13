@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # One project, per-board config and objects. Extra -D options go to idf.py.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

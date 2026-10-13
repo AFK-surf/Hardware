@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "memory_caps.h"
 // udp_request for the Connector: one datagram out, answers in, as base64. See lan_udp.h.
 

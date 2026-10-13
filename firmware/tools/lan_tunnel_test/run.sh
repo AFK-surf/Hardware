@@ -1,5 +1,6 @@
 #!/bin/sh
-# Host test for main/lan_tunnel.c (lan_tcp_dial, G3) and the shared lan_dest.c. Needs cc; uses
+# SPDX-License-Identifier: Apache-2.0
+# Host test for main/lan_tunnel.c (lan_tcp_dial) and the shared lan_dest.c. Needs cc; uses
 # lan_http_test's stub ESP headers and the cJSON sources from managed_components (run one idf.py
 # build first). LAN_TUNNEL_IDLE_S is 2 here so the idle check doesn't take a minute.
 set -e
