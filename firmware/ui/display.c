@@ -24,6 +24,10 @@
 // A frame that did not reach the panel is drawn again after this.
 #define RETRY_MS 500
 
+#ifndef COMMA_VIDEO_LOGO_ONLY
+#define COMMA_VIDEO_LOGO_ONLY 0
+#endif
+
 _Static_assert(COMMA_LOGO_W * COMMA_LOGO_H % 2 == 0, "logo is packed two pixels per byte");
 
 extern const uint8_t logo_start[] asm("_binary_comma_logo_bin_start");
@@ -82,6 +86,9 @@ static atomic_bool s_asleep;
 
 static void set_content(bool card_on, const char *label, const char *big, const char *body)
 {
+    // A filming image keeps the existing static logo through calls and setup notifications.
+    // Only presentation changes: input, audio and pairing behavior stay in their own tasks.
+    if (COMMA_VIDEO_LOGO_ONLY) card_on = false;
     ui_card_t card = {0};
     if (card_on) {
         strlcpy(card.label, label ? label : "", sizeof(card.label));
@@ -167,6 +174,9 @@ static void panel_wake(void)
 
 void display_run(void)
 {
+    if (COMMA_VIDEO_LOGO_ONLY) {
+        ESP_LOGI(TAG, "filming mode: static logo only, screen sleep disabled");
+    }
     s_activity_us = esp_timer_get_time();
     bool lit = false;
     bool on_pending = false;
@@ -206,7 +216,8 @@ void display_run(void)
                 s_dirty = true;
             }
         }
-        if (!s_asleep && !s_keep_awake && esp_timer_get_time() - s_activity_us >= DISPLAY_SLEEP_US) {
+        if (!COMMA_VIDEO_LOGO_ONLY && !s_asleep && !s_keep_awake &&
+            esp_timer_get_time() - s_activity_us >= DISPLAY_SLEEP_US) {
             panel_sleep();
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));

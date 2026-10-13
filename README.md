@@ -23,8 +23,8 @@ operations in the app. New appliances need no firmware change.
 
 The DevKit build targets the classic ESP32 with 4 MB flash and no PSRAM. ESP32-S3 development
 boards are not supported by that build. Board details, limits and test status are in
-[devices/README.md](devices/README.md). The latest fix validation is recorded in the
-[2026-10-13 hardware report](docs/reports/2026-10-13-firmware-fixes-hardware.md).
+[devices/README.md](devices/README.md). See the [validation notes](docs/validation.md) for the
+current test coverage and remaining checks.
 
 ## Quick start
 
