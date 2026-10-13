@@ -29,24 +29,34 @@ DevKit build is for the classic ESP32 only, not ESP32-S3 boards. Limits and pins
 ## Get started
 
 Install [ESP-IDF v6.0.2](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32s3/get-started/index.html)
-— this exact version — and activate it. Then, from the repository root:
+and activate it. Use exactly this version: the build patches a NimBLE pairing timeout and relies on
+its lwIP internals. Then, from the repository root:
 
 ```sh
+idf.py --version   # ESP-IDF v6.0.2
 tools/board.sh t-circle-s3 build
 tools/board.sh t-circle-s3 flash-monitor PORT
 ```
 
-Use your board's ID from the table. If esptool cannot connect, hold BOOT while plugging in USB.
+Use your board's ID from the table. `PORT` is the board's serial port: `/dev/cu.usbmodem*` or
+`/dev/cu.usbserial-*` on macOS, `/dev/ttyACM*` or `/dev/ttyUSB*` on Linux, `COMx` on Windows. The
+first build downloads components, so it needs internet. Build one board at a time: all boards share
+`firmware/managed_components/`. If esptool cannot connect, see each board's download mode in
+[devices/README.md](devices/README.md#flashing).
 
-Then add the device in the Comma Android app: the board advertises as `Comma-XXXX`, shows a
-six-digit code on its screen, and joins a **2.4 GHz** Wi-Fi network. A new board is read-only until
-you allow device operations in its settings.
+Then add the device in the Comma Android app: the board advertises as `Comma-XXXX` and joins a
+**2.4 GHz** Wi-Fi network. Screen boards show a six-digit code; the DevKit pairs without one. A new
+board is read-only until you allow device operations in its settings.
+
+Runtime calls and LAN control need the Comma backend; this repository has the firmware and
+development tools only.
 
 ## Keys
 
 | | T-Circle-S3 | StickS3 | Waveshare | DevKit |
 | --- | --- | --- | --- | --- |
 | Call / hang up | Tap screen | KEY1 | — | — |
+| Wake the screen | Tap (also calls) | KEY2, short | Tap or BOOT | — |
 | Pairing mode (hold 3–10 s) | BOOT | KEY2 | BOOT | BOOT |
 | Factory reset (hold > 10 s) | BOOT | KEY2 | BOOT | BOOT |
 
