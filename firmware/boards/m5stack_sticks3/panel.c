@@ -21,31 +21,24 @@
  * the Waveshare AMOLED's scheme (ours).
  *
  * The 64.8 KB framebuffer is in PSRAM. The SPI DMA never reads PSRAM: each frame goes out in
- * 16-row stripes copied into one 4.3 KB internal DMA buffer, so the SPI driver never has to find a
- * bounce buffer once Wi-Fi has taken internal RAM. A stripe that fails to queue, or whose
- * done-callback does not come within STRIPE_TIMEOUT_MS, fails the frame; display.c logs it and
- * draws again later. Nothing here waits forever.
+ * 16-row stripes through one 4.3 KB internal DMA buffer (panel_transfer.c), so the SPI driver never
+ * has to find a bounce buffer once Wi-Fi has taken internal RAM.
  */
 
 #include "board_display.h"
 #include "board_pins.h"
-#include "memory_caps.h"
-
-#include <string.h>
 
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
-#include "esp_heap_caps.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "panel_transfer.h"
 #include "ui_card.h"
 
 #define LCD_HOST SPI3_HOST
@@ -57,8 +50,6 @@
 #define STRIPE_ROWS 16
 #define STRIPE_BYTES (LCD_W * STRIPE_ROWS * sizeof(uint16_t))
 #define FB_BYTES (LCD_W * LCD_H * sizeof(uint16_t))
-// One stripe takes ~0.9 ms at 40 MHz; this is a lost transfer, not a slow one.
-#define STRIPE_TIMEOUT_MS 200
 #define BL_TIMER LEDC_TIMER_0
 #define BL_CHANNEL LEDC_CHANNEL_0
 #define BL_BITS LEDC_TIMER_10_BIT
@@ -69,32 +60,8 @@ _Static_assert(STRIPE_BYTES < 16384, "the stripe stays under SPIRAM_MALLOC_ALWAY
 
 static const char *TAG = "panel";
 
-static uint16_t *s_fb;
-static uint16_t *s_stripe;
-static SemaphoreHandle_t s_stripe_free;
+static panel_transfer_t s_transfer;
 static esp_lcd_panel_io_handle_t s_io = NULL;
-static esp_lcd_panel_handle_t s_panel = NULL;
-
-static bool on_color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *edata, void *ctx)
-{
-    (void)io;
-    (void)edata;
-    (void)ctx;
-    BaseType_t woken = pdFALSE;
-    xSemaphoreGiveFromISR(s_stripe_free, &woken);
-    return woken == pdTRUE;
-}
-
-// Wait for the stripe buffer. A transfer that never reports done is taken as lost: the buffer is
-// reclaimed (a late callback finds the semaphore already given, which is harmless).
-static bool take_stripe(void)
-{
-    if (xSemaphoreTake(s_stripe_free, pdMS_TO_TICKS(STRIPE_TIMEOUT_MS)) == pdTRUE) {
-        return true;
-    }
-    ESP_LOGE(TAG, "stripe transfer lost (no done after %d ms)", STRIPE_TIMEOUT_MS);
-    return false;
-}
 
 static void set_light(uint32_t duty)
 {
@@ -124,14 +91,7 @@ static esp_err_t backlight_init(void)
 
 esp_err_t board_display_init(void)
 {
-    s_fb = heap_caps_malloc(FB_BYTES, COMMA_BUFFER_CAPS);
-    s_stripe = heap_caps_malloc(STRIPE_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    s_stripe_free = xSemaphoreCreateBinary();
-    if (!s_fb || !s_stripe || !s_stripe_free) {
-        return ESP_ERR_NO_MEM;
-    }
-    memset(s_fb, 0, FB_BYTES);
-    xSemaphoreGive(s_stripe_free);
+    ESP_RETURN_ON_ERROR(panel_transfer_init(&s_transfer, LCD_W, LCD_H, STRIPE_ROWS), TAG, "framebuffer");
 
     // Dark until the first frame (display.c turns the light on after it).
     ESP_ERROR_CHECK(backlight_init());
@@ -151,7 +111,8 @@ esp_err_t board_display_init(void)
         .spi_mode = 0,
         .pclk_hz = LCD_PCLK_HZ,
         .trans_queue_depth = 10,
-        .on_color_trans_done = on_color_done,
+        .on_color_trans_done = panel_transfer_done,
+        .user_ctx = &s_transfer,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
     };
@@ -162,71 +123,49 @@ esp_err_t board_display_init(void)
         .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
         .bits_per_pixel = 16,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(s_io, &panel_cfg, &s_panel));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(s_io, &panel_cfg, &s_transfer.panel));
     // Portrait, the front key below the screen: the controller's own orientation.
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_set_gap(s_panel, LCD_GAP_X, LCD_GAP_Y));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_transfer.panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(s_transfer.panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_transfer.panel, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_set_gap(s_transfer.panel, LCD_GAP_X, LCD_GAP_Y));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_transfer.panel, true));
     ESP_LOGI(TAG, "ST7789 ready: %dx%d, framebuffer %u B in %s, DMA stripe %u B internal", LCD_W, LCD_H,
-             (unsigned)FB_BYTES, esp_ptr_external_ram(s_fb) ? "PSRAM" : "internal RAM", (unsigned)STRIPE_BYTES);
+             (unsigned)FB_BYTES, esp_ptr_external_ram(s_transfer.fb) ? "PSRAM" : "internal RAM",
+             (unsigned)STRIPE_BYTES);
     return ESP_OK;
 }
 
 uint16_t *board_display_frame(void)
 {
-    // board_display_flush() returns only after the last stripe is queued; the framebuffer itself is
-    // never read by DMA, so it is free for drawing at once.
-    return s_fb;
+    return panel_transfer_frame(&s_transfer);
 }
 
 esp_err_t board_display_flush(void)
 {
-    static bool timed;
-    const int64_t start = esp_timer_get_time();
-    for (int y = 0; y < LCD_H; y += STRIPE_ROWS) {
-        const int rows = LCD_H - y < STRIPE_ROWS ? LCD_H - y : STRIPE_ROWS;
-        if (!take_stripe()) {
-            xSemaphoreGive(s_stripe_free);
-            return ESP_ERR_TIMEOUT;
-        }
-        memcpy(s_stripe, s_fb + (size_t)y * LCD_W, (size_t)rows * LCD_W * sizeof(uint16_t));
-        const esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y + rows, s_stripe);
-        if (err != ESP_OK) {
-            // Nothing was queued, so no done-callback will come: the buffer is free again.
-            xSemaphoreGive(s_stripe_free);
-            return err;
-        }
-    }
-    if (!timed) {
-        timed = true;
-        ESP_LOGI(TAG, "first frame queued in %lld ms", (long long)((esp_timer_get_time() - start) / 1000));
-    }
-    return ESP_OK;
+    return panel_transfer_flush(&s_transfer);
 }
 
 void board_display_sleep(void)
 {
     set_light(0);
     // Let a stripe in flight finish before the panel stops listening for pixels.
-    take_stripe();
-    xSemaphoreGive(s_stripe_free);
-    esp_lcd_panel_disp_on_off(s_panel, false);
-    esp_lcd_panel_disp_sleep(s_panel, true);  // SLPIN; the ST7789 wants 120 ms before SLPOUT
+    panel_transfer_quiesce(&s_transfer);
+    esp_lcd_panel_disp_on_off(s_transfer.panel, false);
+    esp_lcd_panel_disp_sleep(s_transfer.panel, true);  // SLPIN; the ST7789 wants 120 ms before SLPOUT
     vTaskDelay(pdMS_TO_TICKS(120));
 }
 
 // SLPOUT needs 120 ms before the next command. display.c then draws and turns the panel on.
 void board_display_wake(void)
 {
-    esp_lcd_panel_disp_sleep(s_panel, false);
+    esp_lcd_panel_disp_sleep(s_transfer.panel, false);
     vTaskDelay(pdMS_TO_TICKS(120));
 }
 
 void board_display_on(void)
 {
-    esp_lcd_panel_disp_on_off(s_panel, true);
+    esp_lcd_panel_disp_on_off(s_transfer.panel, true);
 }
 
 void board_display_light(bool on)

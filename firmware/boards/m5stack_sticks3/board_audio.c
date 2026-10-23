@@ -24,7 +24,7 @@
  * Mic and speaker share the port's clock, so it runs at the speaker's 24 kHz (comma.voice.v1
  * pcm16_24k, played as received). Slot mode is stereo in both directions: the mic is one slot of
  * each frame (mic_path.c), playback writes the same sample to both slots. The mic is resampled to
- * MIC_SAMPLE_RATE_HZ (16 kHz for the voice_clean AFE); with COMMA_VOICE_CLEAN off it stays at 24 kHz.
+ * MIC_SAMPLE_RATE_HZ, the voice_clean AFE's 16 kHz.
  *
  * On the S3, disabling the RX channel also stops TX on the same port, so RX stays enabled.
  *
@@ -76,21 +76,13 @@
 #define MIC_RX_PRIORITY 7  // above the play/sender (6) and uplink (5) tasks
 #define MIC_RX_STACK 3072
 
-#if MIC_SAMPLE_RATE_HZ == 16000
-#define STICK_RESAMPLE 1
+_Static_assert(MIC_SAMPLE_RATE_HZ == 16000, "the mic path resamples 24 kHz to 16 kHz");
 #define STICK_MIC_DC_BLOCK_Q15 32603  // 12.8 Hz at 16 kHz, as on the T-Circle
-#elif MIC_SAMPLE_RATE_HZ == STICK_I2S_RATE_HZ
-#define STICK_RESAMPLE 0
-#define STICK_MIC_DC_BLOCK_Q15 32659  // 12.8 Hz at 24 kHz
-#else
-#error "unsupported mic rate"
-#endif
 #define STICK_SPEAKER_DC_BLOCK_Q15 31755  // 120 Hz at 24 kHz, as on the T-Circle
 #define STICK_SPEAKER_FADE_IN_SAMPLES 144
 #define STICK_LIMIT_START 24576
 
-_Static_assert(MIC_FRAME_SAMPLES <= MIC_PATH_MAX_FRAMES * 2 / 3 || !STICK_RESAMPLE,
-               "one mic frame fits one resampler call");
+_Static_assert(MIC_FRAME_SAMPLES <= MIC_PATH_MAX_FRAMES * 2 / 3, "one mic frame fits one resampler call");
 _Static_assert(MIC_FRAME_SAMPLES <= MIC_PATH_MAX_FRAMES, "one mic frame fits the stereo buffer");
 
 static const char *TAG = "audio";
@@ -110,9 +102,7 @@ static int32_t s_mic_highpass_state = 0;
 static int32_t s_speaker_previous_input = 0;
 static int32_t s_speaker_highpass_state = 0;
 static uint32_t s_speaker_fade_samples = 0;
-#if STICK_RESAMPLE
-static mic_path_t s_mic_path;  // used by the reader task only (and the boot benchmark before it)
-#endif
+static mic_path_t s_mic_path;  // used by the reader task only
 // Mic samples delivered since the recording started, for the one rate line per call; and from the
 // RX DMA interrupt, blocks the hardware filled and blocks lost because nobody read them in time.
 static int64_t s_rate_start_us;
@@ -250,25 +240,6 @@ static esp_err_t codec_init(void)
     return ESP_OK;
 }
 
-#if STICK_RESAMPLE
-// What the slot pick plus 24 -> 16 kHz costs on this CPU: one second of mic audio, timed at boot.
-static void resample_benchmark(void)
-{
-    static int16_t s_in[MIC_PATH_MAX_FRAMES * STICK_CHANNELS];
-    int16_t out[MIC_PATH_MAX_FRAMES * 2 / 3];  // 640 B on the main task's 8 KB stack
-    for (int i = 0; i < MIC_PATH_MAX_FRAMES * STICK_CHANNELS; ++i) {
-        s_in[i] = (int16_t)((i * 2731) & 0x3fff);
-    }
-    const int64_t start = esp_timer_get_time();
-    for (int frame = 0; frame < STICK_I2S_RATE_HZ / MIC_PATH_MAX_FRAMES; ++frame) {
-        mic_path_24k_to_16k(&s_mic_path, s_in, MIC_PATH_MAX_FRAMES, STICK_MIC_SLOT, out);
-    }
-    const int64_t took = esp_timer_get_time() - start;
-    mic_path_reset(&s_mic_path);
-    ESP_LOGI(TAG, "mic resampler: 1 s of audio in %lld us (%.2f%% of one core)", (long long)took, (double)took / 1e4);
-}
-#endif
-
 // Drains the RX DMA one block (10 ms) at a time, whether recording or not, so the DMA never
 // overruns; while recording, the mic slot goes into the ring at the pipeline's rate.
 static void mic_rx_task(void *arg)
@@ -285,19 +256,13 @@ static void mic_rx_task(void *arg)
         }
         const bool on = s_ring_on;
         if (on && !was_on) {
-#if STICK_RESAMPLE
             mic_path_reset(&s_mic_path);
-#endif
         }
         was_on = on;
         if (!on) {
             continue;
         }
-#if STICK_RESAMPLE
         const int n = mic_path_24k_to_16k(&s_mic_path, block, STICK_DMA_FRAMES, STICK_MIC_SLOT, mono);
-#else
-        const int n = mic_take_slot(block, STICK_DMA_FRAMES, STICK_MIC_SLOT, mono);
-#endif
         if (n <= 0) {
             continue;
         }
@@ -315,10 +280,7 @@ esp_err_t board_audio_init(void)
     ESP_RETURN_ON_ERROR(pmic_speaker(false), TAG, "amp off");
     ESP_RETURN_ON_ERROR(i2s_init(), TAG, "I2S");
     ESP_RETURN_ON_ERROR(codec_init(), TAG, "ES8311");
-#if STICK_RESAMPLE
     mic_path_init(&s_mic_path);
-    resample_benchmark();
-#endif
     s_recording = false;
     s_speaker_enabled = false;
     s_ring = xStreamBufferCreateWithCaps((size_t)MIC_SAMPLE_RATE_HZ * MIC_RING_MS / 1000 * sizeof(int16_t),

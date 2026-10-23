@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // LilyGO T-Circle-S3 V1.1. PDM mic on I2S0, MAX98357A on I2S1.
-// The speaker runs at 24 kHz for comma.voice.v1 pcm16_24k. The mic runs at MIC_SAMPLE_RATE_HZ:
-// 16 kHz with the voice_clean noise suppressor (it upsamples to 24 kHz after), else 24 kHz.
-// Filter corners match the 16 kHz T-Circle driver at either rate:
-// mic DC block 12.8 Hz, mic low-pass 4.83 kHz, speaker DC block 120 Hz.
+// The speaker runs at 24 kHz for comma.voice.v1 pcm16_24k. The mic runs at MIC_SAMPLE_RATE_HZ, the
+// voice_clean AFE's 16 kHz (it upsamples to 24 kHz after).
+// Filter corners: mic DC block 12.8 Hz, mic low-pass 4.83 kHz, speaker DC block 120 Hz.
 // The speaker fade-in stays 6 ms.
 
 #include "board_audio.h"
@@ -28,13 +27,9 @@
 #define T_CIRCLE_SPEAKER_SD   GPIO_NUM_45
 
 #define T_CIRCLE_AUDIO_CHUNK_FRAMES 256
-#if MIC_SAMPLE_RATE_HZ == 16000
+_Static_assert(MIC_SAMPLE_RATE_HZ == 16000, "the mic filter coefficients are for 16 kHz");
 #define T_CIRCLE_MIC_DC_BLOCK_Q15 32603
 #define T_CIRCLE_MIC_LOWPASS_Q15 27850
-#else
-#define T_CIRCLE_MIC_DC_BLOCK_Q15 32659
-#define T_CIRCLE_MIC_LOWPASS_Q15 23517
-#endif
 #define T_CIRCLE_MIC_LIMIT_START 24576
 #define T_CIRCLE_MIC_GAIN_NUMERATOR 5
 #define T_CIRCLE_MIC_GAIN_DENOMINATOR 2

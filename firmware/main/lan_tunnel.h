@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "firmware_config.h"
 #pragma once
+
+#include "firmware_config.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 
 #include "cJSON.h"
 
-// The Connector's `lan_tcp_dial`: one TCP connection from the T-Circle to a LAN host, relayed
+// The Connector's `lan_tcp_dial`: one TCP connection from the device to a LAN host, relayed
 // over the Connector socket. Same protocol as the backend's other Connector clients, so the
 // backend needs no special case:
 //
@@ -46,10 +47,7 @@
 // lwIP receive window of each tunnel's LAN socket (the global one is 64 KB for the voice socket).
 // Received data that the device hasn't read holds Wi-Fi RX buffers (zero-copy RX), so this
 // caps what a stalled tunnel pins at ~11 buffers. Still ~3 MB/s on the LAN.
-// 0 turns the cut off (dev builds: -DLAN_TUNNEL_SOCKET_WINDOW=0).
-#ifndef LAN_TUNNEL_SOCKET_WINDOW
 #define LAN_TUNNEL_SOCKET_WINDOW (16 * 1024)
-#endif
 
 typedef enum {
     LAN_TUNNEL_GO = 0,
@@ -83,11 +81,6 @@ int lan_tunnel_count(void);
 
 // One pass of the tunnel task's loop: waits up to wait_ms for work. Exposed for host tests.
 void lan_tunnel_step(int wait_ms);
-
-// Standard base64 with padding (RFC 4648 §4). encode writes 4 * ceil(n / 3) bytes, no NUL. decode is
-// strict (padding required, no whitespace) and returns the decoded length, or -1.
-size_t lan_tunnel_b64_encode(const unsigned char *in, size_t n, char *out);
-long lan_tunnel_b64_decode(const char *in, size_t n, unsigned char *out, size_t cap);
 #else
 static inline int lan_tunnel_count(void) { return 0; }
 static inline bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)

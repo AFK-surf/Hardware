@@ -10,7 +10,7 @@ third-party material below. Each keeps its own license.
 | LAN discovery: ARP sweep, mDNS service list and record parsing, SSDP search, text sanitising | `firmware/main/lan_discover.c`, `firmware/main/lan_discover_core.c` | Meta muse-gadget-sdk, `esp32/main/net_discovery.c` | Apache-2.0, © Meta Platforms, Inc. and affiliates. The original header is kept; changes are described in each file |
 | StickS3 audio, panel and power chip setup | `firmware/boards/m5stack_sticks3/board_audio.c`, `panel.c`, `pmic.c` | Meta muse-gadget-sdk, `board_m5stack_sticks3.c`, `muse_audio.c` | Apache-2.0, © Meta Platforms, Inc. and affiliates. The original header is kept |
 | Memory settings for boards without PSRAM, StickS3 PSRAM modes | `devices/sdkconfig.esp32-devkit`, `devices/sdkconfig.m5stack-sticks3` | Meta muse-gadget-sdk sdkconfig overlays | Apache-2.0, © Meta Platforms, Inc. and affiliates |
-| GC9D01 LCD driver (vendored, version 2.0.0) | `firmware/components/esp_lcd_gc9d01/` | Espressif esp-iot-solution | Apache-2.0, © Espressif Systems (Shanghai) Co., Ltd. (`license.txt` in that folder) |
+| GC9D01 LCD driver (vendored, version 2.0.0; `esp_lcd_gc9d01.c` modified for ESP-IDF 6, as its header says) | `firmware/components/esp_lcd_gc9d01/` | Espressif esp-iot-solution | Apache-2.0, © Espressif Systems (Shanghai) Co., Ltd. (`license.txt` in that folder) |
 | CO5300 init command table and column offset | `firmware/boards/waveshare_amoled_1_32/panel.c` | Waveshare BSP `esp32_s3_touch_amoled_1_32` | Apache-2.0, © Waveshare |
 
 ## Hardware facts

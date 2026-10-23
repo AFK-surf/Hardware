@@ -85,7 +85,7 @@ bool lan_dest_check(uint32_t ip, char *err)
     if ((a >> 24) == 127) {
         why = "a loopback address";
     } else if (a == self) {
-        why = "the T-Circle itself";
+        why = "the device itself";
     } else if ((a >> 24) == 0) {
         why = "not a valid destination";
     } else if (a >= 0xE0000000u) {
@@ -94,13 +94,13 @@ bool lan_dest_check(uint32_t ip, char *err)
         why = "the network or broadcast address of the local subnet";
     } else if (!is_private && !own_subnet) {
         snprintf(err, LAN_DEST_ERR_MAX,
-                 "%s is a public address. The T-Circle only reaches the local network (private, link-local or its "
+                 "%s is a public address. The device only reaches the local network (private, link-local or its "
                  "own subnet); use web.http_request for the internet",
                  shown);
         return false;
     }
     if (why) {
-        snprintf(err, LAN_DEST_ERR_MAX, "%s is %s; the T-Circle only reaches other devices on the local network", shown, why);
+        snprintf(err, LAN_DEST_ERR_MAX, "%s is %s; the device only reaches other devices on the local network", shown, why);
         return false;
     }
     return true;

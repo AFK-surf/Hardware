@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "firmware_config.h"
 #pragma once
+
+#include "firmware_config.h"
 
 #include "cJSON.h"
 #include "lan_request.h"
@@ -24,7 +25,6 @@
 #define LAN_UDP_MAX_ANSWER CONFIG_COMMA_LAN_UDP_MAX_ANSWER
 
 // Blocks for up to timeout_ms. Returns the whole reply frame for `id` (a `response`, or an `error`),
-// NUL-terminated; the caller frees it. NULL only when out of memory.
-char *lan_udp_run(const char *id, const cJSON *params);
-// Connector variant: bounds queue + execution time and checks cancellation before sending.
+// NUL-terminated; the caller frees it. NULL only when out of memory. request (may be NULL) bounds
+// queue time plus execution and is checked before sending.
 char *lan_udp_run_request(const char *id, const cJSON *params, const lan_request_t *request);

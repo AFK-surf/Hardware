@@ -315,16 +315,11 @@ void call_run_ui(const char *help)
 
 void call_voice_clean_init(void)
 {
-#if COMMA_VOICE_CLEAN
     // Before the display and Wi-Fi take their share of internal RAM; the AFE goes in PSRAM anyway.
     const esp_err_t clean = voice_clean_init();
     if (clean != ESP_OK) {
         ESP_LOGE(TAG, "noise suppression unavailable: %s; calls send the raw mic", esp_err_to_name(clean));
     }
-#ifdef VOICE_CLEAN_BENCH
-    voice_clean_bench();
-#endif
-#endif
 }
 
 void call_init(void)

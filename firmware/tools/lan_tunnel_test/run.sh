@@ -9,5 +9,5 @@ CJSON=../../managed_components/espressif__cjson/cJSON
 OUT=${TMPDIR:-/tmp}/lan_tunnel_test
 cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations -g -fsanitize=address,undefined \
     -DLAN_TUNNEL_IDLE_S=2 -Istubs -I../lan_http_test/stubs -I../../main -I"$CJSON" \
-    test.c "$CJSON/cJSON.c" -lpthread -o "$OUT"
+    test.c ../../main/b64.c ../../main/json_buf.c "$CJSON/cJSON.c" -lpthread -o "$OUT"
 "$OUT"

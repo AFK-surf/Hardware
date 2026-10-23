@@ -2,6 +2,9 @@
  * SPDX-FileCopyrightText: 2021-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Modified for Comma: on ESP-IDF 5 and later the color order comes from rgb_ele_order
+ * (LCD_RGB_ELEMENT_ORDER_*), because ESP-IDF 6 removed rgb_endian. Version 2.0.0 is otherwise unchanged.
  */
 
 #include <stdlib.h>

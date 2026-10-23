@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "heap_diag.h"
-#include "memory_caps.h"
-// lan_tcp_dial: TCP tunnels from the T-Circle to LAN hosts, relayed over the Connector socket.
+// lan_tcp_dial: TCP tunnels from the device to LAN hosts, relayed over the Connector socket.
 // Protocol and limits in lan_tunnel.h.
 //
 // One task runs every tunnel: a select() loop over the LAN sockets, plus a queue of commands from the
@@ -18,7 +16,11 @@
 
 #include "lan_tunnel.h"
 
+#include "b64.h"
+#include "heap_diag.h"
+#include "json_buf.h"
 #include "lan_dest.h"
+#include "memory_caps.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -55,14 +57,10 @@
 #define READS_PER_PASS 4
 // After the server's eof: how long queued bytes may take to reach the LAN host before the close.
 #define DRAIN_MS 2000
-#ifndef COMMA_TUNNEL_DEBUG
-#define COMMA_TUNNEL_DEBUG 0
-#endif
-#define B64_LEN(n) (((n) + 2) / 3 * 4)
 // The id as a JSON string (escaped) fits this.
 #define ID_JSON_MAX (ID_MAX * 6 + 3)
 // One data frame: envelope, id and base64 text.
-#define FRAME_CAP (B64_LEN(LAN_TUNNEL_MAX_FRAME) + ID_JSON_MAX + 128)
+#define FRAME_CAP (B64_ENCODED_LEN(LAN_TUNNEL_MAX_FRAME) + ID_JSON_MAX + 128)
 
 static const char *TAG = "lan_tunnel";
 
@@ -155,79 +153,6 @@ static void *psram_alloc(size_t n)
     return heap_caps_malloc(n, COMMA_BUFFER_CAPS);
 }
 
-// ---- base64 --------------------------------------------------------------------------------------
-
-static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-size_t lan_tunnel_b64_encode(const unsigned char *in, size_t n, char *out)
-{
-    size_t o = 0;
-    for (size_t i = 0; i < n; i += 3) {
-        const uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? in[i + 2] : 0);
-        out[o++] = B64[(v >> 18) & 63];
-        out[o++] = B64[(v >> 12) & 63];
-        out[o++] = i + 1 < n ? B64[(v >> 6) & 63] : '=';
-        out[o++] = i + 2 < n ? B64[v & 63] : '=';
-    }
-    return o;
-}
-
-static int b64_value(char c)
-{
-    if (c >= 'A' && c <= 'Z') {
-        return c - 'A';
-    }
-    if (c >= 'a' && c <= 'z') {
-        return c - 'a' + 26;
-    }
-    if (c >= '0' && c <= '9') {
-        return c - '0' + 52;
-    }
-    return c == '+' ? 62 : c == '/' ? 63 : -1;
-}
-
-long lan_tunnel_b64_decode(const char *in, size_t n, unsigned char *out, size_t cap)
-{
-    if (n % 4 != 0) {
-        return -1;
-    }
-    size_t o = 0;
-    for (size_t i = 0; i < n; i += 4) {
-        const bool last = i + 4 == n;
-        const int pad = (in[i + 3] == '=') + (in[i + 2] == '=');
-        if (pad > 0 && (!last || (in[i + 2] == '=' && in[i + 3] != '='))) {
-            return -1;
-        }
-        int v[4];
-        for (int k = 0; k < 4 - pad; ++k) {
-            v[k] = b64_value(in[i + k]);
-            if (v[k] < 0) {
-                return -1;
-            }
-        }
-        for (int k = 4 - pad; k < 4; ++k) {
-            v[k] = 0;
-        }
-        const uint32_t w = (uint32_t)v[0] << 18 | (uint32_t)v[1] << 12 | (uint32_t)v[2] << 6 | (uint32_t)v[3];
-        // Canonical only: the bits a padded group drops must be zero (like Go's Strict decoding).
-        if ((pad == 1 && (w & 0xFF)) || (pad == 2 && (w & 0xFFFF))) {
-            return -1;
-        }
-        const size_t take = 3 - (size_t)pad;
-        if (o + take > cap) {
-            return -1;
-        }
-        out[o++] = (unsigned char)(w >> 16);
-        if (take > 1) {
-            out[o++] = (unsigned char)(w >> 8);
-        }
-        if (take > 2) {
-            out[o++] = (unsigned char)w;
-        }
-    }
-    return (long)o;
-}
-
 // ---- Frames to the server ------------------------------------------------------------------------
 
 static bool send_text(const tunnel_t *t, const char *frame, size_t len)
@@ -250,13 +175,13 @@ static bool send_json_obj(unsigned session, cJSON *obj)
 
 static void send_error_answer(unsigned session, const char *id, const char *message)
 {
-    cJSON *obj = cJSON_CreateObject();
-    if (obj) {
-        cJSON_AddStringToObject(obj, "id", id);
-        cJSON_AddStringToObject(obj, "type", "error");
-        cJSON_AddStringToObject(obj, "error", message);
+    char *frame = json_error_frame(id, message);
+    if (!frame) {
+        ESP_LOGW(TAG, "out of memory building a frame");
+        return;
     }
-    send_json_obj(session, obj);
+    s_host.send(s_host.ctx, session, frame, strlen(frame));
+    free(frame);
 }
 
 static bool send_connected(tunnel_t *t)
@@ -308,7 +233,7 @@ static bool send_data(tunnel_t *t, const unsigned char *raw, size_t n)
 {
     size_t len = (size_t)snprintf(s_frame, FRAME_CAP, "{\"id\":%s,\"type\":\"stream\",\"stream\":{\"channel\":\"tcp\",\"data\":\"",
                                   t->id_json);
-    len += lan_tunnel_b64_encode(raw, n, s_frame + len);
+    len += b64_encode(raw, n, s_frame + len);
     memcpy(s_frame + len, "\"}}", 4);
     len += 3;
     const int64_t start = esp_timer_get_time();
@@ -353,50 +278,6 @@ static err_t wnd_apply(struct tcpip_api_call_data *data)
     }
     return ERR_OK;
 }
-
-#if COMMA_TUNNEL_DEBUG
-// Dev builds only (-DCOMMA_TUNNEL_DEBUG=1): a snapshot of the pcb, read in the tcpip thread.
-typedef struct {
-    struct tcpip_api_call_data call;
-    struct netconn *conn;
-    int state, rcv_wnd, rcv_ann_wnd, ann_edge, snd_wnd, persist_backoff, unsent, unacked, refused;
-} pcb_snap_t;
-
-static err_t pcb_snap(struct tcpip_api_call_data *data)
-{
-    pcb_snap_t *p = (pcb_snap_t *)data;
-    struct tcp_pcb *pcb = p->conn ? p->conn->pcb.tcp : NULL;
-    if (!pcb) {
-        return ERR_CONN;
-    }
-    p->state = pcb->state;
-    p->rcv_wnd = pcb->rcv_wnd;
-    p->rcv_ann_wnd = pcb->rcv_ann_wnd;
-    p->ann_edge = (int)(pcb->rcv_ann_right_edge - pcb->rcv_nxt);
-    p->snd_wnd = pcb->snd_wnd;
-    p->persist_backoff = pcb->persist_backoff;
-    p->unsent = pcb->unsent != NULL;
-    p->unacked = pcb->unacked != NULL;
-    p->refused = pcb->refused_data != NULL;
-    return ERR_OK;
-}
-
-static void debug_log(const tunnel_t *t)
-{
-    struct lwip_sock *sock = lwip_socket_dbg_get_socket(t->fd);
-    pcb_snap_t p = {.conn = sock ? sock->conn : NULL};
-    int unread = -1;
-    ioctl(t->fd, FIONREAD, &unread);
-    if (!p.conn || tcpip_api_call(pcb_snap, &p.call) != ERR_OK) {
-        ESP_LOGI(TAG, "dbg %s: no pcb", t->id);
-        return;
-    }
-    ESP_LOGI(TAG, "dbg %s st=%d up sent=%lld acked=%lld | down queued=%u written=%lld | unread=%d rcv_wnd=%d ann=%d "
-                  "edge=%d snd_wnd=%d persist=%d unsent=%d unacked=%d refused=%d",
-             t->id, t->state, (long long)t->sent, (long long)t->acked, (unsigned)t->queued, (long long)t->written, unread,
-             p.rcv_wnd, p.rcv_ann_wnd, p.ann_edge, p.snd_wnd, p.persist_backoff, p.unsent, p.unacked, p.refused);
-}
-#endif
 
 static int window_set(int fd, int target, int cut)
 {
@@ -550,15 +431,9 @@ static void start_dial(const cmd_t *c)
     t->fd = -1;
     t->session = c->session;
     strlcpy(t->id, c->id, sizeof(t->id));
-    cJSON *id_str = cJSON_CreateString(c->id);
-    char *id_json = id_str ? cJSON_PrintUnformatted(id_str) : NULL;
-    cJSON_Delete(id_str);
-    if (!id_json) {
-        send_error_answer(c->session, c->id, "out of memory");
-        return;
-    }
-    strlcpy(t->id_json, id_json, sizeof(t->id_json));
-    cJSON_free(id_json);
+    // Escaped once, into the tunnel's own buffer, for every data frame and ack.
+    jbuf_t id_json = {.p = t->id_json, .cap = sizeof(t->id_json), .limit = sizeof(t->id_json) - 1};
+    jbuf_json_str(&id_json, t->id);
     char ip_text[16];
     inet_ntop(AF_INET, &ip, ip_text, sizeof(ip_text));
     snprintf(t->remote, sizeof(t->remote), "%s:%d", ip_text, port);
@@ -569,7 +444,7 @@ static void start_dial(const cmd_t *c)
 
     t->fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (t->fd < 0) {
-        finish(t, "no free socket on the T-Circle", true);
+        finish(t, "no free socket on the device", true);
         return;
     }
     const int flags = fcntl(t->fd, F_GETFL, 0);
@@ -772,13 +647,6 @@ static void pump_in(tunnel_t *t)
 // Verdicts, deadlines and idle time.
 static void housekeeping(tunnel_t *t, int64_t now)
 {
-#if COMMA_TUNNEL_DEBUG && defined(ESP_PLATFORM)
-    static int64_t s_dbg_us;
-    if (t->state == T_OPEN && now - s_dbg_us >= 1000000) {
-        s_dbg_us = now;
-        debug_log(t);
-    }
-#endif
     const char *reason = NULL;
     const lan_tunnel_verdict_t v = s_host.check ? s_host.check(s_host.ctx, t->session, &reason) : LAN_TUNNEL_GO;
     if (v == LAN_TUNNEL_END_SILENT) {
@@ -1025,7 +893,7 @@ bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)
         } else if (cJSON_IsString(data) && data->valuestring[0]) {
             const size_t text = strlen(data->valuestring);
             const size_t most = text / 4 * 3;
-            if (text > B64_LEN(LAN_TUNNEL_SERVER_FRAME_MAX)) {
+            if (text > B64_ENCODED_LEN(LAN_TUNNEL_SERVER_FRAME_MAX)) {
                 c = new_cmd(CMD_BAD, id, session);
             } else {
                 c = new_cmd(CMD_DATA, id, session);
@@ -1034,7 +902,7 @@ bool lan_tunnel_frame(const char *id, const cJSON *msg, unsigned session)
                     comma_heap_log("tunnel_decode_oom");
                     c->kind = CMD_OOM;
                 } else if (c) {
-                    const long n = lan_tunnel_b64_decode(data->valuestring, text, b->data, most);
+                    const long n = b64_decode(data->valuestring, text, b->data, most);
                     memset(b, 0, sizeof(*b));
                     if (n <= 0 || n > LAN_TUNNEL_SERVER_FRAME_MAX) {
                         free(b);

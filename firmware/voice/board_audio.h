@@ -12,13 +12,9 @@
 _Static_assert(AUDIO_FRAME_SAMPLES == 480, "20 ms at 24 kHz is 480 samples");
 _Static_assert(AUDIO_FRAME_SAMPLES * (int)sizeof(int16_t) == 960, "one uplink frame is 960 bytes");
 
-// The mic runs at the speaker's 24 kHz, or at 16 kHz for the noise suppressor (voice_clean.h).
+// The mic runs at the voice activity detector's 16 kHz (voice_clean.h); the speaker at 24 kHz.
 #include "voice_clean.h"
-#if COMMA_VOICE_CLEAN
 #define MIC_SAMPLE_RATE_HZ VOICE_CLEAN_RATE_HZ
-#else
-#define MIC_SAMPLE_RATE_HZ AUDIO_SAMPLE_RATE_HZ
-#endif
 #define MIC_FRAME_SAMPLES (MIC_SAMPLE_RATE_HZ * AUDIO_FRAME_MS / 1000)
 
 // What each voice board implements (boards/<board>/). The rates are the voice pipeline's, not the

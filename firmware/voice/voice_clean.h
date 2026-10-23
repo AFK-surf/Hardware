@@ -14,13 +14,6 @@
 
 #include "esp_err.h"
 
-// 1: mic at 16 kHz through the AFE (default). 0: no AFE, raw 24 kHz mic audio on the wire.
-// Build without it: `idf.py -B build-clean-off -DCOMMA_VOICE_CLEAN_OFF=1 build` (separate build directory:
-// the CMake cache keeps the value).
-#ifndef COMMA_VOICE_CLEAN
-#define COMMA_VOICE_CLEAN 1
-#endif
-
 // 1 (default): VAD only. vadnet runs on the raw 16 kHz mic and the wire carries that raw audio in
 // speech, zeros otherwise; nsnet2 cost ~0.8 s of CPU per second in a call (measured on the T-Circle). 0: nsnet2
 // denoises first, and the wire carries the denoised audio. `-DCOMMA_VOICE_NS_OFF=0` at configure time.
@@ -46,7 +39,3 @@ bool voice_clean_pop(int16_t *out24k, bool *speech);
 
 // Microseconds spent in the AFE since the last call (CPU use for the stats line).
 int64_t voice_clean_take_busy_us(void);
-
-#ifdef VOICE_CLEAN_BENCH
-void voice_clean_bench(void);
-#endif

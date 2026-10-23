@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "heap_diag.h"
-#include "memory_caps.h"
 // http_request for the Connector. Built on esp_transport + http_parser rather than esp_http_client:
 // esp_http_client reads nothing from a response that has neither Content-Length nor chunked
 // encoding (its read loop compares against content_length = -1), and plenty of small LAN devices
@@ -8,7 +6,11 @@
 
 #include "lan_http.h"
 
+#include "b64.h"
+#include "heap_diag.h"
+#include "json_buf.h"
 #include "lan_dest.h"
+#include "memory_caps.h"
 #include "wifi.h"
 
 #include <errno.h>
@@ -34,144 +36,9 @@
 #define HEADER_NAME_MAX 128
 #define HEADERS_MAX (16 * 1024)  // all response header bytes together
 #define ERR_MAX 400
-#define USER_AGENT "comma-t-circle/0.1"
+#define USER_AGENT "comma-" CONFIG_COMMA_BOARD_ID "/" COMMA_FIRMWARE_VERSION
 
 static const char *TAG = "lan_http";
-
-// ---- Growable string in PSRAM ------------------------------------------------------------------
-
-typedef struct {
-    char *p;
-    size_t len;
-    size_t cap;
-    bool oom;
-} sb_t;
-
-static void sb_add(sb_t *b, const char *s, size_t n)
-{
-    if (b->oom) {
-        return;
-    }
-    if (b->len + n + 1 > b->cap) {
-        size_t cap = b->cap ? b->cap : 256;
-        while (cap < b->len + n + 1) {
-            cap *= 2;
-        }
-        char *p = heap_caps_realloc(b->p, cap, COMMA_BUFFER_CAPS);
-        if (!p) {
-            b->oom = true;
-            return;
-        }
-        b->p = p;
-        b->cap = cap;
-    }
-    memcpy(b->p + b->len, s, n);
-    b->len += n;
-    b->p[b->len] = 0;
-}
-
-static void sb_str(sb_t *b, const char *s)
-{
-    sb_add(b, s, strlen(s));
-}
-
-static void sb_free(sb_t *b)
-{
-    free(b->p);
-    memset(b, 0, sizeof(*b));
-}
-
-// Length of the valid UTF-8 sequence at s (1-4), or 0 when it is invalid or cut off.
-static size_t utf8_len(const uint8_t *s, size_t n)
-{
-    const uint8_t c = s[0];
-    size_t len;
-    uint32_t cp;
-    if (c < 0x80) {
-        return 1;
-    } else if (c >= 0xC2 && c <= 0xDF) {
-        len = 2;
-        cp = c & 0x1F;
-    } else if (c >= 0xE0 && c <= 0xEF) {
-        len = 3;
-        cp = c & 0x0F;
-    } else if (c >= 0xF0 && c <= 0xF4) {
-        len = 4;
-        cp = c & 0x07;
-    } else {
-        return 0;
-    }
-    if (n < len) {
-        return 0;
-    }
-    for (size_t i = 1; i < len; ++i) {
-        if ((s[i] & 0xC0) != 0x80) {
-            return 0;
-        }
-        cp = (cp << 6) | (s[i] & 0x3F);
-    }
-    // Overlong forms, UTF-16 surrogates and anything past U+10FFFF.
-    if ((len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000) || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
-        return 0;
-    }
-    return len;
-}
-
-// A JSON string literal of these bytes. Invalid UTF-8 becomes U+FFFD, like Go's encoding/json.
-static void sb_json(sb_t *b, const char *s, size_t n)
-{
-    const uint8_t *u = (const uint8_t *)s;
-    sb_add(b, "\"", 1);
-    size_t run = 0;  // start of the pending stretch that needs no escaping
-    for (size_t i = 0; i < n;) {
-        const uint8_t c = u[i];
-        const char *esc = NULL;
-        char hex[8];
-        size_t step = 1;
-        if (c == '"') {
-            esc = "\\\"";
-        } else if (c == '\\') {
-            esc = "\\\\";
-        } else if (c == '\n') {
-            esc = "\\n";
-        } else if (c == '\r') {
-            esc = "\\r";
-        } else if (c == '\t') {
-            esc = "\\t";
-        } else if (c < 0x20) {
-            snprintf(hex, sizeof(hex), "\\u%04x", c);
-            esc = hex;
-        } else if (c >= 0x80) {
-            step = utf8_len(u + i, n - i);
-            if (step == 0) {
-                esc = "\xEF\xBF\xBD";
-                step = 1;
-            }
-        }
-        if (esc) {
-            sb_add(b, s + run, i - run);
-            sb_str(b, esc);
-            run = i + step;
-        }
-        i += step;
-    }
-    sb_add(b, s + run, n - run);
-    sb_add(b, "\"", 1);
-}
-
-static char *error_frame(const char *id, const char *message)
-{
-    sb_t b = {0};
-    sb_str(&b, "{\"id\":");
-    sb_json(&b, id, strlen(id));
-    sb_str(&b, ",\"type\":\"error\",\"error\":");
-    sb_json(&b, message, strlen(message));
-    sb_str(&b, "}");
-    if (b.oom) {
-        sb_free(&b);
-    }
-    return b.p;
-}
 
 // ---- URL and destination -----------------------------------------------------------------------
 
@@ -260,25 +127,6 @@ static bool parse_url(const char *url, url_t *u, char *err)
 
 // ---- Chunk mode ---------------------------------------------------------------------------------
 
-static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-// Standard base64 with padding (RFC 4648 §4), not NUL-terminated. Returns the length,
-// 4 * ceil(n / 3).
-static size_t b64_encode(const uint8_t *in, size_t n, char *out)
-{
-    size_t o = 0;
-    for (size_t i = 0; i < n; i += 3) {
-        const uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? in[i + 2] : 0);
-        out[o++] = B64[(v >> 18) & 63];
-        out[o++] = B64[(v >> 12) & 63];
-        out[o++] = i + 1 < n ? B64[(v >> 6) & 63] : '=';
-        out[o++] = i + 2 < n ? B64[v & 63] : '=';
-    }
-    return o;
-}
-
-#define B64_LEN(n) (((n) + 2) / 3 * 4)
-
 // One transfer's state: the pending raw bytes of the next frame, and the frame buffer they are
 // encoded into. Both are allocated once per transfer (PSRAM) and reused for every frame.
 typedef struct {
@@ -304,13 +152,13 @@ static bool chunks_init(chunks_t *c, const lan_http_sink_t *sink, const char *id
 {
     memset(c, 0, sizeof(*c));
     c->sink = sink;
-    sb_t prefix = {0};
-    sb_str(&prefix, "{\"id\":");
-    sb_json(&prefix, id, strlen(id));
-    sb_str(&prefix, ",\"type\":\"response_chunk\",\"seq\":");
+    jbuf_t prefix = {0};
+    jbuf_str(&prefix, "{\"id\":");
+    jbuf_json(&prefix, id, strlen(id));
+    jbuf_str(&prefix, ",\"type\":\"response_chunk\",\"seq\":");
     c->raw = heap_caps_malloc(LAN_HTTP_CHUNK_BYTES, COMMA_BUFFER_CAPS);
     // prefix, seq, the data_b64 key, the base64 text, the closing "} and a NUL
-    c->frame = heap_caps_malloc(prefix.len + 16 + 16 + B64_LEN(LAN_HTTP_CHUNK_BYTES) + 4,
+    c->frame = heap_caps_malloc(prefix.len + 16 + 16 + B64_ENCODED_LEN(LAN_HTTP_CHUNK_BYTES) + 4,
                                 COMMA_BUFFER_CAPS);
     c->sha = psa_hash_operation_init();
     const bool ok = !prefix.oom && c->raw && c->frame && psa_hash_setup(&c->sha, PSA_ALG_SHA_256) == PSA_SUCCESS;
@@ -319,7 +167,7 @@ static bool chunks_init(chunks_t *c, const lan_http_sink_t *sink, const char *id
         c->prefix_len = prefix.len;
         c->want = chunk_want(c);
     }
-    sb_free(&prefix);
+    jbuf_free(&prefix);
     return ok;
 }
 
@@ -389,14 +237,14 @@ typedef struct {
     cJSON *headers;  // canonical name -> [values]
     char field[HEADER_NAME_MAX + 1];
     size_t field_len;
-    sb_t value;
+    jbuf_t value;
     bool in_value;
     bool field_too_long;
     size_t header_bytes;
     bool headers_done;
     bool complete;
     bool unsupported_upgrade;
-    sb_t body;
+    jbuf_t body;
     chunks_t *chunks;   // chunk mode: the body streams out here instead of into body
     size_t body_bytes;  // body bytes taken (kept or sent)
     size_t limit;       // take at most limit bytes; one more means truncated
@@ -425,7 +273,7 @@ static int commit_header(resp_t *r)
     }
     r->in_value = false;
     if (r->field_too_long || r->field_len == 0) {
-        sb_free(&r->value);
+        jbuf_free(&r->value);
         r->field_len = 0;
         r->field_too_long = false;
         return 0;
@@ -443,7 +291,7 @@ static int commit_header(resp_t *r)
         return 1;
     }
     cJSON_AddItemToArray(list, item);
-    sb_free(&r->value);
+    jbuf_free(&r->value);
     r->field_len = 0;
     return 0;
 }
@@ -469,7 +317,7 @@ static int on_header_value(http_parser *p, const char *at, size_t len)
     resp_t *r = p->data;
     r->in_value = true;
     r->header_bytes += len;
-    sb_add(&r->value, at, len);
+    jbuf_add(&r->value, at, len);
     if (r->value.oom) {
         r->oom = true;
         return 1;
@@ -501,7 +349,7 @@ static int on_body(http_parser *p, const char *at, size_t len)
             return 1;
         }
     } else {
-        sb_add(&r->body, at, len);
+        jbuf_add(&r->body, at, len);
         if (r->body.oom) {
             r->oom = true;
             return 1;
@@ -560,23 +408,23 @@ static char *header_value(const cJSON *v)
 
 // Request line and headers. Framing headers (Host, Content-Length, Connection, Transfer-Encoding)
 // are always the device's own.
-static bool build_request(sb_t *req, const char *method, const url_t *u, const cJSON *headers, size_t body_len,
+static bool build_request(jbuf_t *req, const char *method, const url_t *u, const cJSON *headers, size_t body_len,
                           char *err)
 {
-    sb_str(req, method);
-    sb_str(req, " ");
+    jbuf_str(req, method);
+    jbuf_str(req, " ");
     if (u->path_len == 0 || u->path[0] != '/') {
-        sb_str(req, "/");
+        jbuf_str(req, "/");
     }
-    sb_add(req, u->path, u->path_len);
-    sb_str(req, " HTTP/1.1\r\nHost: ");
-    sb_str(req, u->host);
+    jbuf_add(req, u->path, u->path_len);
+    jbuf_str(req, " HTTP/1.1\r\nHost: ");
+    jbuf_str(req, u->host);
     if (u->explicit_port) {
         char port[8];
         snprintf(port, sizeof(port), ":%d", u->port);
-        sb_str(req, port);
+        jbuf_str(req, port);
     }
-    sb_str(req, "\r\nConnection: close\r\n");
+    jbuf_str(req, "\r\nConnection: close\r\n");
     bool has_type = false;
     bool has_agent = false;
     const cJSON *list = cJSON_IsObject(headers) ? headers : NULL;
@@ -606,25 +454,25 @@ static bool build_request(sb_t *req, const char *method, const url_t *u, const c
         }
         has_type |= header_is(name, "Content-Type");
         has_agent |= header_is(name, "User-Agent");
-        sb_str(req, name);
-        sb_str(req, ": ");
-        sb_str(req, value);
-        sb_str(req, "\r\n");
+        jbuf_str(req, name);
+        jbuf_str(req, ": ");
+        jbuf_str(req, value);
+        jbuf_str(req, "\r\n");
         free(value);
     }
     if (!has_agent) {
-        sb_str(req, "User-Agent: " USER_AGENT "\r\n");
+        jbuf_str(req, "User-Agent: " USER_AGENT "\r\n");
     }
     if (body_len > 0 && !has_type) {
-        sb_str(req, "Content-Type: application/json\r\n");
+        jbuf_str(req, "Content-Type: application/json\r\n");
     }
     // Like Go's net/http: an empty body still gets "Content-Length: 0" on POST, PUT and PATCH.
     if (body_len > 0 || strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 || strcmp(method, "PATCH") == 0) {
         char line[40];
         snprintf(line, sizeof(line), "Content-Length: %u\r\n", (unsigned)body_len);
-        sb_str(req, line);
+        jbuf_str(req, line);
     }
-    sb_str(req, "\r\n");
+    jbuf_str(req, "\r\n");
     if (req->oom) {
         snprintf(err, ERR_MAX, "out of memory");
         return false;
@@ -660,32 +508,32 @@ static char *response_frame(const char *id, int status, const resp_t *r, const c
                             const char *sha256_hex)
 {
     char *headers = cJSON_PrintUnformatted(r->headers);
-    sb_t b = {0};
+    jbuf_t b = {0};
     char num[64];
-    sb_str(&b, "{\"id\":");
-    sb_json(&b, id, strlen(id));
+    jbuf_str(&b, "{\"id\":");
+    jbuf_json(&b, id, strlen(id));
     snprintf(num, sizeof(num), ",\"type\":\"response\",\"result\":{\"status\":%d,\"headers\":", status);
-    sb_str(&b, num);
-    sb_str(&b, headers ? headers : "{}");
+    jbuf_str(&b, num);
+    jbuf_str(&b, headers ? headers : "{}");
     if (r->chunks) {
         snprintf(num, sizeof(num), ",\"body_encoding\":\"chunks\",\"chunks\":%u,\"sha256\":\"", r->chunks->seq);
-        sb_str(&b, num);
-        sb_str(&b, sha256_hex);
-        sb_str(&b, "\"");
+        jbuf_str(&b, num);
+        jbuf_str(&b, sha256_hex);
+        jbuf_str(&b, "\"");
     } else {
-        sb_str(&b, ",\"body\":");
-        sb_json(&b, r->body.p ? r->body.p : "", r->body.len);
+        jbuf_str(&b, ",\"body\":");
+        jbuf_json(&b, r->body.p ? r->body.p : "", r->body.len);
     }
-    sb_str(&b, r->truncated ? ",\"truncated\":true" : ",\"truncated\":false");
-    sb_str(&b, ",\"final_url\":");
-    sb_json(&b, url, strlen(url));
-    sb_str(&b, ",\"method\":");
-    sb_json(&b, method, strlen(method));
+    jbuf_str(&b, r->truncated ? ",\"truncated\":true" : ",\"truncated\":false");
+    jbuf_str(&b, ",\"final_url\":");
+    jbuf_json(&b, url, strlen(url));
+    jbuf_str(&b, ",\"method\":");
+    jbuf_json(&b, method, strlen(method));
     snprintf(num, sizeof(num), ",\"body_bytes\":%u}}", (unsigned)r->body_bytes);
-    sb_str(&b, num);
+    jbuf_str(&b, num);
     cJSON_free(headers);
     if (b.oom || !headers) {
-        sb_free(&b);
+        jbuf_free(&b);
     }
     return b.p;
 }
@@ -717,16 +565,11 @@ int lan_http_timeout_seconds(const cJSON *params)
     return cJSON_IsNumber(v) && v->valuedouble >= 1 && v->valuedouble < cap ? (int)v->valuedouble : cap;
 }
 
-char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *sink)
-{
-    return lan_http_run_request(id, params, sink, NULL);
-}
-
 char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_sink_t *sink,
                            const lan_request_t *request)
 {
     const char *cancelled = lan_request_check(request);
-    if (cancelled) return error_frame(id, cancelled);
+    if (cancelled) return json_error_frame(id, cancelled);
     char err[ERR_MAX] = "";
     const int64_t started_us = esp_timer_get_time();
     if (!cJSON_IsObject(params)) {
@@ -744,17 +587,17 @@ char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_s
     }
     if (!method) {
         snprintf(err, sizeof(err), "unsupported HTTP method: %.40s", raw_method);
-        return error_frame(id, err);
+        return json_error_frame(id, err);
     }
 
     const cJSON *ju = cJSON_GetObjectItemCaseSensitive(params, "url");
     if (!cJSON_IsString(ju) || !ju->valuestring[0]) {
-        return error_frame(id, "'url' is required");
+        return json_error_frame(id, "'url' is required");
     }
     const char *url_text = ju->valuestring;
     url_t url;
     if (!parse_url(url_text, &url, err)) {
-        return error_frame(id, err);
+        return json_error_frame(id, err);
     }
 
     // Chunk mode only when asked for; anything else stays exactly the text mode it always was.
@@ -762,17 +605,17 @@ char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_s
     bool chunk_mode = false;
     if (cJSON_IsString(jr) && strcmp(jr->valuestring, "chunks") == 0) {
         if (!sink) {
-            return error_frame(id, "response_mode \"chunks\" is not available here");
+            return json_error_frame(id, "response_mode \"chunks\" is not available here");
         }
         chunk_mode = true;
     } else if (jr && !cJSON_IsNull(jr)) {
-        return error_frame(id, "unsupported response_mode (this device supports \"chunks\")");
+        return json_error_frame(id, "unsupported response_mode (this device supports \"chunks\")");
     }
     if (chunk_mode && sink->refuse) {
         const char *busy = sink->refuse(sink->ctx);
         if (busy) {
             ESP_LOGW(TAG, "%s refused: %s", id, busy);
-            return error_frame(id, busy);
+            return json_error_frame(id, busy);
         }
     }
     const size_t limit_max = chunk_mode ? LAN_HTTP_CHUNK_MAX_TOTAL : LAN_HTTP_MAX_BYTES;
@@ -790,15 +633,15 @@ char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_s
     uint32_t ip = 0;
     if (!lan_dest_resolve(url.host, &ip, err) || !lan_dest_check(ip, err)) {
         ESP_LOGW(TAG, "%s refused: %s", id, err);
-        return error_frame(id, err);
+        return json_error_frame(id, err);
     }
     char ip_text[16];
     inet_ntoa_r(*(struct in_addr *)&ip, ip_text, sizeof(ip_text));
 
-    sb_t req = {0};
+    jbuf_t req = {0};
     if (!build_request(&req, method, &url, cJSON_GetObjectItemCaseSensitive(params, "headers"), body_len, err)) {
-        sb_free(&req);
-        return error_frame(id, err);
+        jbuf_free(&req);
+        return json_error_frame(id, err);
     }
 
     esp_transport_handle_t t = url.https ? esp_transport_ssl_init() : esp_transport_tcp_init();
@@ -836,7 +679,7 @@ char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_s
             snprintf(err, sizeof(err), "request to %s timed out after %d s", url.host, timeout_s);
         } else if (e == ECONNREFUSED || e == ECONNRESET) {
             // lwIP reports a refused connect (RST to the SYN) as ECONNRESET, "Connection reset by
-            // peer", which read like the T-Circle itself had reset.
+            // peer", which read like the device itself had reset.
             snprintf(err, sizeof(err), "connect to %s:%d refused: nothing is listening on that port", url.host,
                      url.port);
         } else if (url.https && e == 0) {
@@ -937,7 +780,7 @@ done:;
     }
     if (!frame) {
         ESP_LOGW(TAG, "%s failed: %s", id, err);
-        frame = error_frame(id, err);
+        frame = json_error_frame(id, err);
     }
     comma_heap_log(chunk_mode ? "http_chunks_peak" : "http_text_peak");
     if (t) {
@@ -948,9 +791,9 @@ done:;
     if (chunk_mode) {
         chunks_free(&chunks);
     }
-    sb_free(&req);
-    sb_free(&r.value);
-    sb_free(&r.body);
+    jbuf_free(&req);
+    jbuf_free(&r.value);
+    jbuf_free(&r.body);
     cJSON_Delete(r.headers);
     comma_heap_log("http_cleanup");
     return frame;

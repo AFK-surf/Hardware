@@ -2,8 +2,16 @@
 #pragma once
 #ifdef ESP_PLATFORM
 #include "sdkconfig.h"
+// COMMA_FIRMWARE_VERSION is firmware/version.txt, the PROJECT_VER that esp_app_desc reports too
+// (main/CMakeLists.txt).
 #else
 // Host test defaults match main/Kconfig.projbuild. Tests may override with -D.
+#ifndef COMMA_FIRMWARE_VERSION
+#define COMMA_FIRMWARE_VERSION "0.0.0-host"
+#endif
+#ifndef CONFIG_COMMA_BOARD_ID
+#define CONFIG_COMMA_BOARD_ID "host"
+#endif
 #ifndef CONFIG_COMMA_LAN_HTTP_MAX_BYTES
 #define CONFIG_COMMA_LAN_HTTP_MAX_BYTES 65536
 #endif

@@ -1,5 +1,3 @@
-#include "firmware_config.h"
-#include "memory_caps.h"
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -22,7 +20,12 @@
 // pointers backwards, and records are matched to instances by exact name, not substring.
 
 #include "lan_discover_core.h"
+
+#include "b64.h"
+#include "firmware_config.h"
+#include "json_buf.h"
 #include "lan_discover.h"
+#include "memory_caps.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -209,73 +212,6 @@ static const char *arena_str(ld_ctx_t *ctx, const char *s)
     return arena_dup(ctx, s, strlen(s), true);
 }
 
-void ld_sb_add(ld_sb_t *b, const char *s, size_t n)
-{
-    if (b->oom || b->full) {
-        return;
-    }
-    if (b->limit && n > b->limit - b->len) {
-        b->full = true;
-        return;
-    }
-    if (b->measure) {
-        b->len += n;
-        return;
-    }
-    if (b->len + n + 1 > b->cap) {
-        size_t cap = b->cap ? b->cap : 1024;
-        while (cap < b->len + n + 1) {
-            cap *= 2;
-        }
-        if (b->limit && cap > b->limit + 1) cap = b->limit + 1;
-        char *p = heap_caps_realloc(b->p, cap, COMMA_BUFFER_CAPS);
-        if (!p) {
-            b->oom = true;
-            return;
-        }
-        b->p = p;
-        b->cap = cap;
-    }
-    memcpy(b->p + b->len, s, n);
-    b->len += n;
-    b->p[b->len] = 0;
-}
-
-void ld_sb_str(ld_sb_t *b, const char *s)
-{
-    ld_sb_add(b, s, strlen(s));
-}
-
-void ld_sb_json(ld_sb_t *b, const char *s)
-{
-    ld_sb_add(b, "\"", 1);
-    const char *run = s;
-    for (const char *p = s; *p; ++p) {
-        const unsigned char c = (unsigned char)*p;
-        char esc[8];
-        if (c == '"' || c == '\\') {
-            esc[0] = '\\';
-            esc[1] = (char)c;
-            esc[2] = 0;
-        } else if (c < 0x20 || c == 0x7F) {
-            snprintf(esc, sizeof(esc), "\\u%04x", c);
-        } else {
-            continue;
-        }
-        ld_sb_add(b, run, (size_t)(p - run));
-        ld_sb_str(b, esc);
-        run = p + 1;
-    }
-    ld_sb_str(b, run);
-    ld_sb_add(b, "\"", 1);
-}
-
-void ld_sb_free(ld_sb_t *b)
-{
-    free(b->p);
-    memset(b, 0, sizeof(*b));
-}
-
 static void ip_text(uint32_t ip, char out[16])
 {
     const uint8_t *b = (const uint8_t *)&ip;
@@ -358,37 +294,14 @@ static host_t *host_for(ld_ctx_t *ctx, uint32_t ip)
 
 // ---- Caller-supplied UDP probes ---------------------------------------------------------------
 
-static const char PROBE_B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static int probe_b64_value(char c)
-{
-    const char *p = c ? strchr(PROBE_B64, c) : NULL;
-    return p ? (int)(p - PROBE_B64) : -1;
-}
-
-// Validate without allocating; decode on the second pass into the per-run table. Require RFC 4648
-// standard padded base64, including zero pad bits. Bound encoded length before walking it.
+// Validate without allocating (out NULL); decode on the second pass into the per-run table. The
+// encoded length is bounded before it is walked. Returns 1..PROBE_PAYLOAD bytes, or -1.
 static int probe_decode(const char *s, uint8_t *out)
 {
     const size_t n = strlen(s);
-    if (!n || n % 4 || n > 4 * ((CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD + 2) / 3)) return -1;
-    size_t used = 0;
-    for (size_t i = 0; i < n; i += 4) {
-        int a = probe_b64_value(s[i]), b = probe_b64_value(s[i + 1]);
-        int c = probe_b64_value(s[i + 2]), d = probe_b64_value(s[i + 3]);
-        int pad = s[i + 2] == '=' ? 2 : (s[i + 3] == '=' ? 1 : 0);
-        if (a < 0 || b < 0 || (pad && i + 4 != n) ||
-            (pad == 2 && (s[i + 3] != '=' || (b & 15))) ||
-            (pad < 2 && c < 0) || (pad == 1 && (c & 3)) || (pad == 0 && d < 0)) return -1;
-        uint32_t v = ((uint32_t)a << 18) | ((uint32_t)b << 12) |
-                     (pad < 2 ? (uint32_t)c << 6 : 0) | (pad == 0 ? (uint32_t)d : 0);
-        if (used + 3 - pad > CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD) return -1;
-        for (int k = 0; k < 3 - pad; ++k) {
-            if (out) out[used] = (uint8_t)(v >> (16 - 8 * k));
-            used++;
-        }
-    }
-    return (int)used;
+    if (n > B64_ENCODED_LEN(CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD)) return -1;
+    const long len = b64_decode(s, n, out, CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD);
+    return len > 0 ? (int)len : -1;
 }
 
 static const char *validate_probes(const cJSON *params, unsigned sources)
@@ -583,11 +496,11 @@ uint32_t ld_ble_wait_limit(int timeout_ms)
     return left <= 0 ? 0 : (left > LD_BLE_WAIT_MAX_MS ? LD_BLE_WAIT_MAX_MS : (uint32_t)left);
 }
 
-uint32_t ld_wait_while(bool (*busy)(void), void (*sleep_ms)(uint32_t), uint32_t limit_ms, uint32_t step_ms,
-                       bool *still_busy)
+uint32_t ld_wait_while(bool (*busy)(void *ctx), void *ctx, void (*sleep_ms)(uint32_t), uint32_t limit_ms,
+                       uint32_t step_ms, bool *still_busy)
 {
     uint32_t waited = 0;
-    while (busy()) {
+    while (busy(ctx)) {
         if (waited >= limit_ms) {
             *still_busy = true;
             return waited;
@@ -600,19 +513,17 @@ uint32_t ld_wait_while(bool (*busy)(void), void (*sleep_ms)(uint32_t), uint32_t 
     return waited;
 }
 
-// Encode directly into the bounded JSON builder: no temporary answer string on the task stack.
-static void write_probe_bytes(ld_sb_t *b, const uint8_t *data, size_t n)
+// Encoded straight into the bounded JSON builder, 48 bytes at a time: no answer-sized string on the
+// task stack. Every piece but the last is a multiple of 3 bytes, so the pieces join into one encoding.
+static void write_probe_bytes(jbuf_t *b, const uint8_t *data, size_t n)
 {
-    for (size_t i = 0; i < n; i += 3) {
-        uint32_t v = ((uint32_t)data[i] << 16) | (i + 1 < n ? (uint32_t)data[i + 1] << 8 : 0) |
-                     (i + 2 < n ? data[i + 2] : 0);
-        char enc[4] = {PROBE_B64[v >> 18], PROBE_B64[(v >> 12) & 63],
-                       i + 1 < n ? PROBE_B64[(v >> 6) & 63] : '=', i + 2 < n ? PROBE_B64[v & 63] : '='};
-        ld_sb_add(b, enc, sizeof(enc));
+    char enc[B64_ENCODED_LEN(48)];
+    for (size_t i = 0; i < n; i += 48) {
+        jbuf_add(b, enc, b64_encode(data + i, n - i < 48 ? n - i : 48, enc));
     }
 }
 
-static void write_probes(const ld_ctx_t *ctx, ld_sb_t *b, const host_t *host)
+static void write_probes(const ld_ctx_t *ctx, jbuf_t *b, const host_t *host)
 {
     const probe_state_t *ps = ctx->probes;
     if (!ps) return;
@@ -620,15 +531,15 @@ static void write_probes(const ld_ctx_t *ctx, ld_sb_t *b, const host_t *host)
     for (unsigned p = 0; p < ps->count; ++p) {
         const probe_pair_t *pair = &ps->pairs[host - ctx->hosts][p];
         if (!(pair->flags & PROBE_STORED)) continue;
-        ld_sb_str(b, open ? "," : ",\"probes\":[");
+        jbuf_str(b, open ? "," : ",\"probes\":[");
         open = true;
-        ld_sb_str(b, "{\"id\":");
-        ld_sb_json(b, ps->probes[p].id);
-        ld_sb_str(b, ",\"payload_b64\":\"");
+        jbuf_str(b, "{\"id\":");
+        jbuf_json_str(b, ps->probes[p].id);
+        jbuf_str(b, ",\"payload_b64\":\"");
         write_probe_bytes(b, ps->answers + pair->offset, pair->len);
-        ld_sb_str(b, pair->flags & PROBE_CUT ? "\",\"cut\":true}" : "\"}");
+        jbuf_str(b, pair->flags & PROBE_CUT ? "\",\"cut\":true}" : "\"}");
     }
-    if (open) ld_sb_str(b, "]");
+    if (open) jbuf_str(b, "]");
 }
 
 // NULL on success, or the error for the caller.
@@ -1134,7 +1045,7 @@ void ld_counts(ld_ctx_t *ctx, int *hosts, int *arp, int *mdns, int *ssdp, bool *
 
 // TXT rdata as an object: "key=value" -> "key":"value", a bare "key" -> "key":"". The first of a
 // repeated key wins (RFC 6763 §6.4).
-static void write_txt(ld_ctx_t *ctx, ld_sb_t *b, const uint8_t *txt, size_t len)
+static void write_txt(ld_ctx_t *ctx, jbuf_t *b, const uint8_t *txt, size_t len)
 {
     struct {
         const uint8_t *p;
@@ -1179,35 +1090,35 @@ static void write_txt(ld_ctx_t *ctx, ld_sb_t *b, const uint8_t *txt, size_t len)
         keys[nkeys].len = kl;
         nkeys++;
         clean_copy(value, sizeof(value), eq ? eq + 1 : s, eq ? l - kl - 1 : 0, NULL);
-        ld_sb_str(b, open ? "," : ",\"txt\":{");
+        jbuf_str(b, open ? "," : ",\"txt\":{");
         open = true;
-        ld_sb_json(b, key);
-        ld_sb_str(b, ":");
-        ld_sb_json(b, value);
+        jbuf_json_str(b, key);
+        jbuf_str(b, ":");
+        jbuf_json_str(b, value);
     }
     if (open) {
-        ld_sb_str(b, "}");
+        jbuf_str(b, "}");
     }
 }
 
-static void write_host(ld_ctx_t *ctx, ld_sb_t *b, const host_t *h)
+static void write_host(ld_ctx_t *ctx, jbuf_t *b, const host_t *h)
 {
     char ip[16];
     ip_text(h->ip, ip);
-    ld_sb_str(b, "{\"ip\":");
-    ld_sb_json(b, ip);
+    jbuf_str(b, "{\"ip\":");
+    jbuf_json_str(b, ip);
     if (h->has_mac) {
         char mac[18];
         snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", h->mac[0], h->mac[1], h->mac[2], h->mac[3],
                  h->mac[4], h->mac[5]);
-        ld_sb_str(b, ",\"mac\":");
-        ld_sb_json(b, mac);
+        jbuf_str(b, ",\"mac\":");
+        jbuf_json_str(b, mac);
     }
     if (h->hostname) {
-        ld_sb_str(b, ",\"hostname\":");
-        ld_sb_json(b, h->hostname);
+        jbuf_str(b, ",\"hostname\":");
+        jbuf_json_str(b, h->hostname);
     }
-    ld_sb_str(b, ",\"sources\":[");
+    jbuf_str(b, ",\"sources\":[");
     static const struct {
         uint8_t bit;
         const char *name;
@@ -1215,43 +1126,43 @@ static void write_host(ld_ctx_t *ctx, ld_sb_t *b, const host_t *h)
     bool comma = false;
     for (size_t i = 0; i < sizeof(srcs) / sizeof(srcs[0]); ++i) {
         if (h->sources & srcs[i].bit) {
-            ld_sb_str(b, comma ? "," : "");
-            ld_sb_str(b, srcs[i].name);
+            jbuf_str(b, comma ? "," : "");
+            jbuf_str(b, srcs[i].name);
             comma = true;
         }
     }
-    ld_sb_str(b, "],\"services\":[");
+    jbuf_str(b, "],\"services\":[");
     for (int i = 0; i < h->nsvc; ++i) {
         const svc_t *s = &h->svc[i];
         char port[8];
         snprintf(port, sizeof(port), "%u", s->port);
-        ld_sb_str(b, i ? ",{\"type\":" : "{\"type\":");
-        ld_sb_json(b, s->type);
-        ld_sb_str(b, ",\"name\":");
-        ld_sb_json(b, s->name);
-        ld_sb_str(b, ",\"port\":");
-        ld_sb_str(b, port);
+        jbuf_str(b, i ? ",{\"type\":" : "{\"type\":");
+        jbuf_json_str(b, s->type);
+        jbuf_str(b, ",\"name\":");
+        jbuf_json_str(b, s->name);
+        jbuf_str(b, ",\"port\":");
+        jbuf_str(b, port);
         if (s->txt) {
             write_txt(ctx, b, s->txt, s->txt_len);
         }
-        ld_sb_str(b, "}");
+        jbuf_str(b, "}");
     }
-    ld_sb_str(b, "]");
+    jbuf_str(b, "]");
     if (h->nssdp) {
-        ld_sb_str(b, ",\"ssdp\":[");
+        jbuf_str(b, ",\"ssdp\":[");
         for (int i = 0; i < h->nssdp; ++i) {
-            ld_sb_str(b, i ? ",{\"server\":" : "{\"server\":");
-            ld_sb_json(b, h->ssdp[i].server);
-            ld_sb_str(b, ",\"location\":");
-            ld_sb_json(b, h->ssdp[i].location);
-            ld_sb_str(b, ",\"st\":");
-            ld_sb_json(b, h->ssdp[i].st);
-            ld_sb_str(b, "}");
+            jbuf_str(b, i ? ",{\"server\":" : "{\"server\":");
+            jbuf_json_str(b, h->ssdp[i].server);
+            jbuf_str(b, ",\"location\":");
+            jbuf_json_str(b, h->ssdp[i].location);
+            jbuf_str(b, ",\"st\":");
+            jbuf_json_str(b, h->ssdp[i].st);
+            jbuf_str(b, "}");
         }
-        ld_sb_str(b, "]");
+        jbuf_str(b, "]");
     }
     write_probes(ctx, b, h);
-    ld_sb_str(b, "}");
+    jbuf_str(b, "}");
 }
 
 static uint32_t host_order(uint32_t ip)
@@ -1263,15 +1174,15 @@ static uint32_t host_order(uint32_t ip)
 // {"hosts":[...],"truncated":...} for at most max hosts of order. A host that would take the object
 // past LD_MAX_JSON is rolled back whole and ends the list. Returns the hosts written. Writing again
 // with max = that count reproduces the same bytes: nothing written depends on the builder.
-static int write_result(ld_ctx_t *ctx, ld_sb_t *b, const int *order, int max)
+static int write_result(ld_ctx_t *ctx, jbuf_t *b, const int *order, int max)
 {
     const size_t base = b->len;
-    ld_sb_str(b, "{\"hosts\":[");
+    jbuf_str(b, "{\"hosts\":[");
     int written = 0;
     for (int i = 0; i < max; ++i) {
         const size_t before = b->len;
         if (written) {
-            ld_sb_str(b, ",");
+            jbuf_str(b, ",");
         }
         write_host(ctx, b, &ctx->hosts[order[i]]);
         if (b->full || b->len - base + (ctx->probes ? 64 : 32) > LD_MAX_JSON) {
@@ -1286,9 +1197,9 @@ static int write_result(ld_ctx_t *ctx, ld_sb_t *b, const int *order, int max)
         }
         written++;
     }
-    ld_sb_str(b, ctx->truncated ? "],\"truncated\":true" : "],\"truncated\":false");
-    if (ctx->probes && ctx->probes->truncated) ld_sb_str(b, ",\"probes_truncated\":true");
-    ld_sb_str(b, "}");
+    jbuf_str(b, ctx->truncated ? "],\"truncated\":true" : "],\"truncated\":false");
+    if (ctx->probes && ctx->probes->truncated) jbuf_str(b, ",\"probes_truncated\":true");
+    jbuf_str(b, "}");
     return written;
 }
 
@@ -1310,20 +1221,20 @@ char *ld_result_frame(ld_ctx_t *ctx, const char *prefix, const char *suffix)
     }
     // Measure first, then write once into an exactly sized buffer: no growth by doubling, no
     // realloc holding old and new copies at once, and no second copy for the reply envelope.
-    ld_sb_t m = {.limit = LD_MAX_JSON, .measure = true};
+    jbuf_t m = {.limit = LD_MAX_JSON, .measure = true};
     const int kept = write_result(ctx, &m, order, ctx->nhosts);
     const size_t need = strlen(prefix) + m.len + strlen(suffix);
-    ld_sb_t b = {.limit = need};
+    jbuf_t b = {.limit = need};
     b.p = heap_caps_realloc(NULL, need + 1, COMMA_BUFFER_CAPS);
     if (!b.p) {
         return NULL;
     }
     b.cap = need + 1;
-    ld_sb_str(&b, prefix);
+    jbuf_str(&b, prefix);
     write_result(ctx, &b, order, kept);
-    ld_sb_str(&b, suffix);
+    jbuf_str(&b, suffix);
     if (b.oom || b.full || b.len != need) {
-        ld_sb_free(&b);
+        jbuf_free(&b);
     }
     return b.p;
 }

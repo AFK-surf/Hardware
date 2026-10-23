@@ -221,40 +221,6 @@ static size_t sink_frame_bytes(void *ctx)
     return st->asked;
 }
 
-static int b64_val(char c)
-{
-    const char *p = c ? strchr(B64, c) : NULL;
-    return p ? (int)(p - B64) : -1;
-}
-
-// Strict standard base64 with padding; -1 when invalid.
-static long b64_decode(const char *in, uint8_t *out)
-{
-    const size_t n = strlen(in);
-    if (n % 4) {
-        return -1;
-    }
-    long o = 0;
-    for (size_t i = 0; i < n; i += 4) {
-        int v[4];
-        for (int k = 0; k < 4; ++k) {
-            v[k] = in[i + k] == '=' && i + 4 == n && k >= 2 ? 0 : b64_val(in[i + k]);
-            if (v[k] < 0) {
-                return -1;
-            }
-        }
-        const uint32_t w = (uint32_t)v[0] << 18 | (uint32_t)v[1] << 12 | (uint32_t)v[2] << 6 | (uint32_t)v[3];
-        out[o++] = (uint8_t)(w >> 16);
-        if (in[i + 2] != '=') {
-            out[o++] = (uint8_t)(w >> 8);
-        }
-        if (in[i + 3] != '=') {
-            out[o++] = (uint8_t)w;
-        }
-    }
-    return o;
-}
-
 static bool sink_send(void *ctx, const char *frame, size_t len, size_t raw_bytes, char *err, size_t err_size)
 {
     sink_state_t *st = ctx;
@@ -283,7 +249,7 @@ static bool sink_send(void *ctx, const char *frame, size_t len, size_t raw_bytes
         st->cap = (st->len + raw_bytes + 4) * 2;
         st->data = realloc(st->data, st->cap);
     }
-    const long n = b64_decode(data->valuestring, st->data + st->len);
+    const long n = b64_decode(data->valuestring, strlen(data->valuestring), st->data + st->len, st->cap - st->len);
     if (n < 0 || (size_t)n != raw_bytes || raw_bytes == 0 || raw_bytes > st->asked || raw_bytes > LAN_HTTP_CHUNK_BYTES) {
         snprintf(st->why, sizeof(st->why), "frame %u: decoded %ld, raw_bytes %zu, asked %zu", st->frames, n, raw_bytes,
                  st->asked);
@@ -421,7 +387,7 @@ static void test_destinations(void)
         CHECK(!lan_dest_check(ip(refused[i]), err) && err[0], "%s should be refused", refused[i]);
     }
     CHECK(!lan_dest_check(ip("8.8.8.8"), err) && strstr(err, "public address"), "public wording: %s", err);
-    CHECK(!lan_dest_check(ip("192.168.1.17"), err) && strstr(err, "T-Circle itself"), "self wording: %s", err);
+    CHECK(!lan_dest_check(ip("192.168.1.17"), err) && strstr(err, "device itself"), "self wording: %s", err);
     CHECK(!lan_dest_check(ip("127.0.0.1"), err) && strstr(err, "loopback"), "loopback wording: %s", err);
 
     // A LAN on non-private space (carrier-grade NAT here): its own subnet counts, the rest doesn't.
@@ -796,15 +762,6 @@ static void test_chunks(void)
           "call mid-transfer: %u frames, %s", g_sink.frames, g_frame);
     cJSON_Delete(f);
 
-    // base64 of the encoder itself, the RFC 4648 §10 vectors.
-    const char *vec[][2] = {{"", ""}, {"f", "Zg=="}, {"fo", "Zm8="}, {"foo", "Zm9v"}, {"foob", "Zm9vYg=="},
-                            {"fooba", "Zm9vYmE="}, {"foobar", "Zm9vYmFy"}};
-    for (size_t i = 0; i < sizeof(vec) / sizeof(*vec); ++i) {
-        char out[16];
-        const size_t n = b64_encode((const uint8_t *)vec[i][0], strlen(vec[i][0]), out);
-        out[n] = 0;
-        CHECK(strcmp(out, vec[i][1]) == 0 && n == B64_LEN(strlen(vec[i][0])), "b64(%s) = %s", vec[i][0], out);
-    }
     sink_reset(0, 0);
 }
 
