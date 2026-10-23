@@ -2,43 +2,42 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Every board runs at full speed: TLS, the voice pipeline and discovery share the CPU.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # Cloudflare sends GTS Root R4 cross-signed by the retired GlobalSign Root CA.
-# Cloudflare's 101 upgrade response is over 1 KB of headers.
-# pcm16_24k is 48 KB/s each way. Without a proxy the RTT to Cloudflare is
-# ~250 ms, so the 5760-byte default windows cap TCP near 23 KB/s (close 4410).
-# The send buffer stays at 24 KB (0.5 s of audio, about 2x the bandwidth-delay
-# product): a bigger one holds more stale audio that bursts out after a stall
-# and trips the server's too_fast check (close 4400).
-# Sends take their own lock. Otherwise every send waits while the websocket task reads a whole
-# agent-audio frame (up to 16 KB) under the shared lock, often 300-500 ms, which drops mic audio
-# and delays output.played into 4410.
-# Agent audio stalls for 2-4 s on lossy Wi-Fi, which the server closes as 4410. SACK lets the
-# server resend just the lost segment instead of waiting out a retransmission timeout, and a
-# receive mailbox of 64 holds a full 64 KB window (32 x 1440 B is only 46 KB).
-# lan_discover: a router answering SSDP ssdp:all sends a dozen or more datagrams at once, and
-# mDNS answers arrive in bursts while the call tasks keep the discovery task waiting. The default
-# mailbox of 6 drops the rest.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
+# Cloudflare's 101 upgrade response is over 1 KB of headers.
 CONFIG_WS_BUFFER_SIZE=4096
+# Sends take their own lock. Otherwise every send waits while the websocket task reads a whole
+# agent-audio frame (up to 16 KB) under the shared lock, often 300-500 ms, which drops mic audio
+# and delays output.played into 4410.
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+
+# pcm16_24k is 48 KB/s each way. Without a proxy the RTT to Cloudflare is ~250 ms, so the
+# 5760-byte default windows cap TCP near 23 KB/s (close 4410).
 CONFIG_LWIP_TCP_WND_DEFAULT=65535
+# The send buffer stays at 24 KB (0.5 s of audio, about 2x the bandwidth-delay product): a bigger
+# one holds more stale audio that bursts out after a stall and trips the server's too_fast check
+# (close 4400).
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576
+# Agent audio stalls for 2-4 s on lossy Wi-Fi, which the server closes as 4410. SACK lets the
+# server resend just the lost segment instead of waiting out a retransmission timeout, and a
+# receive mailbox of 64 holds a full 64 KB window (32 x 1440 B is only 46 KB).
+CONFIG_LWIP_TCP_SACK_OUT=y
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
-CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
-CONFIG_LWIP_TCP_SACK_OUT=y
+# lan_discover: a router answering SSDP ssdp:all sends a dozen or more datagrams at once, and
+# mDNS answers arrive in bursts while the call tasks keep the discovery task waiting. The default
+# mailbox of 6 drops the rest.
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
 
 # BLE provisioning (provisioning.c). NimBLE, peripheral only, one connection, and only while
 # unprovisioned or in pairing mode: BLE is fully shut down before a call can start.
-# LE Secure Connections only, authenticated (passkey on the screen). Bonds stay in RAM: they
-# only need to last one pairing session.
-# The credentials JSON is a few hundred bytes; one write at the largest MTU fits it.
-# GATT writes are parsed on the host task (a 513-byte buffer plus cJSON).
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_BLUEDROID_ENABLED=n
@@ -48,12 +47,16 @@ CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+# LE Secure Connections only, authenticated (passkey on the screen). Bonds stay in RAM: they
+# only need to last one pairing session.
 CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
 CONFIG_BT_NIMBLE_SM_LEGACY=n
 CONFIG_BT_NIMBLE_SM_SC=y
 CONFIG_BT_NIMBLE_SM_SC_ONLY=1
 CONFIG_BT_NIMBLE_NVS_PERSIST=n
+# The credentials JSON is a few hundred bytes; one write at the largest MTU fits it.
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
-CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+# GATT writes are parsed on the host task (a 513-byte buffer plus cJSON).
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
-CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y

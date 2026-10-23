@@ -10,7 +10,6 @@ CONFIG_IDF_TARGET="esp32s3"
 
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 
 CONFIG_SPIRAM=y
@@ -24,22 +23,18 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # App 0x10000-0x700000, ESP-SR model 0x700000-0x800000.
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.m5stack-sticks3.csv"
 
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
-
-# The board's USB port is the S3's USB-Serial/JTAG, the secondary console.
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 
 # As on the T-Circle (8 MB PSRAM): TLS records and NimBLE pools in PSRAM, so the Connector can start
 # while BLE is up.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 
-# Mic cleanup (voice_clean.c), as on the T-Circle: ESP-SR AFE with the VAD (nsnet2 optional), models in the
-# "model" partition. voice_clean.lf puts nsnet3's unused 19 KB .bss in PSRAM. CPU load per core in
-# the call stats.
+# Mic cleanup (voice_clean.c): the ESP-SR AFE's VAD, with nsnet2 noise suppression as an option,
+# models in the "model" partition.
 CONFIG_MODEL_IN_FLASH=y
 CONFIG_SR_NSN_NSNET2=y
 CONFIG_SR_VADN_VADNET1_MEDIUM=y
+# Lets voice_clean.lf put nsnet3's unused 19 KB .bss in PSRAM.
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# CPU load per core in the call stats (idle tasks' run time).
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
