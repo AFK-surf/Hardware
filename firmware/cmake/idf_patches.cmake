@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # lan_discover sweeps the subnet with ARP and reads the replies out of lwIP's ARP table. With
 # the default 10 entries, one batch of replies pushes out the next and the router's own entry.
 # No Kconfig for it in IDF 6.0.2; PUBLIC so main's loop over the table sees the same size.

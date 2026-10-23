@@ -101,22 +101,6 @@ char *ld_result_json(ld_ctx_t *ctx);
 // one exactly sized allocation. The object alone stays within LD_MAX_JSON.
 char *ld_result_frame(ld_ctx_t *ctx, const char *prefix, const char *suffix);
 
-// Append a JSON string literal of s (any bytes; control characters escaped) to a PSRAM buffer that
-// ld_sb_* manage. Exposed for the reply envelope.
-typedef struct {
-    char *p;
-    size_t len;
-    size_t cap;
-    size_t limit; // maximum content bytes, excluding NUL; zero means unbounded (envelopes)
-    bool oom;
-    bool full; // content limit reached, distinct from allocation failure
-    bool measure; // count len only; p stays NULL
-} ld_sb_t;
-void ld_sb_add(ld_sb_t *b, const char *s, size_t n);
-void ld_sb_str(ld_sb_t *b, const char *s);
-void ld_sb_json(ld_sb_t *b, const char *s);
-void ld_sb_free(ld_sb_t *b);
-
 // Boards without PSRAM (CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY) wait for setup BLE to end before
 // discovery allocates. The backend gives a lan_discover request 15 s; the
 // wait leaves the scan and a reply margin inside that, and is never longer than 10 s.
@@ -124,10 +108,10 @@ void ld_sb_free(ld_sb_t *b);
 #define LD_REQUEST_DEADLINE_MS 15000
 #define LD_REPLY_MARGIN_MS 2000
 uint32_t ld_ble_wait_limit(int timeout_ms);
-// Sleep in step_ms steps while busy() is true, at most limit_ms. Returns the time slept and sets
+// Sleep in step_ms steps while busy(ctx) is true, at most limit_ms. Returns the time slept and sets
 // *still_busy when it gave up.
-uint32_t ld_wait_while(bool (*busy)(void), void (*sleep_ms)(uint32_t), uint32_t limit_ms, uint32_t step_ms,
-                       bool *still_busy);
+uint32_t ld_wait_while(bool (*busy)(void *ctx), void *ctx, void (*sleep_ms)(uint32_t), uint32_t limit_ms,
+                       uint32_t step_ms, bool *still_busy);
 
 // Encode a DNS question for name ("a.b.local"), type and class into buf. Returns its length, or 0
 // when it doesn't fit.

@@ -12,10 +12,12 @@ python -m unittest discover -s firmware/tools -p 'test_*.py'
 ```
 
 The C host tests compile the real LAN, JSON and audio code against small ESP-IDF stubs with
-AddressSanitizer and UndefinedBehaviorSanitizer. They currently target **macOS** (the HTTP test uses
-CommonCrypto). Build one board first (for the managed cJSON component), activate ESP-IDF, then:
+AddressSanitizer and UndefinedBehaviorSanitizer. They never use the machine's network or DNS. They
+currently target **macOS** (the HTTP test uses CommonCrypto). Build one board first (for the managed
+cJSON component), activate ESP-IDF, then:
 
 ```sh
+sh firmware/tools/codec_test/run.sh
 sh firmware/tools/lan_discover_test/run.sh
 sh firmware/tools/lan_http_test/run.sh
 sh firmware/tools/lan_udp_test/run.sh
@@ -56,8 +58,9 @@ They do not replace board tests for Wi-Fi, Bluetooth or audio.
 | --- | --- |
 | `firmware/main/` | Shared gateway: Connector, LAN methods, Wi-Fi, Bluetooth setup, keys, Kconfig |
 | `firmware/voice/` | Shared voice call: voice session, playback, noise suppression and VAD |
-| `firmware/ui/` | Shared screen cards, fonts and logo for each screen size |
+| `firmware/ui/` | Shared screen cards, fonts and logo for each screen size, and the panel transfer |
 | `firmware/boards/<board>/` | Pins and drivers for one board |
+| `firmware/boards/common/` | Drivers for parts that several boards use (CST816-family touch) |
 | `firmware/components/` | Vendored GC9D01 LCD driver (Espressif, Apache-2.0) |
 | `devices/` | Per-board configuration overlays and board notes |
 | `tools/board.sh` | Build, flash and monitor one board with its own config and build directory |
@@ -69,7 +72,9 @@ They do not replace board tests for Wi-Fi, Bluetooth or audio.
 2. Put pins and drivers in `firmware/boards/<board>/`. A board with voice or a screen reuses
    `firmware/voice/` and `firmware/ui/` and implements only `voice/board_audio.h` (mic and speaker
    at the pipeline's rates), `voice/board_input.h` (tap and keys) and `ui/board_display.h` (panel,
-   framebuffer, sleep). Shared code never includes a board's own headers.
+   framebuffer, sleep). Reuse what is already there: `ui/panel_transfer.h` sends a framebuffer with
+   bounded waits, and `boards/common/` drives parts other boards use. Shared code never includes a
+   board's own headers.
 3. Add a `COMMA_BOARD` choice and board ID in `firmware/main/Kconfig.projbuild`, an overlay
    `devices/sdkconfig.<board>`, the board/target mapping in `tools/board.sh`, and source selection
    in `firmware/main/CMakeLists.txt`. Choose voice, display, pairing method, GPIOs and limits from

@@ -196,18 +196,8 @@ static void watchdog_task(void *arg)
             continue;
         }
         next_ping = now + PING_INTERVAL_US;
-        bool ok = ping_gateway(gw, ++seq);
+        const bool ok = ping_gateway(gw, ++seq);
         comma_heap_log("netdog");
-#ifdef NET_WATCHDOG_SIMULATE
-        // Bench test only (#define NET_WATCHDOG_SIMULATE at the top of this file; -D via idf.py is
-        // cached in build/toolchain/cflags and not rebuilt): 1 = three misses once after 60 s uptime,
-        // 2 = misses forever after 60 s.
-        static int simulated;
-        if (now > 60LL * 1000000 && (NET_WATCHDOG_SIMULATE == 2 || simulated < 3)) {
-            ok = false;
-            simulated++;
-        }
-#endif
         if (ok) {
             misses = 0;
             router_answered = true;

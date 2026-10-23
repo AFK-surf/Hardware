@@ -32,7 +32,6 @@ static atomic_bool s_up;
 static atomic_uint s_ip_generation;
 static atomic_int s_mode = MODE_NONE;
 static atomic_int s_result = WIFI_RESULT_IDLE;
-static atomic_int s_reason;
 // Automatic reconnects of a MODE_KEEP connection are held: by provisioning while an app is
 // connected, and by a scan while it runs. A connect attempt in flight blocks scanning, and an
 // unreachable network would otherwise be retried forever.
@@ -87,7 +86,6 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
         const wifi_event_sta_disconnected_t *event = data;
         const int reason = event ? event->reason : -1;
         s_up = false;
-        s_reason = reason;
         xEventGroupClearBits(s_events, WIFI_UP_BIT);
         const connect_mode_t mode = s_mode;
         if (mode == MODE_KEEP) {
@@ -223,7 +221,6 @@ esp_err_t wifi_connect(const char *ssid, const char *password, bool keep_retryin
     s_attempts = 0;
     s_auth_failures = 0;
     s_not_found = 0;
-    s_reason = 0;
     s_result = WIFI_RESULT_CONNECTING;
     s_mode = keep_retrying ? MODE_KEEP : MODE_TRIAL;
     err = esp_wifi_connect();
@@ -239,11 +236,6 @@ esp_err_t wifi_connect(const char *ssid, const char *password, bool keep_retryin
 wifi_result_t wifi_result(void)
 {
     return s_result;
-}
-
-int wifi_last_reason(void)
-{
-    return s_reason;
 }
 
 static int by_rssi(const void *a, const void *b)

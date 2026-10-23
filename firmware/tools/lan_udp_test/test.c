@@ -177,31 +177,11 @@ static void answer(int who, const void *data, size_t len)
 
 // ---- Tests -------------------------------------------------------------------------------------
 
-static void test_base64(void)
+// The encoding as a C string, for building params and comparing answers.
+static char *b64_str(const uint8_t *in, size_t n, char *out)
 {
-    uint8_t in[300], back[300];
-    char text[420];
-    srand(7);
-    for (size_t n = 0; n < sizeof(in); ++n) {
-        for (size_t i = 0; i < n; ++i) {
-            in[i] = (uint8_t)rand();
-        }
-        b64_encode(in, n, text);
-        CHECK(strlen(text) == (n + 2) / 3 * 4, "encoded length for %zu", n);
-        int got = b64_decode(text, back, sizeof(back));
-        CHECK(got == (int)n && memcmp(in, back, n) == 0, "round trip %zu", n);
-    }
-    b64_encode((const uint8_t *)"foobar", 6, text);
-    CHECK(strcmp(text, "Zm9vYmFy") == 0, "RFC 4648 vector: %s", text);
-    b64_encode((const uint8_t *)"fo", 2, text);
-    CHECK(strcmp(text, "Zm8=") == 0, "padding: %s", text);
-    const char *bad[] = {"Zm8", "Zm=8", "Z===", "Zm9v YmFy", "Zm9v\nYmFy", "Zm9-", "Zm9_", "=Zm8", "Zg==Zg=="};
-    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
-        CHECK(b64_decode(bad[i], back, sizeof(back)) < 0, "rejects \"%s\"", bad[i]);
-    }
-    CHECK(b64_decode("Zm9vYmFy", back, 5) == -2, "longer than max");
-    CHECK(b64_decode("Zm9vYmFy", back, 6) == 6, "exactly max");
-    CHECK(b64_decode("", back, 1) == 0, "empty");
+    out[b64_encode(in, n, out)] = 0;
+    return out;
 }
 
 static void test_exchange(void)
@@ -212,7 +192,7 @@ static void test_exchange(void)
                                       0xff, 0xff, 0xff, 0xff};
     static const uint8_t reply[] = {0x21, 0x31, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x15, 0x24, 0x3f, 0x00};
     char b64[64], params[256];
-    b64_encode(hello, sizeof(hello), b64);
+    b64_str(hello, sizeof(hello), b64);
     answer(0, reply, sizeof(reply));
     snprintf(params, sizeof(params), "{\"host\":\"192.168.1.19\",\"port\":54321,\"payload_b64\":\"%s\",\"timeout_ms\":2000}", b64);
     run(params);
@@ -224,7 +204,7 @@ static void test_exchange(void)
     cJSON *r0 = cJSON_GetArrayItem(rs, 0);
     CHECK(r0 && strcmp(cJSON_GetObjectItem(r0, "from")->valuestring, "192.168.1.19:54321") == 0, "from ip:port");
     char want[64];
-    b64_encode(reply, sizeof(reply), want);
+    b64_str(reply, sizeof(reply), want);
     CHECK(r0 && strcmp(cJSON_GetObjectItem(r0, "payload_b64")->valuestring, want) == 0, "answer bytes");
     CHECK(!timed_out(), "max_responses (default 1) reached, not timed out");
     CHECK(g_ms < 500, "returns as soon as the answer is in (%d ms)", g_ms);
@@ -258,16 +238,16 @@ static void test_exchange(void)
     memset(big, 0xA5, sizeof(big));
     static char bigb64[(sizeof(big) + 2) / 3 * 4 + 16];
     static char bigparams[sizeof(bigb64) + 128];
-    b64_encode(big, LAN_UDP_MAX_PAYLOAD, bigb64);
+    b64_str(big, LAN_UDP_MAX_PAYLOAD, bigb64);
     snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.1.19\",\"port\":9,\"payload_b64\":\"%s\",\"max_responses\":0}",
              bigb64);
     run(bigparams);
     CHECK(!error_text() && g_sent_len == LAN_UDP_MAX_PAYLOAD, "1472 bytes sent: %s", error_text());
-    b64_encode(big, LAN_UDP_MAX_PAYLOAD + 1, bigb64);
+    b64_str(big, LAN_UDP_MAX_PAYLOAD + 1, bigb64);
     snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.1.19\",\"port\":9,\"payload_b64\":\"%s\"}", bigb64);
     run(bigparams);
     CHECK(is_error("longer than 1472 bytes") && g_sent_len < 0, "1473 bytes refused: %s", error_text());
-    b64_encode(big, LAN_UDP_MAX_PAYLOAD - 2, bigb64);  // 1470 bytes, no padding
+    b64_str(big, LAN_UDP_MAX_PAYLOAD - 2, bigb64);  // 1470 bytes, no padding
     strcat(bigb64, "QUJDREVG");                      // + 6 = 1476 bytes
     snprintf(bigparams, sizeof(bigparams), "{\"host\":\"192.168.1.19\",\"port\":9,\"payload_b64\":\"%s\"}", bigb64);
     run(bigparams);
@@ -285,7 +265,8 @@ static void test_exchange(void)
     CHECK(cJSON_GetArraySize(rs) == 2, "two big answers");
     for (int i = 0; i < 2 && rs; ++i) {
         uint8_t back[LAN_UDP_MAX_ANSWER];
-        int n = b64_decode(cJSON_GetObjectItem(cJSON_GetArrayItem(rs, i), "payload_b64")->valuestring, back, sizeof(back));
+        const char *text = cJSON_GetObjectItem(cJSON_GetArrayItem(rs, i), "payload_b64")->valuestring;
+        const int n = (int)b64_decode(text, strlen(text), back, sizeof(back));
         CHECK(n == LAN_UDP_MAX_ANSWER && memcmp(back, ans, (size_t)n) == 0, "answer %d: %d bytes", i, n);
     }
 }
@@ -316,7 +297,7 @@ static void test_params(void)
         {"{\"host\":\"192.168.1.255\",\"port\":54321,\"payload_b64\":\"\"}", "broadcast address of the local subnet"},
         {"{\"host\":\"255.255.255.255\",\"port\":54321,\"payload_b64\":\"\"}", "multicast, broadcast or reserved"},
         {"{\"host\":\"239.255.255.250\",\"port\":1982,\"payload_b64\":\"\"}", "multicast, broadcast or reserved"},
-        {"{\"host\":\"" SELF "\",\"port\":54321,\"payload_b64\":\"\"}", "the T-Circle itself"},
+        {"{\"host\":\"" SELF "\",\"port\":54321,\"payload_b64\":\"\"}", "the device itself"},
         {"{\"host\":\"localhost\",\"port\":54321,\"payload_b64\":\"\"}", "loopback"},
         {"{\"host\":\"no-such-host.invalid\",\"port\":54321,\"payload_b64\":\"\"}", "could not resolve"},
     };
@@ -362,7 +343,6 @@ static void test_request_lifetime(void)
 int main(void)
 {
     setup();
-    test_base64();
     test_exchange();
     test_params();
     test_request_lifetime();

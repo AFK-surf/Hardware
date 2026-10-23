@@ -17,12 +17,6 @@
 #ifndef COMMA_DEV_SECRETS
 #define COMMA_DEV_SECRETS 0
 #endif
-// secrets.h files from before the rename used CUE_* names. The optional ones would be skipped
-// silently (Connector off), so stop the build instead.
-#if COMMA_DEV_SECRETS && (defined(CUE_VOICE_SERVER) || defined(CUE_VOICE_GROUP) || defined(CUE_VOICE_KEY) || \
-                          defined(CUE_WORKSPACE_ID) || defined(CUE_CONNECTOR_URL) || defined(CUE_CONNECTOR_TOKEN))
-#error "secrets.h uses the old CUE_* names: rename them to COMMA_* (see secrets.h.example)"
-#endif
 
 #define NS "comma"
 // Written last: a config is only complete once this key is 1.
@@ -79,26 +73,21 @@ static const field_t FIELDS[] = {
 };
 
 #if COMMA_DEV_SECRETS
-static void copy(char *dst, size_t size, const char *src)
-{
-    strlcpy(dst, src, size);
-}
-
 static void load_dev_override(void)
 {
-    copy(s_cfg.wifi_ssid, sizeof(s_cfg.wifi_ssid), WIFI_SSID);
-    copy(s_cfg.wifi_password, sizeof(s_cfg.wifi_password), WIFI_PASSWORD);
-    copy(s_cfg.server, sizeof(s_cfg.server), COMMA_VOICE_SERVER);
-    copy(s_cfg.group_id, sizeof(s_cfg.group_id), COMMA_VOICE_GROUP);
-    copy(s_cfg.voice_key, sizeof(s_cfg.voice_key), COMMA_VOICE_KEY);
+    strlcpy(s_cfg.wifi_ssid, WIFI_SSID, sizeof(s_cfg.wifi_ssid));
+    strlcpy(s_cfg.wifi_password, WIFI_PASSWORD, sizeof(s_cfg.wifi_password));
+    strlcpy(s_cfg.server, COMMA_VOICE_SERVER, sizeof(s_cfg.server));
+    strlcpy(s_cfg.group_id, COMMA_VOICE_GROUP, sizeof(s_cfg.group_id));
+    strlcpy(s_cfg.voice_key, COMMA_VOICE_KEY, sizeof(s_cfg.voice_key));
 #ifdef COMMA_CONNECTOR_URL
-    copy(s_cfg.connect_url, sizeof(s_cfg.connect_url), COMMA_CONNECTOR_URL);
+    strlcpy(s_cfg.connect_url, COMMA_CONNECTOR_URL, sizeof(s_cfg.connect_url));
 #endif
 #ifdef COMMA_CONNECTOR_TOKEN
-    copy(s_cfg.connector_token, sizeof(s_cfg.connector_token), COMMA_CONNECTOR_TOKEN);
+    strlcpy(s_cfg.connector_token, COMMA_CONNECTOR_TOKEN, sizeof(s_cfg.connector_token));
 #endif
 #ifdef COMMA_WORKSPACE_ID
-    copy(s_cfg.workspace_id, sizeof(s_cfg.workspace_id), COMMA_WORKSPACE_ID);
+    strlcpy(s_cfg.workspace_id, COMMA_WORKSPACE_ID, sizeof(s_cfg.workspace_id));
 #endif
     // No device_name: the Connector dials with the BLE name, Comma-XXXX.
     s_provisioned = true;
@@ -168,11 +157,6 @@ esp_err_t device_config_init(void)
 bool device_config_provisioned(void)
 {
     return s_provisioned;
-}
-
-bool device_config_dev_override(void)
-{
-    return COMMA_DEV_SECRETS;
 }
 
 bool device_config_get(device_config_t *out)

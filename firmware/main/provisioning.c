@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "heap_diag.h"
 // BLE provisioning over NimBLE. Contract: docs/ble-provisioning.md.
 //
 // Every characteristic needs an encrypted, authenticated link: LE Secure Connections with a
@@ -11,6 +10,8 @@
 // the slow work (Wi-Fi scan and connect, NVS) and owns all state below.
 
 #include "provisioning.h"
+
+#include "heap_diag.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -390,7 +391,8 @@ static void advertise(void)
         ESP_LOGE(TAG, "adv fields: %d", rc);
         return;
     }
-    // Test company ID (little-endian), format v1, T-Circle-S3, setup state, Wi-Fi MAC suffix.
+    // Test company ID (little-endian), format v1, model 1 (every board of this firmware), setup state,
+    // Wi-Fi MAC suffix (docs/ble-provisioning.md).
     const uint8_t mfg_data[] = {
         0xff, 0xff, 0x01, 0x01, device_config_provisioned() ? 0x01 : 0x00,
         s_short_id[0], s_short_id[1],

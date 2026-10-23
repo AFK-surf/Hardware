@@ -1,22 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "heap_diag.h"
-#include "firmware_config.h"
-#include "memory_caps.h"
 #include "connector.h"
-#include "connector_json.h"
-#include "net_watchdog.h"
 
-#include "voice_state.h"
+#include "connector_json.h"
 #include "device_config.h"
+#include "firmware_config.h"
+#include "heap_diag.h"
+#include "json_buf.h"
 #include "lan_discover.h"
 #include "lan_http.h"
 #include "lan_tunnel.h"
 #include "lan_udp.h"
+#include "memory_caps.h"
+#include "net_watchdog.h"
 #include "provisioning.h"
+#include "voice_state.h"
 #include "wifi.h"
+#include "ws_frame.h"
 
 #include <ctype.h>
-#include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,11 +40,6 @@
 #include "lwip/priv/tcpip_priv.h"
 #include "lwip/sockets.h"
 #include "lwip/tcp.h"
-
-#define WS_OP_TEXT 0x1
-#define WS_OP_CLOSE 0x8
-#define WS_OP_PING 0x9
-#define WS_OP_PONG 0xA
 
 // Largest request frame: room for an http_request body as big as the response cap, plus the
 // envelope. A larger text frame is dropped; if its id can be read from the first chunk, it still
@@ -82,13 +78,13 @@
 // the whole Wi-Fi link. A request that arrives during a call is refused
 // before any network use; a call that starts mid-transfer ends the transfer with the same error.
 #define CALL_BUSY_MESSAGE "busy: voice call active"
-
-// Dev builds only (main/CMakeLists.txt): run lan_discover every N seconds through the LAN worker and
-// its access gate, and log the reply, for testing on the board before the backend can ask for it.
-#ifndef COMMA_LAN_DISCOVER_SELFTEST_S
-#define COMMA_LAN_DISCOVER_SELFTEST_S 0
-#endif
-#define SELFTEST_SESSION UINT_MAX
+#define BUSY_MESSAGE "the device is busy with other LAN requests; try again shortly"
+// The refusal while the user has not allowed operations, worded like the desktop Connector's so the
+// agent sees the same refusal.
+#define READ_ONLY_REFUSAL(method) "method \"" method "\" is not permitted for a local_file_read connector"
+#define OOM_MESSAGE "out of memory on this device"
+// An error frame for a request id of up to ID_MAX bytes, every byte escaped as \u00XX.
+#define OOM_FRAME_MAX (ID_MAX * 6 + 96)
 
 // Dev builds only (main/CMakeLists.txt): dial this URL instead of the provisioned one, e.g.
 // ws://<mac-ip>:8765/v1/connect for tools/fake_connector.py. The saved credentials are neither
@@ -99,7 +95,6 @@
 
 #define SCOPE_READ_ONLY "local_file_read"
 #define SCOPE_OPERATIONS ""
-#define FIRMWARE_VERSION "0.1.0"
 
 static const char *TAG = "connector";
 
@@ -168,11 +163,8 @@ static char s_headers[512];
 // The name of the current dial, for metadata's hostname. Connector task only.
 static char s_name[64];
 
-static uint8_t *s_rx;
-static size_t s_frame_got;
-static size_t s_frame_len;
-static uint8_t s_opcode;
-static bool s_assembling;
+// Incoming frames, reassembled in the websocket task. PSRAM, RX_MAX + 1 bytes.
+static ws_frame_t s_frame = {.capacity = RX_MAX};
 
 static int s_reconnects;
 // WebSocket PONGs since the socket opened, counted in the websocket task. A PONG proves the server's
@@ -295,55 +287,36 @@ static char *find_request_id(const char *data, size_t len)
 
 static void consume_chunk(const esp_websocket_event_data_t *event)
 {
-    if (!event || !event->data_ptr || event->data_len <= 0) {
-        return;
-    }
-    if (event->op_code == WS_OP_PING || event->op_code == WS_OP_PONG) {
+    switch (ws_frame_feed(&s_frame, event)) {
+    case WS_FRAME_CONTROL:
         if (event->op_code == WS_OP_PONG) {
             s_pongs++;
         }
-        return;
-    }
-    const size_t chunk = (size_t)event->data_len;
-    const size_t offset = event->payload_offset > 0 ? (size_t)event->payload_offset : 0;
-    const size_t total = event->payload_len > 0 ? (size_t)event->payload_len : chunk;
-    if (offset == 0) {
-        s_assembling = true;
-        s_opcode = event->op_code;
-        s_frame_len = total;
-        s_frame_got = 0;
-        if (total > RX_MAX) {
-            s_assembling = false;
-            ESP_LOGW(TAG, "drop oversized frame: %u bytes", (unsigned)total);
-            if (event->op_code == WS_OP_TEXT) {
-                post(EV_TOO_BIG, find_request_id(event->data_ptr, chunk));
+        break;
+    case WS_FRAME_TOO_BIG:
+        ESP_LOGW(TAG, "drop oversized frame: %u bytes", (unsigned)s_frame.len);
+        if (s_frame.opcode == WS_OP_TEXT) {
+            post(EV_TOO_BIG, find_request_id(event->data_ptr, (size_t)event->data_len));
+        }
+        break;
+    case WS_FRAME_DONE:
+        if (s_frame.opcode == WS_OP_CLOSE) {
+            s_close_code = s_frame.len >= 2 ? (s_frame.buf[0] << 8) | s_frame.buf[1] : 0;
+        } else if (s_frame.opcode == WS_OP_TEXT) {
+            char *text = psram_strndup((const char *)s_frame.buf, s_frame.len);
+            if (text) {
+                post(EV_TEXT, text);
+            } else {
+                comma_heap_log("rx_copy_oom");
+                ESP_LOGW(TAG, "out of memory for a %u-byte frame", (unsigned)s_frame.len);
+                post(EV_NO_MEMORY, find_request_id((const char *)s_frame.buf, s_frame.len));
             }
-            return;
         }
+        // The server ignores binary frames, so it never sends any.
+        break;
+    case WS_FRAME_PENDING:
+        break;
     }
-    if (!s_assembling || offset != s_frame_got || chunk > s_frame_len - s_frame_got) {
-        s_assembling = false;
-        return;
-    }
-    memcpy(s_rx + offset, event->data_ptr, chunk);
-    s_frame_got += chunk;
-    if (s_frame_got < s_frame_len || !event->fin) {
-        return;
-    }
-    s_assembling = false;
-    if (s_opcode == WS_OP_CLOSE) {
-        s_close_code = s_frame_len >= 2 ? (s_rx[0] << 8) | s_rx[1] : 0;
-    } else if (s_opcode == WS_OP_TEXT) {
-        char *text = psram_strndup((const char *)s_rx, s_frame_len);
-        if (text) {
-            post(EV_TEXT, text);
-        } else {
-            comma_heap_log("rx_copy_oom");
-            ESP_LOGW(TAG, "out of memory for a %u-byte frame", (unsigned)s_frame_len);
-            post(EV_NO_MEMORY, find_request_id((const char *)s_rx, s_frame_len));
-        }
-    }
-    // The server ignores binary frames, so it never sends any.
 }
 
 // Runs in the websocket client's task. Never sends: replies go out from connector_task.
@@ -435,7 +408,7 @@ static void send_metadata(void)
                      "\"max_answer_bytes\":%d,\"max_total_answer_bytes\":%d}"
 #endif
                      "},"
-                     "\"component_versions\":{\"" CONFIG_COMMA_CLIENT_SOURCE "\":\"" FIRMWARE_VERSION "\"}},"
+                     "\"component_versions\":{\"" CONFIG_COMMA_CLIENT_SOURCE "\":\"" COMMA_FIRMWARE_VERSION "\"}},"
                      "\"skills\":[],"
                      "\"system_info\":{\"client_source\":\"" CONFIG_COMMA_CLIENT_SOURCE "\",\"hostname\":%s,\"os_type\":\"esp-idf\","
                      "\"arch\":\"xtensa\"%s}}",
@@ -456,39 +429,24 @@ static void send_metadata(void)
     }
 }
 
-static size_t oom_frame(char *frame, size_t cap, const char *id)
-{
-    char escaped[ID_MAX * 6 + 1];
-    size_t n = 0;
-    if (strlen(id) > ID_MAX) return 0;
-    for (const unsigned char *p = (const unsigned char *)id; *p; ++p) {
-        if (*p < 0x20 || *p == '"' || *p == '\\') {
-            n += (size_t)snprintf(escaped + n, sizeof(escaped) - n, "\\u%04x", *p);
-        } else {
-            escaped[n++] = (char)*p;
-        }
-    }
-    escaped[n] = 0;
-    int len = snprintf(frame, cap, "{\"id\":\"%s\",\"type\":\"error\","
-                      "\"error\":\"out of memory on this device\"}", escaped);
-    return len > 0 && (size_t)len < cap ? (size_t)len : 0;
-}
-
+// Built on the stack: it answers an allocation failure.
 static void send_oom(const char *id)
 {
-    char frame[ID_MAX * 6 + 96];
-    if (oom_frame(frame, sizeof(frame), id)) send_json(frame);
+    char frame[OOM_FRAME_MAX];
+    if (json_error_frame_into(frame, sizeof(frame), id, OOM_MESSAGE)) {
+        send_json(frame);
+    }
 }
 
 static void send_error(const char *id, const char *message)
 {
-    cJSON *obj = cJSON_CreateObject();
-    if (obj) {
-        cJSON_AddStringToObject(obj, "id", id);
-        cJSON_AddStringToObject(obj, "type", "error");
-        cJSON_AddStringToObject(obj, "error", message);
+    char *frame = json_error_frame(id, message);
+    if (!frame) {
+        ESP_LOGW(TAG, "out of memory building a frame");
+        return;
     }
-    send_object(obj);
+    send_json(frame);
+    free(frame);
 }
 
 static void handle_device_access(const char *id, const cJSON *params)
@@ -529,13 +487,11 @@ static const char *lan_method_name(lan_method_t method)
     return method == LAN_DISCOVER ? "lan_discover" : method == LAN_UDP_REQUEST ? "udp_request" : "http_request";
 }
 
-// The read-only wording matches the desktop Connector, so the agent sees the same refusal.
-static void send_read_only_refusal(const char *id, lan_method_t method)
+static const char *read_only_refusal(lan_method_t method)
 {
-    char message[96];
-    snprintf(message, sizeof(message), "method \"%s\" is not permitted for a local_file_read connector",
-             lan_method_name(method));
-    send_error(id, message);
+    return method == LAN_DISCOVER      ? READ_ONLY_REFUSAL("lan_discover")
+           : method == LAN_UDP_REQUEST ? READ_ONLY_REFUSAL("udp_request")
+                                       : READ_ONLY_REFUSAL("http_request");
 }
 
 // The access gate, for every method that touches the LAN. The server does not check access on the
@@ -545,7 +501,7 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root,
 {
     if (!operations_allowed()) {
         ESP_LOGW(TAG, "%s refused: read-only", id);
-        send_read_only_refusal(id, method);
+        send_error(id, read_only_refusal(method));
         return;
     }
     if (!s_lan_ready) {
@@ -567,7 +523,7 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root,
     if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
         comma_heap_log("lan_result_ready");
         cJSON_Delete(job.params);
-        send_error(id, "the T-Circle is busy with other LAN requests; try again shortly");
+        send_error(id, BUSY_MESSAGE);
     }
 }
 
@@ -584,15 +540,10 @@ typedef struct {
     bool gated;           // every frame passed the writable gate
 } chunk_ctx_t;
 
-static bool call_active(void)
-{
-    return comma_voice_active();
-}
-
 static const char *chunk_refuse(void *arg)
 {
     (void)arg;
-    return call_active() ? CALL_BUSY_MESSAGE : NULL;
+    return comma_voice_active() ? CALL_BUSY_MESSAGE : NULL;
 }
 
 static size_t chunk_frame_bytes(void *arg)
@@ -674,10 +625,10 @@ static bool chunk_send(void *arg, const char *frame, size_t len, size_t raw_byte
     chunk_ctx_t *c = arg;
     (void)raw_bytes;
     if (!operations_allowed()) {
-        snprintf(err, err_size, "method \"http_request\" is not permitted for a local_file_read connector");
+        snprintf(err, err_size, "%s", READ_ONLY_REFUSAL("http_request"));
         return false;
     }
-    if (call_active()) {
+    if (comma_voice_active()) {
         snprintf(err, err_size, "%s", CALL_BUSY_MESSAGE);
         return false;
     }
@@ -726,12 +677,12 @@ static lan_tunnel_verdict_t tunnel_check(void *arg, unsigned session, const char
         return LAN_TUNNEL_END_SILENT;
     }
     if (!operations_allowed()) {
-        *reason = "method \"lan_tcp_dial\" is not permitted for a local_file_read connector";
+        *reason = READ_ONLY_REFUSAL("lan_tcp_dial");
         return LAN_TUNNEL_END;
     }
     // Like chunk mode: no LAN transfer alongside a call. Checked again on every pass of the
     // tunnel loop, so a call that starts ends any open tunnel within ~20 ms.
-    if (call_active()) {
+    if (comma_voice_active()) {
         *reason = CALL_BUSY_MESSAGE;
         return LAN_TUNNEL_END;
     }
@@ -745,31 +696,35 @@ static void handle_tcp_dial(const char *id, const cJSON *params)
 {
     if (!operations_allowed()) {
         ESP_LOGW(TAG, "%s refused: read-only", id);
-        send_error(id, "method \"lan_tcp_dial\" is not permitted for a local_file_read connector");
+        send_error(id, READ_ONLY_REFUSAL("lan_tcp_dial"));
     } else if (!s_tunnel_ready) {
         send_error(id, "lan_tcp_dial is unavailable: the device could not start its tunnel task");
     } else if (strlen(id) > ID_MAX) {
         send_error(id, "request id too long for this device");
-    } else if (call_active()) {
+    } else if (comma_voice_active()) {
         ESP_LOGW(TAG, "%s refused: %s", id, CALL_BUSY_MESSAGE);
         send_error(id, CALL_BUSY_MESSAGE);
     } else if (!lan_tunnel_dial(id, params, s_session)) {
-        send_error(id, "the T-Circle is busy with other LAN requests; try again shortly");
+        send_error(id, BUSY_MESSAGE);
     }
 }
 
 #endif
 
+// The socket the job came in on is still open, with the credentials it was dialed with.
+static bool job_current(const lan_job_t *job)
+{
+    return s_up && job->session == s_session && job->generation == device_config_generation();
+}
+
 // Rechecked by each LAN implementation before network I/O (including after DNS).
 static const char *job_cancelled(void *arg)
 {
     const lan_job_t *job = arg;
-    if (job->session != SELFTEST_SESSION &&
-        (!s_up || job->session != s_session || job->generation != device_config_generation())) {
+    if (!job_current(job)) {
         return "the Connector socket or credentials changed before the request completed";
     }
-    if (!device_config_operations_allowed(job->session == SELFTEST_SESSION ?
-                                         device_config_generation() : job->generation)) {
+    if (!device_config_operations_allowed(job->generation)) {
         return "device operations are not allowed";
     }
     return NULL;
@@ -805,24 +760,19 @@ static void lan_worker(void *arg)
     for (;;) {
         lan_job_t job;
         xQueueReceive(s_lan_jobs, &job, portMAX_DELAY);
-        comma_heap_log("lan_begin");
-        char *frame;
-        const lan_request_t request = {
-            .deadline_us = job.session == SELFTEST_SESSION ? INT64_MAX : job.deadline_us,
-            .cancelled = job_cancelled, .ctx = &job};
-        const char *cancelled = lan_request_check(&request);
-        const bool selftest = job.session == SELFTEST_SESSION;
-        if (!selftest && (!s_up || job.session != s_session || job.generation != device_config_generation())) {
+        if (!job_current(&job)) {
+            // The server has already failed the requests of a closed socket: nothing to answer.
             ESP_LOGI(TAG, "%s skipped: its socket closed", job.id);
-            frame = NULL;
-        } else if (cancelled) {
-            // Access, connection and deadline may have changed while this waited in line.
-            cJSON *obj = cJSON_CreateObject();
-            cJSON_AddStringToObject(obj, "id", job.id);
-            cJSON_AddStringToObject(obj, "type", "error");
-            cJSON_AddStringToObject(obj, "error", cancelled);
-            frame = cJSON_PrintUnformatted(obj);
-            cJSON_Delete(obj);
+            cJSON_Delete(job.params);
+            continue;
+        }
+        comma_heap_log("lan_begin");
+        const lan_request_t request = {.deadline_us = job.deadline_us, .cancelled = job_cancelled, .ctx = &job};
+        const char *cancelled = lan_request_check(&request);
+        char *frame;
+        if (cancelled) {
+            // Access and the deadline may have changed while this waited in line.
+            frame = json_error_frame(job.id, cancelled);
 #if CONFIG_COMMA_LAN_DISCOVER
         } else if (job.method == LAN_DISCOVER) {
             frame = lan_discover_run_request(job.id, job.params, &request);
@@ -834,56 +784,17 @@ static void lan_worker(void *arg)
         }
         comma_heap_log("lan_result_ready");
         cJSON_Delete(job.params);
-        if (!frame && !selftest && job.session == s_session) {
-            char error[ID_MAX * 6 + 96];
-            const size_t len = oom_frame(error, sizeof(error), job.id);
-            if (len) send_on_session(job.session, error, len);
-        }
-        if (frame && selftest) {
-            const size_t len = strlen(frame);
-            for (size_t at = 0; at < len; at += 400) {
-                ESP_LOGI(TAG, "%s [%u/%u] %.400s", job.id, (unsigned)(at / 400 + 1), (unsigned)((len + 399) / 400),
-                         frame + at);
-            }
-            free(frame);
-        } else if (frame) {
+        if (frame) {
             post_session(EV_REPLY, frame, job.session);
+        } else {
+            char error[OOM_FRAME_MAX];
+            const size_t len = json_error_frame_into(error, sizeof(error), job.id, OOM_MESSAGE);
+            if (len) {
+                send_on_session(job.session, error, len);
+            }
         }
     }
 }
-
-#if COMMA_LAN_DISCOVER_SELFTEST_S > 0
-static void selftest_task(void *arg)
-{
-    (void)arg;
-    for (unsigned n = 1;; ++n) {
-        vTaskDelay(pdMS_TO_TICKS(COMMA_LAN_DISCOVER_SELFTEST_S * 1000));
-        if (!wifi_is_up()) {
-            continue;
-        }
-        lan_job_t job = {.session = SELFTEST_SESSION, .method = LAN_DISCOVER};
-        snprintf(job.id, sizeof(job.id), "selftest_%u", n);
-        if (!operations_allowed()) {
-            ESP_LOGW(TAG, "%s refused: read-only", job.id);
-            continue;
-        }
-        if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "%s: LAN worker busy", job.id);
-        }
-#ifdef COMMA_UDP_SELFTEST_HOST
-        // A miIO hello (0x21 0x31 0x00 0x20, then 28 x 0xFF): a Mi device answers with 32 bytes.
-        lan_job_t udp = {.session = SELFTEST_SESSION, .method = LAN_UDP_REQUEST};
-        snprintf(udp.id, sizeof(udp.id), "selftest_udp_%u", n);
-        udp.params = cJSON_Parse("{\"host\":\"" COMMA_UDP_SELFTEST_HOST "\",\"port\":54321,"
-                                 "\"payload_b64\":\"ITEAIP////////////////////////////////////8=\",\"timeout_ms\":2000}");
-        if (xQueueSend(s_lan_jobs, &udp, 0) != pdTRUE) {
-            cJSON_Delete(udp.params);
-            ESP_LOGW(TAG, "%s: LAN worker busy", udp.id);
-        }
-#endif
-    }
-}
-#endif
 
 static void handle_request(const char *id, const char *method, cJSON *root, int64_t received_us)
 {
@@ -1150,7 +1061,7 @@ static int64_t run_session(const credentials_t *creds)
     s_session++;
     s_close_code = 0;
     s_handshake_status = 0;
-    s_assembling = false;
+    ws_frame_reset(&s_frame);
     drain_events();
 
     comma_heap_log("connector_before_dial");
@@ -1354,8 +1265,8 @@ void connector_start(void)
     s_events = xQueueCreate(16, sizeof(event_t));
     s_lan_jobs = xQueueCreate(LAN_QUEUE_LEN, sizeof(lan_job_t));
     s_client_mutex = xSemaphoreCreateMutex();
-    s_rx = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
-    if (!s_events || !s_lan_jobs || !s_client_mutex || !s_rx) {
+    s_frame.buf = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
+    if (!s_events || !s_lan_jobs || !s_client_mutex || !s_frame.buf) {
         ESP_LOGE(TAG, "out of memory, Connector retries in 5 s");
         goto fail;
     }
@@ -1376,12 +1287,6 @@ void connector_start(void)
         goto fail;
     }
     started = true;
-#if COMMA_LAN_DISCOVER_SELFTEST_S > 0
-    ESP_LOGW(TAG, "lan_discover self-test every %d s (dev build)", COMMA_LAN_DISCOVER_SELFTEST_S);
-    if (s_lan_ready) {
-        xTaskCreateWithCaps(selftest_task, "lan_selftest", 3072, NULL, LAN_WORKER_PRIO, NULL, COMMA_BUFFER_CAPS);
-    }
-#endif
 #if CONFIG_COMMA_LAN_TUNNELS > 0
     const lan_tunnel_host_t tunnel_host = {.send = tunnel_send, .check = tunnel_check};
     s_tunnel_ready = lan_tunnel_start(&tunnel_host);
@@ -1392,14 +1297,9 @@ fail:
     if (s_events) vQueueDelete(s_events);
     if (s_lan_jobs) vQueueDelete(s_lan_jobs);
     if (s_client_mutex) vSemaphoreDelete(s_client_mutex);
-    free(s_rx);
+    free(s_frame.buf);
     s_events = NULL;
     s_lan_jobs = NULL;
     s_client_mutex = NULL;
-    s_rx = NULL;
-}
-
-bool connector_is_up(void)
-{
-    return s_up;
+    s_frame.buf = NULL;
 }

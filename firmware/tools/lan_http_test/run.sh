@@ -10,7 +10,7 @@ CJSON=../../managed_components/espressif__cjson/cJSON
 OUT=${TMPDIR:-/tmp}/lan_http_test
 cc $COMMA_TEST_DEFINES -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations -g -fsanitize=address,undefined \
     -Istubs -I../../main -I"$CJSON" -I"$IDF/components/http_parser" \
-    test.c "$CJSON/cJSON.c" "$IDF/components/http_parser/http_parser.c" -o "$OUT"
+    test.c ../../main/b64.c ../../main/json_buf.c "$CJSON/cJSON.c" "$IDF/components/http_parser/http_parser.c" -o "$OUT"
 rm -f "$OUT.port"
 python3 -u server.py > "$OUT.port" &
 SERVER=$!

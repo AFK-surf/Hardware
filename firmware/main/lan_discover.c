@@ -1,5 +1,3 @@
-#include "heap_diag.h"
-#include "memory_caps.h"
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -25,7 +23,10 @@
 #include "lan_discover.h"
 
 #include "connector_json.h"
+#include "heap_diag.h"
+#include "json_buf.h"
 #include "lan_discover_core.h"
+#include "memory_caps.h"
 #include "provisioning.h"
 #include "wifi.h"
 
@@ -45,10 +46,6 @@
 #include "lwip/sockets.h"
 #include "lwip/priv/tcpip_priv.h"
 #include "lwip/tcpip.h"
-
-#define SRC_ARP LD_SRC_ARP
-#define SRC_MDNS LD_SRC_MDNS
-#define SRC_SSDP LD_SRC_SSDP
 
 // The sweep covers at most this many addresses around the device's own (a /24).
 #define ARP_SWEEP_MAX 254
@@ -77,22 +74,6 @@ static const char *const MDNS_TYPES[] = {
     "_ipp._tcp.local",     "_printer._tcp.local",    "_smb._tcp.local",        "_companion-link._tcp.local",
     "_spotify-connect._tcp.local",
 };
-
-// ---- Params and frames -------------------------------------------------------------------------
-
-static char *error_frame(const char *id, const char *message)
-{
-    ld_sb_t b = {0};
-    ld_sb_str(&b, "{\"id\":");
-    ld_sb_json(&b, id);
-    ld_sb_str(&b, ",\"type\":\"error\",\"error\":");
-    ld_sb_json(&b, message);
-    ld_sb_str(&b, "}");
-    if (b.oom) {
-        ld_sb_free(&b);
-    }
-    return b.p;
-}
 
 // ---- ARP (on the tcpip thread: no core locking in this build) ----------------------------------
 
@@ -301,6 +282,12 @@ static void sleep_ms(uint32_t ms)
     vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
+// Setup BLE still holds its memory and the request is still wanted.
+static bool ble_in_the_way(void *request)
+{
+    return provisioning_ble_on() && !lan_request_check(request);
+}
+
 // Without PSRAM, setup BLE holds the memory the result needs, and provisioning ends it a few seconds
 // after connector_up. Wait for that before allocating anything, within the backend's deadline.
 static void wait_for_ble_off(const char *id, int timeout_ms, const lan_request_t *request)
@@ -311,17 +298,10 @@ static void wait_for_ble_off(const char *id, int timeout_ms, const lan_request_t
     const uint32_t limit = ld_ble_wait_limit(timeout_ms);
     ESP_LOGI(TAG, "%s: waiting up to %u ms for BLE to end", id, (unsigned)limit);
     bool still_on;
-    uint32_t waited = 0;
-    while (provisioning_ble_on() && waited < limit && !lan_request_check(request)) {
-        sleep_ms(100);
-        waited += 100;
-    }
-    still_on = provisioning_ble_on();
+    const uint32_t waited = ld_wait_while(ble_in_the_way, (void *)request, sleep_ms, limit, 100, &still_on);
     if (lan_request_check(request)) {
         ESP_LOGI(TAG, "%s: request ended while waiting for BLE", id);
-        return;
-    }
-    if (still_on) {
+    } else if (still_on) {
         ESP_LOGW(TAG, "%s: BLE still on after %u ms, discovering anyway", id, (unsigned)waited);
     } else {
         ESP_LOGI(TAG, "%s: BLE off after %u ms", id, (unsigned)waited);
@@ -331,31 +311,26 @@ static void wait_for_ble_off(const char *id, int timeout_ms, const lan_request_t
 
 // ---- Run ---------------------------------------------------------------------------------------
 
-char *lan_discover_run(const char *id, const cJSON *params)
-{
-    return lan_discover_run_request(id, params, NULL);
-}
-
 char *lan_discover_run_request(const char *id, const cJSON *params, const lan_request_t *request)
 {
     const char *cancelled = lan_request_check(request);
-    if (cancelled) return error_frame(id, cancelled);
+    if (cancelled) return json_error_frame(id, cancelled);
     unsigned sources;
     int timeout_ms;
     const char *bad = ld_parse_params(params, &sources, &timeout_ms);
     if (bad) {
-        return error_frame(id, bad);
+        return json_error_frame(id, bad);
     }
 #if CONFIG_COMMA_FREE_BLE_FOR_DISCOVERY
     wait_for_ble_off(id, timeout_ms, request);
 #endif
     cancelled = lan_request_check(request);
-    if (cancelled) return error_frame(id, cancelled);
+    if (cancelled) return json_error_frame(id, cancelled);
     uint32_t self_ip, netmask;
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     struct netif *nif = netif ? esp_netif_get_netif_impl(netif) : NULL;
     if (!wifi_ip_info(&self_ip, &netmask) || !nif) {
-        return error_frame(id, "the T-Circle is not connected to Wi-Fi right now");
+        return json_error_frame(id, "the device is not connected to Wi-Fi right now");
     }
     comma_log_failed_allocs(true);
     ld_ctx_t *ctx = ld_create(self_ip, netmask);
@@ -366,7 +341,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
         free(buf);
         free(dump);
         comma_log_failed_allocs(false);
-        return error_frame(id, "the T-Circle is out of memory for discovery");
+        return json_error_frame(id, "the device is out of memory for discovery");
     }
     memset(dump, 0, sizeof(*dump));
     dump->nif = nif;
@@ -377,7 +352,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
         free(buf);
         free(dump);
         comma_log_failed_allocs(false);
-        return error_frame(id, cancelled);
+        return json_error_frame(id, cancelled);
     }
     const int64_t start = now_ms();
     const int64_t deadline = lan_request_deadline(request, (start + timeout_ms) * 1000) / 1000;
@@ -397,7 +372,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
             sweep_first = bcast - ARP_SWEEP_MAX;
         }
         sweep_count = ARP_SWEEP_MAX;
-        if (sources & SRC_ARP) {
+        if (sources & LD_SRC_ARP) {
             ld_mark_truncated(ctx);  // the rest of a large subnet isn't swept
             ld_mark_probes_truncated(ctx);
         }
@@ -411,15 +386,15 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
     int arp_sent = 0, arp_failed = 0;
     int64_t next_arp = start;
 
-    int mdns = (sources & SRC_MDNS) ? udp_socket(MDNS_PORT, true) : -1;
-    int ssdp = (sources & SRC_SSDP) ? udp_socket(0, false) : -1;
-    int yeelight = (sources & SRC_SSDP) ? udp_socket(0, false) : -1;
+    int mdns = (sources & LD_SRC_MDNS) ? udp_socket(MDNS_PORT, true) : -1;
+    int ssdp = (sources & LD_SRC_SSDP) ? udp_socket(0, false) : -1;
+    int yeelight = (sources & LD_SRC_SSDP) ? udp_socket(0, false) : -1;
     int probes = ld_has_probes(ctx) ? udp_socket(0, false) : -1;
     if (ld_has_probes(ctx) && probes < 0) {
         ESP_LOGW(TAG, "out of sockets for discovery probes");
         ld_mark_probes_truncated(ctx);
     }
-    if (((sources & SRC_MDNS) && mdns < 0) || ((sources & SRC_SSDP) && (ssdp < 0 || yeelight < 0))) {
+    if (((sources & LD_SRC_MDNS) && mdns < 0) || ((sources & LD_SRC_SSDP) && (ssdp < 0 || yeelight < 0))) {
         ESP_LOGW(TAG, "out of sockets (mdns %d, ssdp %d, yeelight %d)", mdns, ssdp, yeelight);
         ld_mark_truncated(ctx);
     }
@@ -433,7 +408,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
     // UDP can be lost: SSDP and Yeelight once more a third of the way in; reverse names after the
     // sweep (or halfway, without ARP), when most hosts are known.
     int64_t ssdp_again = start + timeout_ms / 3;
-    int64_t reverse_at = (sources & SRC_ARP) ? start + sweep_ms + 150 : start + timeout_ms / 2;
+    int64_t reverse_at = (sources & LD_SRC_ARP) ? start + sweep_ms + 150 : start + timeout_ms / 2;
     // Questions asked later than this wouldn't get answers in time.
     const int64_t last_query = deadline - (timeout_ms / 4 < 400 ? timeout_ms / 4 : 400);
 
@@ -446,7 +421,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
         if (now >= deadline) {
             break;
         }
-        if ((sources & SRC_ARP) && now >= next_arp) {
+        if ((sources & LD_SRC_ARP) && now >= next_arp) {
             arp_harvest(ctx, dump);
             if (swept < sweep_count) {
                 const uint32_t n = sweep_count - swept < (uint32_t)batch ? sweep_count - swept : (uint32_t)batch;
@@ -466,7 +441,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
                 mdns_ask(mdns, type);
             }
             if (reverse_at && now >= reverse_at) {
-                if (sources & SRC_ARP) {
+                if (sources & LD_SRC_ARP) {
                     arp_harvest(ctx, dump);
                 }
                 mdns_ask_reverse(mdns, ctx);
@@ -530,7 +505,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
             drain(yeelight, YEELIGHT_PORT, ctx, buf);
         }
     }
-    if (sources & SRC_ARP) {
+    if (sources & LD_SRC_ARP) {
         arp_harvest(ctx, dump);
     }
     ld_probes_finish(ctx);
@@ -553,7 +528,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
     if (cancelled) {
         ld_free(ctx);
         comma_log_failed_allocs(false);
-        return error_frame(id, cancelled);
+        return json_error_frame(id, cancelled);
     }
     int hosts, n_arp, n_mdns, n_ssdp;
     bool truncated;
@@ -561,15 +536,15 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
     // Copied to the stack (a 64-byte id escapes to at most 386) so its builder is freed first.
     char prefix[448];
     char *frame = NULL;
-    ld_sb_t head = {.limit = sizeof(prefix) - 1};
-    ld_sb_str(&head, "{\"id\":");
-    ld_sb_json(&head, id);
-    ld_sb_str(&head, ",\"type\":\"response\",\"result\":");
+    jbuf_t head = {.limit = sizeof(prefix) - 1};
+    jbuf_str(&head, "{\"id\":");
+    jbuf_json_str(&head, id);
+    jbuf_str(&head, ",\"type\":\"response\",\"result\":");
     const bool head_ok = !head.oom && !head.full;
     if (head_ok) {
         memcpy(prefix, head.p, head.len + 1);
     }
-    ld_sb_free(&head);
+    jbuf_free(&head);
     if (head_ok) {
         frame = ld_result_frame(ctx, prefix, "}");
     }
@@ -588,7 +563,7 @@ char *lan_discover_run_request(const char *id, const cJSON *params, const lan_re
         ESP_LOGW(TAG, "%s: first failed probe sendto: errno %d", id, send_errno);
     }
     if (!frame) {
-        return error_frame(id, "the T-Circle is out of memory for the discovery result");
+        return json_error_frame(id, "the device is out of memory for the discovery result");
     }
     return frame;
 }

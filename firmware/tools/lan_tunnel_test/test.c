@@ -472,9 +472,9 @@ static void server_frame(const char *json)
 
 static void server_data(const char *id, const unsigned char *data, size_t n)
 {
-    char *b64 = malloc(B64_LEN(n) + 1);
-    b64[lan_tunnel_b64_encode(data, n, b64)] = 0;
-    char *json = malloc(B64_LEN(n) + 200);
+    char *b64 = malloc(B64_ENCODED_LEN(n) + 1);
+    b64[b64_encode(data, n, b64)] = 0;
+    char *json = malloc(B64_ENCODED_LEN(n) + 200);
     sprintf(json, "{\"id\":\"%s\",\"type\":\"stream\",\"stream\":{\"channel\":\"tcp\",\"data\":\"%s\"}}", id, b64);
     server_frame(json);
     free(b64);
@@ -559,7 +559,7 @@ static size_t collect(const char *id, unsigned char *buf, size_t want, bool ack,
         CHECK(data && count_keys(obj(f, "stream")) == 2 && count_keys(f) == 3, "data frame shape");
         const size_t text = data ? strlen(data) : 0;
         unsigned char *raw = malloc(text);
-        long n = lan_tunnel_b64_decode(data, text, raw, text);
+        long n = b64_decode(data, text, raw, text);
         CHECK(n > 0, "data frame not valid base64");
         if (n > 0) {
             CHECK((size_t)n <= LAN_TUNNEL_MAX_FRAME, "frame of %ld B over max_frame", n);
@@ -592,34 +592,6 @@ static unsigned char *pattern(size_t n, unsigned seed)
 }
 
 // ---- Tests ---------------------------------------------------------------------------------------
-
-static void test_base64(void)
-{
-    static const char *const plain[] = {"", "f", "fo", "foo", "foob", "fooba", "foobar"};
-    static const char *const coded[] = {"", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"};
-    for (int i = 0; i < 7; ++i) {
-        char out[16];
-        size_t n = lan_tunnel_b64_encode((const unsigned char *)plain[i], strlen(plain[i]), out);
-        CHECK(n == strlen(coded[i]) && memcmp(out, coded[i], n) == 0, "encode %s", plain[i]);
-        unsigned char back[16];
-        long m = lan_tunnel_b64_decode(coded[i], strlen(coded[i]), back, sizeof(back));
-        CHECK(m == (long)strlen(plain[i]) && memcmp(back, plain[i], (size_t)m) == 0, "decode %s", coded[i]);
-    }
-    static const char *const bad[] = {"Zg=", "Zg", "Z===", "Zg==Zg==", "Zh==", "Zm9=", "Zm9v!A==", "Zm 9v", "=Zm9"};
-    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
-        unsigned char out[16];
-        CHECK(lan_tunnel_b64_decode(bad[i], strlen(bad[i]), out, sizeof(out)) == -1, "accepted bad base64 %s", bad[i]);
-    }
-    unsigned char out[2];
-    CHECK(lan_tunnel_b64_decode("Zm9v", 4, out, 2) == -1, "decode past the buffer");
-    unsigned char all[256], back[256];
-    char text[B64_LEN(256)];
-    for (int i = 0; i < 256; ++i) {
-        all[i] = (unsigned char)i;
-    }
-    size_t n = lan_tunnel_b64_encode(all, 256, text);
-    CHECK(lan_tunnel_b64_decode(text, n, back, 256) == 256 && memcmp(all, back, 256) == 0, "every byte value");
-}
 
 static void test_connect_answer_and_echo(server_t *echo)
 {
@@ -690,7 +662,7 @@ static void test_megabyte_echo(server_t *echo)
             device_acked = seq;
         } else if (channel(f) && strcmp(channel(f), "tcp") == 0 && str(obj(f, "stream"), "data")) {
             const char *d = str(obj(f, "stream"), "data");
-            long n = lan_tunnel_b64_decode(d, strlen(d), back + got, total - got);
+            long n = b64_decode(d, strlen(d), back + got, total - got);
             CHECK(n > 0 && n <= LAN_TUNNEL_MAX_FRAME, "bad data frame (%ld)", n);
             if (n > 0) {
                 if ((size_t)n > max_frame) {
@@ -820,7 +792,7 @@ static void test_dial_errors(server_t *echo)
     dial("tun_lo", "{\"host\":\"127.0.0.1\",\"port\":22}");
     expect_error("loopback", "tun_lo", "loopback", 2000);
     dial("tun_self", "{\"host\":\"" SELF "\",\"port\":22}");
-    expect_error("self", "tun_self", "the T-Circle itself", 2000);
+    expect_error("self", "tun_self", "the device itself", 2000);
     dial("tun_bcast", "{\"host\":\"192.168.1.255\",\"port\":22}");
     expect_error("broadcast", "tun_bcast", "broadcast", 2000);
     dial("tun_nohost", "{\"port\":22}");
@@ -1028,7 +1000,7 @@ static void test_out_of_memory(server_t *echo)
             // Actually fill the command queue, in addition to the injected send failure.
             for (int i = 0; i < QUEUE_LEN; ++i) server_ack("tun_survivor", 0);
         } else if (failure == 2) g_fail_command_send = true;
-        else g_fail_alloc_size = failure ? sizeof(cmd_t) : sizeof(block_t) + B64_LEN(n) / 4 * 3;
+        else g_fail_alloc_size = failure ? sizeof(cmd_t) : sizeof(block_t) + B64_ENCODED_LEN(n) / 4 * 3;
         server_data("tun_oom", data, n);
         g_pause_consumer = false;
         free(data);
@@ -1134,7 +1106,6 @@ int main(void)
         return 1;
     }
     server_t *echo = server(SRV_ECHO);
-    test_base64();
     test_connect_answer_and_echo(echo);
     test_megabyte_echo(echo);
     test_window();

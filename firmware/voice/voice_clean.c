@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "memory_caps.h"
 #include "voice_clean.h"
+
+#include "memory_caps.h"
 
 #include <math.h>
 #include <string.h>
 
 #include "esp_afe_config.h"
 #include "esp_afe_sr_models.h"
-#include "esp_ns.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -243,89 +243,3 @@ int64_t voice_clean_take_busy_us(void)
     s_busy_us = 0;
     return busy;
 }
-
-#ifdef VOICE_CLEAN_BENCH
-// Dev only (`idf.py -B build-bench -DCOMMA_VOICE_CLEAN_BENCH=1 build`): times AFE variants on 3 s of
-// pseudo-noise at boot and logs ms of CPU per second of audio.
-typedef struct {
-    const char *name;
-    afe_mode_t mode;
-    bool ns;
-    bool ns_webrtc;
-    bool vad;
-} bench_variant_t;
-
-void voice_clean_bench(void)
-{
-    static const bench_variant_t variants[] = {
-        {"model ns+vadnet", AFE_MODE_HIGH_PERF, true, false, true},
-        {"model ns only", AFE_MODE_HIGH_PERF, true, false, false},
-        {"vadnet only", AFE_MODE_HIGH_PERF, false, false, true},
-    };
-    srmodel_list_t *models = esp_srmodel_init("model");
-    uint32_t seed = 1;
-    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); ++v) {
-        const bench_variant_t *b = &variants[v];
-        heap_caps_malloc_extmem_enable(VOICE_CLEAN_INTERNAL_LIMIT);
-        afe_config_t *cfg = afe_config_init("M", models, AFE_TYPE_VC, b->mode);
-        cfg->aec_init = false;
-        cfg->se_init = false;
-        cfg->agc_init = false;
-        cfg->wakenet_init = false;
-        cfg->ns_init = b->ns;
-        if (b->ns_webrtc) {
-            cfg->afe_ns_mode = AFE_NS_MODE_WEBRTC;
-            cfg->ns_model_name = NULL;
-        }
-        cfg->vad_init = b->vad;
-        cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
-        cfg = afe_config_check(cfg);
-        const esp_afe_sr_iface_t *afe = esp_afe_handle_from_config(cfg);
-        esp_afe_sr_data_t *data = afe->create_from_config(cfg);
-        afe_config_free(cfg);
-        heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
-        if (!data) {
-            ESP_LOGW(TAG, "bench %s: create failed", b->name);
-            continue;
-        }
-        const int chunk = afe->get_feed_chunksize(data);
-        int16_t *in = heap_caps_malloc(chunk * sizeof(int16_t), COMMA_BUFFER_CAPS);
-        const int chunks = 3 * VOICE_CLEAN_RATE_HZ / chunk;
-        int64_t busy = 0;
-        for (int c = 0; c < chunks; ++c) {
-            for (int i = 0; i < chunk; ++i) {
-                seed = seed * 1664525u + 1013904223u;
-                in[i] = (int16_t)((int32_t)(seed >> 16) % 800 - 400);
-            }
-            const int64_t t0 = esp_timer_get_time();
-            afe->feed(data, in);
-            afe->fetch_with_delay(data, pdMS_TO_TICKS(100));
-            busy += esp_timer_get_time() - t0;
-        }
-        ESP_LOGI(TAG, "bench %s: %lld ms CPU per s of audio", b->name, (long long)(busy / 1000 * VOICE_CLEAN_RATE_HZ / (chunks * chunk)));
-        free(in);
-        afe->destroy(data);
-    }
-    // Classic WebRTC NS outside the AFE, 10 ms frames.
-    for (int level = 0; level <= 2; ++level) {
-        ns_handle_t ns = ns_pro_create(10, level, VOICE_CLEAN_RATE_HZ);
-        if (!ns) {
-            continue;
-        }
-        int16_t in[160];
-        int16_t out[160];
-        int64_t busy = 0;
-        for (int c = 0; c < 300; ++c) {
-            for (int i = 0; i < 160; ++i) {
-                seed = seed * 1664525u + 1013904223u;
-                in[i] = (int16_t)((int32_t)(seed >> 16) % 800 - 400);
-            }
-            const int64_t t0 = esp_timer_get_time();
-            ns_process(ns, in, out);
-            busy += esp_timer_get_time() - t0;
-        }
-        ESP_LOGI(TAG, "bench webrtc ns_pro level %d: %lld ms CPU per s of audio", level, (long long)(busy / 3000));
-        ns_destroy(ns);
-    }
-}
-#endif

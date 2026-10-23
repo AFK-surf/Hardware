@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "memory_caps.h"
 // GC9D01 160x160 round panel (board_display.h). Pins match the T-Circle-S3 panel used by the
 // previous logo firmware. Sleep turns the backlight off and puts the panel in SLPIN.
+//
+// One 50 KB framebuffer in PSRAM that the SPI DMA reads directly (psram_dma_direct). Redraws are
+// rare, so drawing waits for the previous transfer, never longer than panel_transfer.c allows.
 
 #include "board_display.h"
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
-#include "esp_heap_caps.h"
 #include "esp_lcd_gc9d01.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "panel_transfer.h"
 #include "ui_card.h"
 
 #define LCD_HOST SPI2_HOST
@@ -33,32 +34,15 @@
 _Static_assert(UI_CARD_SIZE == LCD_W && UI_CARD_SIZE == LCD_H, "card size must match panel");
 
 #define FB_BYTES (LCD_W * LCD_H * sizeof(uint16_t))
-// One 50 KB framebuffer in PSRAM; the SPI DMA reads it directly (psram_dma_direct). 64-byte
-// alignment covers the PSRAM DMA and cache-line rules, so the driver never copies it into an
-// internal bounce buffer. Redraws are rare, so drawing just waits for the previous transfer.
-static uint16_t *s_fb;
-static SemaphoreHandle_t s_fb_free;
+static panel_transfer_t s_transfer;
 static esp_lcd_panel_io_handle_t s_io = NULL;
-static esp_lcd_panel_handle_t s_panel = NULL;
-
-static bool on_color_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *edata, void *ctx)
-{
-    (void)io;
-    (void)edata;
-    (void)ctx;
-    BaseType_t woken = pdFALSE;
-    xSemaphoreGiveFromISR(s_fb_free, &woken);
-    return woken == pdTRUE;
-}
 
 esp_err_t board_display_init(void)
 {
-    s_fb = heap_caps_aligned_calloc(64, 1, FB_BYTES, COMMA_BUFFER_CAPS);
-    s_fb_free = xSemaphoreCreateBinary();
-    if (!s_fb || !s_fb_free) {
-        return ESP_ERR_NO_MEM;
+    const esp_err_t err = panel_transfer_init(&s_transfer, LCD_W, LCD_H, 0);
+    if (err != ESP_OK) {
+        return err;
     }
-    xSemaphoreGive(s_fb_free);
 
     gpio_config_t bl = {
         .pin_bit_mask = 1ULL << LCD_BL,
@@ -70,7 +54,8 @@ esp_err_t board_display_init(void)
     const spi_bus_config_t bus = GC9D01_PANEL_BUS_SPI_CONFIG(LCD_SCLK, LCD_MOSI, FB_BYTES);
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO));
 
-    esp_lcd_panel_io_spi_config_t io_cfg = GC9D01_PANEL_IO_SPI_CONFIG(LCD_CS, LCD_DC, on_color_done, NULL);
+    esp_lcd_panel_io_spi_config_t io_cfg =
+        GC9D01_PANEL_IO_SPI_CONFIG(LCD_CS, LCD_DC, panel_transfer_done, &s_transfer);
     io_cfg.flags.psram_dma_direct = 1;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_cfg, &s_io));
 
@@ -80,33 +65,30 @@ esp_err_t board_display_init(void)
         .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
         .bits_per_pixel = 16,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(s_io, &panel_cfg, &s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, false));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_gc9d01(s_io, &panel_cfg, &s_transfer.panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_transfer.panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(s_transfer.panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_transfer.panel, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_transfer.panel, true));
     return ESP_OK;
 }
 
 uint16_t *board_display_frame(void)
 {
-    xSemaphoreTake(s_fb_free, portMAX_DELAY);
-    return s_fb;
+    return panel_transfer_frame(&s_transfer);
 }
 
 esp_err_t board_display_flush(void)
 {
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb));
-    return ESP_OK;
+    return panel_transfer_flush(&s_transfer);
 }
 
 void board_display_sleep(void)
 {
     gpio_set_level(LCD_BL, BL_OFF);
     // Let a transfer in flight finish before the panel stops listening for pixels.
-    xSemaphoreTake(s_fb_free, portMAX_DELAY);
-    xSemaphoreGive(s_fb_free);
-    esp_lcd_panel_disp_on_off(s_panel, false);
+    panel_transfer_quiesce(&s_transfer);
+    esp_lcd_panel_disp_on_off(s_transfer.panel, false);
     esp_lcd_panel_io_tx_param(s_io, LCD_CMD_SLPIN, NULL, 0);
 }
 
@@ -119,7 +101,7 @@ void board_display_wake(void)
 
 void board_display_on(void)
 {
-    esp_lcd_panel_disp_on_off(s_panel, true);
+    esp_lcd_panel_disp_on_off(s_transfer.panel, true);
 }
 
 void board_display_light(bool on)

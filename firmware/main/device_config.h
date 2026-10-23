@@ -31,9 +31,6 @@ esp_err_t device_config_init(void);
 // True once Wi-Fi and Comma credentials have been stored (or the dev override is on).
 bool device_config_provisioned(void);
 
-// True when the values come from secrets.h, not NVS.
-bool device_config_dev_override(void);
-
 // Copy the current config. Returns false (and zeroes *out) when unprovisioned.
 bool device_config_get(device_config_t *out);
 

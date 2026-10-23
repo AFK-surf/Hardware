@@ -41,8 +41,6 @@ void wifi_hold_reconnect(bool hold);
 void wifi_disconnect(void);
 
 wifi_result_t wifi_result(void);
-// Last disconnect reason (wifi_err_reason_t), 0 if none.
-int wifi_last_reason(void);
 
 // Blocking scan (a few seconds). Fills up to max unique SSIDs, strongest first. Fails with
 // ESP_ERR_WIFI_STATE only while a trial is in progress; a keep_retrying attempt is cancelled for

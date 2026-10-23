@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "firmware_config.h"
 #pragma once
+
+#include "firmware_config.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -28,7 +29,7 @@
 // waits at most 120 s for the final frame.
 #define LAN_HTTP_CHUNK_TIMEOUT_MAX_S 110
 
-// Where chunk frames go. All calls are made from inside lan_http_run, in order.
+// Where chunk frames go. All calls are made from inside lan_http_run_request, in order.
 typedef struct {
     // Non-NULL: refuse this chunk-mode request with that message, before anything touches the
     // network (e.g. "busy: voice call active"). NULL (or no callback): go ahead.
@@ -45,9 +46,7 @@ typedef struct {
 // Blocks for up to the request's timeout. Returns the whole reply frame for `id` (a `response`, or
 // an `error` with a short message), NUL-terminated, in PSRAM; the caller frees it and sends it after
 // any chunk frames. NULL only when out of memory. sink may be NULL; a chunk-mode request is then
-// refused.
-char *lan_http_run(const char *id, const cJSON *params, const lan_http_sink_t *sink);
-// Connector variant: includes queue time and rechecks the request lifetime before network I/O.
+// refused. request (may be NULL) bounds queue time plus execution and is rechecked before network I/O.
 char *lan_http_run_request(const char *id, const cJSON *params, const lan_http_sink_t *sink,
                            const lan_request_t *request);
 // Shared with the queue so both use the same effective timeout.

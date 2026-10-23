@@ -19,8 +19,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define PAIRING_HOLD_US APP_PAIRING_HOLD_US
-#define RESET_HOLD_US APP_RESET_HOLD_US
 static const char *TAG = "main";
 static bool boot_tracking, boot_wait_release;
 static int64_t boot_down_us;
@@ -62,10 +60,10 @@ bool app_poll(int64_t now, bool in_call, bool boot)
         shown_left = -1;
     } else if (boot && boot_tracking) {
         const int64_t held = now - boot_down_us;
-        if (held >= RESET_HOLD_US) {
+        if (held >= APP_RESET_HOLD_US) {
             factory_reset();
-        } else if (held >= PAIRING_HOLD_US) {
-            const int left = (int)((RESET_HOLD_US - held + 999999) / 1000000);
+        } else if (held >= APP_PAIRING_HOLD_US) {
+            const int left = (int)((APP_RESET_HOLD_US - held + 999999) / 1000000);
             if (left != shown_left) {
                 char big[4];
                 snprintf(big, sizeof(big), "%d", left);
@@ -75,7 +73,7 @@ bool app_poll(int64_t now, bool in_call, bool boot)
         }
     } else if (!boot && boot_tracking) {
         boot_tracking = false;
-        if (now - boot_down_us >= PAIRING_HOLD_US) {
+        if (now - boot_down_us >= APP_PAIRING_HOLD_US) {
             if (provisioning_active()) {
                 provisioning_redraw();
             } else if (provisioning_start() != ESP_OK) {

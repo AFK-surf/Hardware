@@ -12,9 +12,10 @@ fi
 CJSON=../../managed_components/espressif__cjson/cJSON
 OUT=${TMPDIR:-/tmp}/lan_discover_test
 cc $COMMA_TEST_DEFINES -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations -g -fsanitize=address,undefined \
-    -Istubs -I../lan_http_test/stubs -I../../main -I"$CJSON" test.c "$CJSON/cJSON.c" -o "$OUT"
+    -Istubs -I../lan_http_test/stubs -I../../main -I"$CJSON" test.c ../../main/b64.c ../../main/json_buf.c \
+    "$CJSON/cJSON.c" -o "$OUT"
 "$OUT"
 cc $COMMA_TEST_DEFINES -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-deprecated-declarations -g \
     -fsanitize=address,undefined -Inetwork_stubs -Istubs -I../lan_http_test/stubs -I../../main -I"$CJSON" \
-    network_test.c ../../main/lan_discover_core.c "$CJSON/cJSON.c" -o "${OUT}_network"
+    network_test.c ../../main/lan_discover_core.c ../../main/b64.c ../../main/json_buf.c "$CJSON/cJSON.c" -o "${OUT}_network"
 "${OUT}_network"

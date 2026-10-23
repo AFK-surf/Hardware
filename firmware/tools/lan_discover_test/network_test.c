@@ -124,7 +124,7 @@ static cJSON *run(int ms, unsigned probes, bool arp_only)
             cJSON_AddStringToObject(p, "payload_b64", "AA=="); cJSON_AddItemToArray(list, p);
         }
     }
-    char *raw = lan_discover_run("runner", params);
+    char *raw = lan_discover_run_request("runner", params, NULL);
     CHECK(raw != NULL);
     cJSON *frame = cJSON_Parse(raw);
     CHECK(frame && cJSON_GetObjectItem(frame, "result"));

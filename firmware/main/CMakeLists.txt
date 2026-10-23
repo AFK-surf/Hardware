@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Set by tools/board.sh (firmware/CMakeLists.txt); empty for a plain idf.py build.
 idf_build_get_property(comma_board COMMA_BOARD)
 if(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32 AND NOT comma_board STREQUAL "waveshare-amoled-1-32")
@@ -15,10 +16,14 @@ elseif(CONFIG_COMMA_BOARD_M5STACK_STICKS3)
 else()
     set(board_dir "../boards/t_circle_s3")
 endif()
-# A board folder holds only that board's pins and drivers; all of its sources are built.
+# A board folder holds only that board's pins and drivers; all of its sources are built. Drivers for
+# parts more than one board uses are in boards/common/.
 file(GLOB board_srcs "${CMAKE_CURRENT_LIST_DIR}/${board_dir}/*.c")
+if(CONFIG_COMMA_BOARD_T_CIRCLE_S3 OR CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32)
+    list(APPEND board_srcs "../boards/common/cst816_touch.c")
+endif()
 set(srcs "main.c" "wifi.c" "connector.c" "connector_json.c" "net_watchdog.c" "lan_http.c"
-         "lan_discover_core.c" "lan_dest.c" "lan_udp.c"
+         "lan_discover_core.c" "lan_dest.c" "lan_udp.c" "b64.c" "json_buf.c" "ws_frame.c"
          "device_config.c" "provisioning.c" ${board_srcs})
 if(CONFIG_COMMA_LAN_DISCOVER)
     list(APPEND srcs "lan_discover.c")
@@ -54,49 +59,27 @@ if(CONFIG_COMMA_HAS_DISPLAY)
     else()
         set(ui_size "${CONFIG_COMMA_DISPLAY_SIZE}")
     endif()
-    list(APPEND srcs "../ui/display.c" "../ui/ui_card.c" "../ui/${ui_size}/ui_font.c")
+    list(APPEND srcs "../ui/display.c" "../ui/panel_transfer.c" "../ui/ui_card.c" "../ui/${ui_size}/ui_font.c")
     set(assets "../ui/${ui_size}/comma_logo.bin")
 endif()
-idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../voice" "../ui"
+idf_component_register(SRCS ${srcs} INCLUDE_DIRS "." "${board_dir}" "../boards/common" "../voice" "../ui"
                        PRIV_REQUIRES ${reqs} EMBED_FILES ${assets} LDFRAGMENTS ${ldfragments})
 
-# Dev only: `idf.py -B build-selftest -DCOMMA_LAN_DISCOVER_SELFTEST_S=20 build` runs lan_discover every
-# 20 s and logs the reply (connector.c). Use a separate build directory: the cache keeps the value.
-if(COMMA_LAN_DISCOVER_SELFTEST_S)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_LAN_DISCOVER_SELFTEST_S=${COMMA_LAN_DISCOVER_SELFTEST_S})
-endif()
-# Dev only, with the self-test: `-DCOMMA_UDP_SELFTEST_HOST=192.168.1.19` also sends a miIO hello there
-# each round (udp_request).
-if(COMMA_LAN_DISCOVER_SELFTEST_S AND COMMA_UDP_SELFTEST_HOST)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_UDP_SELFTEST_HOST="${COMMA_UDP_SELFTEST_HOST}")
-endif()
+# One firmware version: firmware/version.txt is the PROJECT_VER that esp_app_desc reports over BLE,
+# and the same string goes into Connector metadata, the voice client name and the User-Agent.
+idf_build_get_property(project_ver PROJECT_VER)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_FIRMWARE_VERSION="${project_ver}")
+
 # Dev only: `idf.py -B build-fake -DCOMMA_CONNECT_URL_OVERRIDE=ws://<mac-ip>:8765/v1/connect build` dials
 # tools/fake_connector.py instead of the provisioned Connector, with a dummy token; the saved
 # credentials are left alone (connector.c). Use a separate build directory: the cache keeps the value.
 if(COMMA_CONNECT_URL_OVERRIDE)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_CONNECT_URL_OVERRIDE="${COMMA_CONNECT_URL_OVERRIDE}")
 endif()
-# Mic cleanup off (one flag): `idf.py -B build-clean-off -DCOMMA_VOICE_CLEAN_OFF=1 build` keeps the raw 24 kHz mic on
-# the wire, without the AFE, for comparison (voice_clean.h).
-if(COMMA_VOICE_CLEAN_OFF)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_VOICE_CLEAN=0)
-endif()
-# nsnet2 before the VAD: `idf.py -B build-ns -DCOMMA_VOICE_NS_OFF=0 build`. The default
-# is VAD only (voice_clean.h).
+# nsnet2 noise suppression before the VAD: `idf.py -B build-ns -DCOMMA_VOICE_NS_OFF=0 build`. The
+# default is VAD only (voice_clean.h).
 if(DEFINED COMMA_VOICE_NS_OFF)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_VOICE_NS_OFF=${COMMA_VOICE_NS_OFF})
-endif()
-# Dev only: `idf.py -B build-bench -DCOMMA_VOICE_CLEAN_BENCH=1 build` times AFE variants at boot.
-if(COMMA_VOICE_CLEAN_BENCH)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE VOICE_CLEAN_BENCH=1)
-endif()
-# Dev only: `-DCOMMA_TUNNEL_DEBUG=1` logs each open tunnel's lwIP state every second (lan_tunnel.c);
-# `-DCOMMA_TUNNEL_SOCKET_WINDOW=0` turns off the per-socket receive-window cut, for comparison.
-if(COMMA_TUNNEL_DEBUG)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE COMMA_TUNNEL_DEBUG=1)
-endif()
-if(DEFINED COMMA_TUNNEL_SOCKET_WINDOW)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE LAN_TUNNEL_SOCKET_WINDOW=${COMMA_TUNNEL_SOCKET_WINDOW})
 endif()
 
 # Local TLS memory tests: authenticate a fake WSS server with a test-only CA.

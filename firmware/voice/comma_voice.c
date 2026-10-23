@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "memory_caps.h"
 #include "comma_voice.h"
 
 #include "board_audio.h"
 #include "device_config.h"
+#include "firmware_config.h"
+#include "memory_caps.h"
 #include "playback.h"
 #include "voice_clean.h"
+#include "ws_frame.h"
 
 #include <math.h>
 #include <stdatomic.h>
@@ -27,13 +29,6 @@
 #include "lwip/priv/tcpip_priv.h"
 #include "lwip/tcp.h"
 
-#define WS_OP_CONT 0x0
-#define WS_OP_TEXT 0x1
-#define WS_OP_BIN 0x2
-#define WS_OP_CLOSE 0x8
-#define WS_OP_PING 0x9
-#define WS_OP_PONG 0xA
-
 #define RX_MAX (16 * 1024)
 #define FRAME_BYTES (AUDIO_FRAME_SAMPLES * (int)sizeof(int16_t))
 #define IDLE_HANGUP_US (60LL * 1000000)
@@ -44,22 +39,9 @@
 // No echo canceller (the server's voice model does none either): the mic sends silence while agent
 // speech plays and for this long after.
 #define ECHO_TAIL_US (300LL * 1000)
-// Wire format. pcm16_24k is the default. pcmu_8k (G.711 mu-law, 8 kB/s each way instead of 48)
-// connected, but in testing the agent never spoke or heard the caller (2026-10-05), so it stays off.
-// With pcmu the board still runs at 24 kHz: mic decimated 3:1 up, agent audio interpolated 1:3 down.
-#define COMMA_VOICE_PCMU 0
-#if COMMA_VOICE_PCMU
-#define WIRE_FORMAT "pcmu_8k"
-#define WIRE_RATE_HZ 8000
-#define WIRE_SAMPLE_BYTES 1
-#else
+// Wire format: pcm16_24k both ways, the speaker's rate, so frames go out and in as they are.
 #define WIRE_FORMAT "pcm16_24k"
-#define WIRE_RATE_HZ AUDIO_SAMPLE_RATE_HZ
-#define WIRE_SAMPLE_BYTES 2
-#endif
-#define WIRE_DECIMATION (AUDIO_SAMPLE_RATE_HZ / WIRE_RATE_HZ)
-#define WIRE_FRAME_BYTES (AUDIO_FRAME_SAMPLES / WIRE_DECIMATION * WIRE_SAMPLE_BYTES)
-#define WIRE_BYTES_PER_MS (WIRE_RATE_HZ * WIRE_SAMPLE_BYTES / 1000)
+#define WIRE_BYTES_PER_MS (AUDIO_SAMPLE_RATE_HZ * (int)sizeof(int16_t) / 1000)
 // voice_clean.h: the wire carries mic audio (denoised if nsnet2 is on) only while the VAD hears
 // speech, from PREROLL_MS before it fired (it needs 128 ms of speech to decide, and word starts are
 // quiet) until HANGOVER_MS after it stopped (soft word ends). Otherwise zeros, still paced by the mic clock, so the
@@ -67,7 +49,7 @@
 // the stream runs that much ahead; the next zero frames are skipped to pay it back (preroll debt).
 // The AFE runs vadnet (and nsnet2, if on) on this task's stack. A 16 KB stack peaked at 2.2 KB used
 // (2026-10-07). Internal RAM: a PSRAM stack was no faster and can't run during flash writes.
-#define UPLINK_STACK (COMMA_VOICE_CLEAN ? 8192 : 6144)
+#define UPLINK_STACK 8192
 #define PREROLL_MS 300
 #define HANGOVER_MS 500
 #define PREROLL_FRAMES (PREROLL_MS / AUDIO_FRAME_MS)
@@ -77,14 +59,10 @@
 // The server closes with 4400 when caller audio arrives faster than 1.25x real time over 5 s, i.e.
 // more than 1.25 s ahead. After a network stall, the audio stuck in the TCP send buffer arrives in
 // one burst, so the sender keeps at most this much backlog and drops the oldest audio beyond it.
-// With voice_clean a pre-roll lands in the queue all at once, so the cap leaves room for it on top; at most
-// ~1 s is then ahead after a stall, still inside the server's 1.25 s.
-#if COMMA_VOICE_CLEAN
+// A pre-roll lands in the queue all at once, so the cap leaves room for it on top; at most ~1 s is
+// then ahead after a stall, still inside the server's 1.25 s.
 #define MIC_BACKLOG_MAX_BYTES (WIRE_BYTES_PER_MS * (300 + PREROLL_MS))
-#else
-#define MIC_BACKLOG_MAX_BYTES (WIRE_BYTES_PER_MS * 300)
-#endif
-#define SEND_CHUNK_BYTES (WIRE_FRAME_BYTES * 5)
+#define SEND_CHUNK_BYTES (FRAME_BYTES * 5)
 // Any esp_websocket_client send that times out tears the connection down, and a send that blocks
 // holds the TX lock, which the websocket task needs for PONG: if it can't get it within 2 s
 // (CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS) the read fails and the client aborts too. A 3 s send
@@ -92,7 +70,7 @@
 // ridden out. So the sender only writes when the voice socket's lwIP send buffer can take the whole
 // frame without blocking (tcp_room), and waits outside the lock otherwise, trimming the mic backlog.
 // UPLINK_STALL_LIMIT_MS is how long no audio frame may fit before the device hangs up itself. The
-// server gives up on a client that doesn't read for 8 s (slow_reader, #2504); an uplink that hasn't
+// server gives up on a client that doesn't read for 8 s (slow_reader); an uplink that hasn't
 // drained 100 ms of audio in 10 s almost always means the downlink is dead too, so by then the
 // server has closed (and its close code says why). Shorter, and the device hangs up on stalls the
 // server tolerates; longer only keeps a dead call on screen. After a stall at most ~0.7 s of audio is
@@ -100,9 +78,6 @@
 #define UPLINK_STALL_LIMIT_MS 10000
 // Ceiling for a send that the gate let through (or every send, if the voice socket wasn't found).
 #define SEND_TIMEOUT_MS UPLINK_STALL_LIMIT_MS
-// Bench hook for the dropped-call tone: 1 makes the voice socket look full from 20 s after
-// session.started, so the call ends through the real UPLINK_STALL_LIMIT_MS path. Keep 0.
-#define COMMA_VOICE_SIMULATE_DROP 0
 // A wait for room longer than this is logged as a stall, with the Wi-Fi and TCP state.
 #define STALL_LOG_MS 1000
 // What one audio frame costs in the send buffer: 2 websocket fragments (the client's 4096-byte
@@ -158,11 +133,8 @@ static void note_activity(void)
 
 static char s_uri[256];
 static char s_headers[512];
-static uint8_t *s_rx;
-static size_t s_frame_got;
-static size_t s_frame_len;
-static uint8_t s_opcode;
-static bool s_assembling;
+// Incoming frames, reassembled in the websocket task. PSRAM, RX_MAX + 1 bytes.
+static ws_frame_t s_frame = {.capacity = RX_MAX};
 
 static const char *close_meaning(int code)
 {
@@ -269,10 +241,10 @@ static void handle_text(char *json)
         const cJSON *role = cJSON_GetObjectItemCaseSensitive(root, "role");
         const cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
         const cJSON *final = cJSON_GetObjectItemCaseSensitive(root, "final");
-        ESP_LOGI(TAG, "transcript role=%s final=%s text=%s",
-                 cJSON_IsString(role) ? role->valuestring : "",
+        // What was said stays out of the log: only its length.
+        ESP_LOGI(TAG, "transcript role=%s final=%s chars=%u", cJSON_IsString(role) ? role->valuestring : "",
                  cJSON_IsTrue(final) ? "true" : "false",
-                 cJSON_IsString(text) ? text->valuestring : "");
+                 cJSON_IsString(text) ? (unsigned)strlen(text->valuestring) : 0U);
         if (cJSON_IsString(role) && strcmp(role->valuestring, "caller") == 0 && cJSON_IsTrue(final)) {
             note_activity();
         }
@@ -297,82 +269,6 @@ static void handle_text(char *json)
         ESP_LOGW(TAG, "error %d: %s", number, cJSON_IsString(message) ? message->valuestring : "");
     }
     cJSON_Delete(root);
-}
-
-#if COMMA_VOICE_PCMU
-// G.711 mu-law, as in ITU-T G.711 / the classic Sun reference implementation.
-static uint8_t linear_to_ulaw(int16_t pcm)
-{
-    const int bias = 0x84;
-    const int clip = 32635;
-    int sample = pcm;
-    uint8_t sign = 0;
-    if (sample < 0) {
-        sample = -sample;
-        sign = 0x80;
-    }
-    if (sample > clip) {
-        sample = clip;
-    }
-    sample += bias;
-    int exponent = 7;
-    for (int mask = 0x4000; (sample & mask) == 0 && exponent > 0; mask >>= 1) {
-        exponent--;
-    }
-    int mantissa = (sample >> (exponent + 3)) & 0x0F;
-    return (uint8_t)~(sign | (exponent << 4) | mantissa);
-}
-
-static int16_t ulaw_to_linear(uint8_t ulaw)
-{
-    ulaw = (uint8_t)~ulaw;
-    int sign = ulaw & 0x80;
-    int exponent = (ulaw >> 4) & 0x07;
-    int mantissa = ulaw & 0x0F;
-    int sample = (((mantissa << 3) + 0x84) << exponent) - 0x84;
-    return (int16_t)(sign ? -sample : sample);
-}
-
-#endif
-
-// Agent audio. With pcmu: mu-law at 8 kHz, played at 24 kHz by linear interpolation.
-static int16_t s_down_last;
-
-static void push_agent_audio(const uint8_t *audio, size_t len)
-{
-#if !COMMA_VOICE_PCMU
-    playback_push(audio, len);
-#else
-    static int16_t pcm[256 * WIRE_DECIMATION];
-    while (len > 0) {
-        size_t n = len > 256 ? 256 : len;
-        for (size_t i = 0; i < n; ++i) {
-            int16_t next = ulaw_to_linear(audio[i]);
-            for (int k = 1; k <= WIRE_DECIMATION; ++k) {
-                pcm[i * WIRE_DECIMATION + k - 1] =
-                    (int16_t)(s_down_last + (next - s_down_last) * k / WIRE_DECIMATION);
-            }
-            s_down_last = next;
-        }
-        playback_push((const uint8_t *)pcm, n * WIRE_DECIMATION * sizeof(int16_t));
-        audio += n;
-        len -= n;
-    }
-#endif
-}
-
-// One 20 ms mic frame in the wire format. With pcmu: 160 mu-law bytes at 8 kHz. Averaging three samples (plus the
-// mic's 4.8 kHz low-pass) keeps most aliasing out of the 4 kHz band.
-static void encode_mic_frame(const int16_t *pcm, uint8_t *out)
-{
-#if !COMMA_VOICE_PCMU
-    memcpy(out, pcm, WIRE_FRAME_BYTES);
-#else
-    for (int j = 0; j < WIRE_FRAME_BYTES; ++j) {
-        const int16_t *x = pcm + j * WIRE_DECIMATION;
-        out[j] = linear_to_ulaw((int16_t)(((int)x[0] + x[1] + x[2]) / 3));
-    }
-#endif
 }
 
 static void dispatch_frame(uint8_t opcode, uint8_t *data, size_t len)
@@ -400,43 +296,18 @@ static void dispatch_frame(uint8_t opcode, uint8_t *data, size_t len)
             return;
         }
         note_activity();
-        push_agent_audio(data, len);
+        playback_push(data, len);
     }
 }
 
 static void consume_chunk(const esp_websocket_event_data_t *event)
 {
-    if (!event || !event->data_ptr || event->data_len <= 0) {
-        return;
+    const ws_frame_result_t result = ws_frame_feed(&s_frame, event);
+    if (result == WS_FRAME_DONE) {
+        dispatch_frame(s_frame.opcode, s_frame.buf, s_frame.len);
+    } else if (result == WS_FRAME_TOO_BIG) {
+        ESP_LOGW(TAG, "drop oversized frame: %u bytes", (unsigned)s_frame.len);
     }
-    if (event->op_code == WS_OP_PING || event->op_code == WS_OP_PONG) {
-        return;
-    }
-    const size_t chunk = (size_t)event->data_len;
-    const size_t offset = event->payload_offset > 0 ? (size_t)event->payload_offset : 0;
-    const size_t total = event->payload_len > 0 ? (size_t)event->payload_len : chunk;
-    if (offset == 0) {
-        s_assembling = true;
-        s_opcode = event->op_code;
-        s_frame_len = total;
-        s_frame_got = 0;
-        if (total > RX_MAX) {
-            s_assembling = false;
-            ESP_LOGW(TAG, "drop oversized frame: %u bytes", (unsigned)total);
-            return;
-        }
-    }
-    if (!s_assembling || offset != s_frame_got || chunk > s_frame_len - s_frame_got) {
-        s_assembling = false;
-        return;
-    }
-    memcpy(s_rx + offset, event->data_ptr, chunk);
-    s_frame_got += chunk;
-    if (s_frame_got < s_frame_len || !event->fin) {
-        return;
-    }
-    dispatch_frame(s_opcode, s_rx, s_frame_len);
-    s_assembling = false;
 }
 
 static void on_ws(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -672,7 +543,7 @@ static void sender_task(void *arg)
                     break;
                 }
                 excess -= n;
-                s_mic_dropped += (int)(n / WIRE_FRAME_BYTES);
+                s_mic_dropped += (int)(n / FRAME_BYTES);
             }
         }
         if (xStreamBufferBytesAvailable(s_mic_queue) < SEND_CHUNK_BYTES) {
@@ -680,13 +551,7 @@ static void sender_task(void *arg)
             continue;
         }
         int64_t now = esp_timer_get_time();
-        bool room = !known || tcp_room(&tcp, SEND_CHUNK_BYTES);
-#if COMMA_VOICE_SIMULATE_DROP
-        if (s_started_us != 0 && now - s_started_us > 20 * 1000000LL) {
-            known = true;
-            room = false;
-        }
-#endif
+        const bool room = !known || tcp_room(&tcp, SEND_CHUNK_BYTES);
         if (!room) {
             if (wait_since == 0) {
                 wait_since = now;
@@ -739,11 +604,10 @@ static void play_end_tone(void)
     playback_tone(clean ? PLAYBACK_TONE_NORMAL : PLAYBACK_TONE_DROPPED);
 }
 
+// One 20 ms frame goes on the wire as it is (pcm16_24k).
 static void enqueue_frame(const int16_t *frame)
 {
-    uint8_t wire[WIRE_FRAME_BYTES];
-    encode_mic_frame(frame, wire);
-    if (xStreamBufferSend(s_mic_queue, wire, sizeof(wire), 0) != sizeof(wire)) {
+    if (xStreamBufferSend(s_mic_queue, frame, FRAME_BYTES, 0) != FRAME_BYTES) {
         s_mic_dropped++;
     }
 }
@@ -775,7 +639,6 @@ static int64_t sum_squares(const int16_t *pcm, int samples)
     return sum;
 }
 
-#if COMMA_VOICE_CLEAN
 // What voice_clean has kept back: up to PREROLL_FRAMES denoised frames that went out as zeros, the frames of
 // hangover left, and how many frames the stream is ahead of real time after a pre-roll.
 static int16_t (*s_preroll)[AUDIO_FRAME_SAMPLES];
@@ -848,7 +711,6 @@ static void clean_gate_frame(int16_t *frame, bool speech, bool gated, mic_stats_
     }
     enqueue_frame(zeros);
 }
-#endif
 
 // CPU load per core over the last stats second, from the idle tasks' run time.
 static void cpu_load(int out[2])
@@ -871,9 +733,7 @@ static void uplink_task(void *arg)
 {
     (void)arg;
     static int16_t mic[MIC_FRAME_SAMPLES];
-#if COMMA_VOICE_CLEAN
     static int16_t frame[AUDIO_FRAME_SAMPLES];
-#endif
     mic_stats_t st = {0};
     int filled = 0;
     bool recording = false;
@@ -881,14 +741,12 @@ static void uplink_task(void *arg)
     int64_t speaker_quiet_since = 0;
     int64_t stats_at = 0;
     int stall_logged_at = 0;
-#if COMMA_VOICE_CLEAN
     clean_gate_reset();
     voice_clean_reset();
-#endif
     while (!s_stop) {
         if (!s_start_sent && s_ws_up) {
-            const char *start =
-                "{\"type\":\"session.start\",\"audio_format\":\"" WIRE_FORMAT "\",\"client\":\"" CONFIG_COMMA_CLIENT_SOURCE "/0.1\"}";
+            const char *start = "{\"type\":\"session.start\",\"audio_format\":\"" WIRE_FORMAT "\",\"client\":\""
+                                CONFIG_COMMA_CLIENT_SOURCE "/" COMMA_FIRMWARE_VERSION "\"}";
             if (send_text(start, 2000) < 0) {
                 ESP_LOGE(TAG, "session.start send failed");
                 s_stop = true;
@@ -963,19 +821,12 @@ static void uplink_task(void *arg)
             s_stop = true;
             break;
         }
-#if COMMA_VOICE_CLEAN
         // The AFE also hears the mic while it's muted, so its noise estimate never goes stale.
         voice_clean_feed(mic);
         bool speech = false;
         while (voice_clean_pop(frame, &speech)) {
             clean_gate_frame(frame, speech, gated, &st);
         }
-#else
-        if (gated) {
-            memset(mic, 0, sizeof(mic));
-        }
-        enqueue_frame(mic);
-#endif
         // Stall lines come from here, not the sender, which may itself be stuck inside a send.
         int64_t waiting_since = s_wait_since_us;
         if (waiting_since != 0 && now - waiting_since >= (stall_logged_at + 1) * STALL_LOG_MS * 1000LL &&
@@ -1017,7 +868,6 @@ static void uplink_task(void *arg)
             // mic_rms: raw mic while open; echo_rms: raw mic while muted for agent speech.
             int cpu[2];
             cpu_load(cpu);
-#if COMMA_VOICE_CLEAN
             ESP_LOGI(TAG,
                      "voice mic_rms=%d echo_rms=%d ns_rms=%d vad_ms=%d sent_ms=%d preroll_debt_ms=%d afe_ms=%d cpu0=%d cpu1=%d "
                      "stack_free=%u",
@@ -1025,10 +875,6 @@ static void uplink_task(void *arg)
                      rms_of(st.ns_sq, st.ns_samples), st.vad_frames * AUDIO_FRAME_MS, st.sent_frames * AUDIO_FRAME_MS,
                      s_preroll_debt * AUDIO_FRAME_MS, (int)(voice_clean_take_busy_us() / 1000), cpu[0], cpu[1],
                      (unsigned)uxTaskGetStackHighWaterMark(NULL));
-#else
-            ESP_LOGI(TAG, "voice mic_rms=%d echo_rms=%d cpu0=%d cpu1=%d", rms_of(st.sum_sq, st.open_samples),
-                     rms_of(st.echo_sq, st.echo_samples), cpu[0], cpu[1]);
-#endif
             if (known) {
                 ESP_LOGI(TAG, "net %s tcp_unacked=%u (max %u) tcp_sndbuf=%u tcp_q=%u peer_wnd=%u cwnd=%u nrtx_max=%u rto_ms=%d srtt_ms=%d", wifi,
                          (unsigned)tcp.unacked, (unsigned)s_tcp_unacked_max, (unsigned)tcp.snd_buf, (unsigned)tcp.queue_len,
@@ -1116,9 +962,9 @@ esp_err_t comma_voice_start(void)
     if (cfg_err != ESP_OK) {
         return cfg_err;
     }
-    if (!s_rx) {
-        s_rx = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
-        if (!s_rx) {
+    if (!s_frame.buf) {
+        s_frame.buf = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
+        if (!s_frame.buf) {
             return ESP_ERR_NO_MEM;
         }
     }
@@ -1129,16 +975,13 @@ esp_err_t comma_voice_start(void)
         }
         s_mic_queue = xStreamBufferCreateStatic(MIC_QUEUE_BYTES, 1, s_mic_queue_storage, &s_mic_queue_struct);
     }
-#if COMMA_VOICE_CLEAN
     if (!s_preroll) {
         s_preroll = heap_caps_malloc(PREROLL_FRAMES * sizeof(s_preroll[0]), COMMA_BUFFER_CAPS);
         if (!s_preroll) {
             return ESP_ERR_NO_MEM;
         }
     }
-#endif
     xStreamBufferReset(s_mic_queue);
-    s_down_last = 0;
     s_mic_dropped = 0;
     s_send_us = 0;
     s_send_max_us = 0;
@@ -1157,7 +1000,7 @@ esp_err_t comma_voice_start(void)
     s_started_us = 0;
     s_last_end = COMMA_VOICE_END_NONE;
     s_idle_us = 0;
-    s_assembling = false;
+    ws_frame_reset(&s_frame);
     s_state = COMMA_VOICE_CONNECTING;
 
     esp_websocket_client_config_t cfg = {

@@ -676,13 +676,13 @@ static void test_json_budget(void)
     char *text = malloc(LD_MAX_JSON + 1);
     memset(text, 'x', LD_MAX_JSON);
     text[LD_MAX_JSON] = 0;
-    ld_sb_t b = {.limit = LD_MAX_JSON};
-    ld_sb_str(&b, text);
+    jbuf_t b = {.limit = LD_MAX_JSON};
+    jbuf_str(&b, text);
     CHECK(!b.oom && !b.full && b.len == LD_MAX_JSON, "exact JSON budget must fit");
     CHECK(b.cap == LD_MAX_JSON + 1, "capacity %zu must include only one NUL beyond budget", b.cap);
-    ld_sb_str(&b, "x");
+    jbuf_str(&b, "x");
     CHECK(b.full && !b.oom && b.len == LD_MAX_JSON, "budget overflow must not be reported as OOM");
-    ld_sb_free(&b);
+    jbuf_free(&b);
     free(text);
 
     // Escaped TXT and SSDP fields can make even a 6/6 host exceed 12 KiB.
@@ -778,12 +778,6 @@ static void test_merge(void)
     CHECK(count(cJSON_GetObjectItem(host_in(r, "192.168.1.13"), "services")) == 1, "merge is idempotent");
     cJSON_Delete(r);
     ld_free(ctx);
-
-    // JSON escaping of the envelope id.
-    ld_sb_t b = {0};
-    ld_sb_json(&b, "a\"b\\c\n\x01");
-    CHECK(strcmp(b.p, "\"a\\\"b\\\\c\\u000a\\u0001\"") == 0, "escape: %s", b.p);
-    ld_sb_free(&b);
 
     uint8_t q[64];
     CHECK(ld_dns_question(q, sizeof(q), "_hap._tcp.local", 12, 0x8001) == 17 + 4, "question length");
@@ -902,7 +896,7 @@ static void test_probe_params(void)
     for (int n = CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD - 2; n <= CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD + 1; ++n) {
         uint8_t bytes[CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD + 1];
         memset(bytes, 0xFE, sizeof(bytes));
-        ld_sb_t b = {0};
+        jbuf_t b = {0};
         write_probe_bytes(&b, bytes, (size_t)n);
         cJSON *p = probe_params(1);
         cJSON *entry = cJSON_GetArrayItem(cJSON_GetObjectItem(p, "udp_probes"), 0);
@@ -919,7 +913,7 @@ static void test_probe_params(void)
             CHECK(ld_probe_next(ctx, 0, &send) && send.len == (size_t)n && !memcmp(send.payload, bytes, n), "decoded payload bytes");
             ld_free(ctx);
         }
-        ld_sb_free(&b);
+        jbuf_free(&b);
         cJSON_Delete(p);
     }
 }
@@ -1200,7 +1194,7 @@ static void test_result_frame(void)
 
 static uint32_t g_busy_until, g_slept;
 static int g_sleeps;
-static bool busy_test(void) { return g_slept < g_busy_until; }
+static bool busy_test(void *ctx) { (void)ctx; return g_slept < g_busy_until; }
 static void sleep_test(uint32_t ms) { g_slept += ms; g_sleeps++; }
 
 static void test_ble_wait(void)
@@ -1209,14 +1203,14 @@ static void test_ble_wait(void)
           ld_ble_wait_limit(1000) == 10000, "BLE wait bounded by 10 s and the 15 s request deadline");
     bool still;
     g_slept = 0; g_sleeps = 0; g_busy_until = 0;
-    CHECK(ld_wait_while(busy_test, sleep_test, 10000, 100, &still) == 0 && !still && g_sleeps == 0, "BLE already off: no wait");
+    CHECK(ld_wait_while(busy_test, NULL, sleep_test, 10000, 100, &still) == 0 && !still && g_sleeps == 0, "BLE already off: no wait");
     g_slept = 0; g_sleeps = 0; g_busy_until = 2950;
-    CHECK(ld_wait_while(busy_test, sleep_test, 10000, 100, &still) == 3000 && !still && g_sleeps == 30, "returns once BLE is off");
+    CHECK(ld_wait_while(busy_test, NULL, sleep_test, 10000, 100, &still) == 3000 && !still && g_sleeps == 30, "returns once BLE is off");
     g_slept = 0; g_sleeps = 0; g_busy_until = 100000;
-    CHECK(ld_wait_while(busy_test, sleep_test, 8050, 100, &still) == 8050 && still && g_slept == 8050,
+    CHECK(ld_wait_while(busy_test, NULL, sleep_test, 8050, 100, &still) == 8050 && still && g_slept == 8050,
           "gives up exactly at the limit, BLE still on");
     g_slept = 0; g_sleeps = 0;
-    CHECK(ld_wait_while(busy_test, sleep_test, 0, 100, &still) == 0 && still && g_sleeps == 0, "zero limit never sleeps");
+    CHECK(ld_wait_while(busy_test, NULL, sleep_test, 0, 100, &still) == 0 && still && g_sleeps == 0, "zero limit never sleeps");
 }
 
 static void test_probe_answer_budget(void)
