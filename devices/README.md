@@ -113,5 +113,6 @@ answers are saved as base64 JSON under `--out`; logs show only ids, byte counts 
 The HTTP, UDP and discovery host tests accept `--devkit` to use this overlay's limits. The tunnel
 test uses the two-tunnel profile; the DevKit advertises no tunnel method.
 
-To add a board, follow [AGENTS.md](AGENTS.md) and the checklist in the root README. Do not infer a
-board's capacity from a successful build.
+To add a board, follow [AGENTS.md](AGENTS.md) and the checklist in
+[docs/development.md](../docs/development.md#adding-a-board). Do not infer a board's capacity from a
+successful build.
