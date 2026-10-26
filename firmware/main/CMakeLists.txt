@@ -7,20 +7,28 @@ endif()
 if(CONFIG_COMMA_BOARD_M5STACK_STICKS3 AND NOT comma_board STREQUAL "m5stack-sticks3")
     message(FATAL_ERROR "Build the StickS3 with tools/board.sh m5stack-sticks3: it adds the board's drivers")
 endif()
+if(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_43C AND NOT comma_board STREQUAL "waveshare-amoled-1-43c")
+    message(FATAL_ERROR "Build the Waveshare AMOLED 1.43C with tools/board.sh waveshare-amoled-1-43c: it adds the board's drivers")
+endif()
 if(CONFIG_COMMA_BOARD_ESP32_DEVKIT)
     set(board_dir "../boards/esp32_devkit")
 elseif(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32)
     set(board_dir "../boards/waveshare_amoled_1_32")
 elseif(CONFIG_COMMA_BOARD_M5STACK_STICKS3)
     set(board_dir "../boards/m5stack_sticks3")
+elseif(CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_43C)
+    set(board_dir "../boards/waveshare_amoled_1_43c")
 else()
     set(board_dir "../boards/t_circle_s3")
 endif()
 # A board folder holds only that board's pins and drivers; all of its sources are built. Drivers for
 # parts more than one board uses are in boards/common/.
 file(GLOB board_srcs "${CMAKE_CURRENT_LIST_DIR}/${board_dir}/*.c")
-if(CONFIG_COMMA_BOARD_T_CIRCLE_S3 OR CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32)
+if(CONFIG_COMMA_BOARD_T_CIRCLE_S3 OR CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_32 OR CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_43C)
     list(APPEND board_srcs "../boards/common/cst816_touch.c")
+endif()
+if(CONFIG_COMMA_BOARD_M5STACK_STICKS3 OR CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_43C)
+    list(APPEND board_srcs "../boards/common/mic_path.c")
 endif()
 set(srcs "main.c" "wifi.c" "connector.c" "connector_json.c" "net_watchdog.c" "lan_http.c"
          "lan_discover_core.c" "lan_dest.c" "lan_udp.c" "b64.c" "json_buf.c" "ws_frame.c"
@@ -35,13 +43,16 @@ set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
          tcp_transport http_parser lwip)
 # Requirements are collected before Kconfig is available, so they follow the target and the board
-# name from tools/board.sh. The T-Circle and the StickS3 have voice and display; the Waveshare AMOLED
-# display only (no speaker); the classic ESP32 target neither.
+# name from tools/board.sh. The T-Circle, the StickS3 and the Waveshare AMOLED 1.43C have voice and
+# display; the Waveshare AMOLED 1.32 display only (no speaker); the classic ESP32 target neither.
 if(comma_board STREQUAL "waveshare-amoled-1-32")
     list(APPEND reqs esp_driver_i2c esp_lcd esp_driver_spi waveshare_deps)
 elseif(comma_board STREQUAL "m5stack-sticks3")
     list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_driver_spi esp_driver_ledc
          esp_driver_tsens sticks3_deps)
+elseif(comma_board STREQUAL "waveshare-amoled-1-43c")
+    list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_driver_spi esp_driver_tsens
+         waveshare_1_43c_deps)
 elseif(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND reqs esp_driver_i2s esp_driver_i2c esp-sr esp_lcd esp_lcd_gc9d01
          esp_driver_spi esp_driver_tsens)

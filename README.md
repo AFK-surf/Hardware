@@ -20,6 +20,7 @@ its own network, and only after you allow device operations in the app.
 | [LilyGO T-Circle-S3](https://lilygo.cc/products/t-circle-s3) | `t-circle-s3` | ✓ | 160 px round |
 | [M5Stack StickS3](https://shop.m5stack.com/products/m5stack-sticks3-esp32s3-mini-iot-dev-kit) | `m5stack-sticks3` | ✓ | 135 × 240 |
 | [Waveshare ESP32-S3-Touch-AMOLED-1.32](https://www.waveshare.com/esp32-s3-touch-amoled-1.32.htm) | `waveshare-amoled-1-32` | | 466 px round AMOLED |
+| [Waveshare ESP32-S3-Touch-AMOLED-1.43C](https://www.waveshare.com/esp32-s3-touch-amoled-1.43c.htm) | `waveshare-amoled-1-43c` | ✓ | 466 px round AMOLED |
 | [ESP32 DevKit](https://www.espressif.com/en/products/devkits/esp32-devkitc) (classic ESP32, 4 MB) | `esp32-devkit` | | Status LED |
 
 Every board forwards HTTP, UDP and LAN discovery; all but the DevKit also open TCP tunnels. The
@@ -53,12 +54,14 @@ development tools only.
 
 ## Keys
 
-| | T-Circle-S3 | StickS3 | Waveshare | DevKit |
-| --- | --- | --- | --- | --- |
-| Call / hang up | Tap screen | KEY1 | — | — |
-| Wake the screen | Tap (also calls) | KEY2, short | Tap or BOOT | — |
-| Pairing mode (hold 3–10 s) | BOOT | KEY2 | BOOT | BOOT |
-| Factory reset (hold > 10 s) | BOOT | KEY2 | BOOT | BOOT |
+| | T-Circle-S3 | StickS3 | Waveshare 1.32 | Waveshare 1.43C | DevKit |
+| --- | --- | --- | --- | --- | --- |
+| Call / hang up | Tap screen | KEY1 | — | Tap screen or BOOT, short | — |
+| Wake the screen | Tap (also calls) | KEY2, short | Tap or BOOT | Tap or BOOT (also call) | — |
+| Pairing mode (hold 3–10 s) | BOOT | KEY2 | BOOT | BOOT | BOOT |
+| Factory reset (hold > 10 s) | BOOT | KEY2 | BOOT | BOOT | BOOT |
+
+The 1.43C has no speaker on board: plug one into its MX1.25 speaker connector for calls.
 
 ## Documentation
 

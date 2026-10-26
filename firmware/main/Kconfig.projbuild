@@ -15,6 +15,9 @@ config COMMA_BOARD_WAVESHARE_AMOLED_1_32
 config COMMA_BOARD_M5STACK_STICKS3
     bool "M5Stack StickS3 (build with tools/board.sh)"
     depends on IDF_TARGET_ESP32S3
+config COMMA_BOARD_WAVESHARE_AMOLED_1_43C
+    bool "Waveshare ESP32-S3-Touch-AMOLED-1.43C (build with tools/board.sh)"
+    depends on IDF_TARGET_ESP32S3
 endchoice
 config COMMA_BOARD_ID
     string
@@ -22,24 +25,28 @@ config COMMA_BOARD_ID
     default "esp32-devkit" if COMMA_BOARD_ESP32_DEVKIT
     default "waveshare-amoled-1-32" if COMMA_BOARD_WAVESHARE_AMOLED_1_32
     default "m5stack-sticks3" if COMMA_BOARD_M5STACK_STICKS3
+    default "waveshare-amoled-1-43c" if COMMA_BOARD_WAVESHARE_AMOLED_1_43C
 config COMMA_CLIENT_SOURCE
     string
     default "t-circle" if COMMA_BOARD_T_CIRCLE_S3
     default "esp32-devkit" if COMMA_BOARD_ESP32_DEVKIT
     default "waveshare-amoled-1-32" if COMMA_BOARD_WAVESHARE_AMOLED_1_32
     default "m5stack-sticks3" if COMMA_BOARD_M5STACK_STICKS3
+    default "waveshare-amoled-1-43c" if COMMA_BOARD_WAVESHARE_AMOLED_1_43C
 config COMMA_HAS_VOICE
     bool "Voice"
-    default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_M5STACK_STICKS3
+    default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_M5STACK_STICKS3 || COMMA_BOARD_WAVESHARE_AMOLED_1_43C
     help
-        Needs a mic and a speaker. The Waveshare AMOLED has no speaker on board (only a header).
+        Needs a mic and a speaker. The Waveshare AMOLED 1.32 has no speaker on board (only a header);
+        the 1.43C has an amplifier and a speaker connector.
 config COMMA_HAS_DISPLAY
     bool "Display"
-    default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_WAVESHARE_AMOLED_1_32 || COMMA_BOARD_M5STACK_STICKS3
+    default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_WAVESHARE_AMOLED_1_32 || COMMA_BOARD_M5STACK_STICKS3 || \
+                 COMMA_BOARD_WAVESHARE_AMOLED_1_43C
 config COMMA_DISPLAY_SIZE
     int "Round screen size in pixels"
     depends on COMMA_HAS_DISPLAY && !COMMA_BOARD_M5STACK_STICKS3
-    default 466 if COMMA_BOARD_WAVESHARE_AMOLED_1_32
+    default 466 if COMMA_BOARD_WAVESHARE_AMOLED_1_32 || COMMA_BOARD_WAVESHARE_AMOLED_1_43C
     default 160
     help
         Cards and the logo are drawn for this size; ui/<size>/ holds its fonts and logo.
@@ -61,7 +68,8 @@ config COMMA_BOOT_PRESS_CALLS
         A press released before the 3 s pairing hold is the call key. Holds keep their meaning.
 config COMMA_PAIRING_PASSKEY
     bool "Pair with display passkey and MITM protection"
-    default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_WAVESHARE_AMOLED_1_32 || COMMA_BOARD_M5STACK_STICKS3
+    default y if COMMA_BOARD_T_CIRCLE_S3 || COMMA_BOARD_WAVESHARE_AMOLED_1_32 || COMMA_BOARD_M5STACK_STICKS3 || \
+                 COMMA_BOARD_WAVESHARE_AMOLED_1_43C
 config COMMA_LAN_DISCOVER
     bool "LAN discovery"
     default y

@@ -8,6 +8,7 @@ tools/board.sh t-circle-s3 build
 tools/board.sh esp32-devkit build
 tools/board.sh waveshare-amoled-1-32 build
 tools/board.sh m5stack-sticks3 build
+tools/board.sh waveshare-amoled-1-43c build
 tools/board.sh esp32-devkit flash-monitor PORT
 ```
 
@@ -16,6 +17,7 @@ tools/board.sh esp32-devkit flash-monitor PORT
 | `sdkconfig.t-circle-s3` | esp32s3 | 16 MB / 8 MB | GC9D01 160 px round screen, CST816D touch, PDM mic, MAX98357A speaker; voice, passkey, HTTP/UDP/discovery, 2 tunnels | Setup, Connector, calls, discovery, HTTP text and chunks, UDP, tunnels; queued deadline/revocation/disconnect regressions |
 | `sdkconfig.m5stack-sticks3` | esp32s3 | 8 MB / 8 MB | ST7789 135x240 screen, ES8311 codec on stereo I2S at 24 kHz (mic resampled to 16 kHz), M5PM1 power chip, KEY1 calls, KEY2 = BOOT; T-Circle limits | Passkey setup, Connector, KEY1 calls, screen sleep, KEY2 pairing and factory reset, discovery, HTTP/UDP regressions and tunnels; -3 dB speaker level accepted in listening test |
 | `sdkconfig.waveshare-amoled-1-32` | esp32s3 | 8 MB / 8 MB | CO5300 466x466 AMOLED, CST820 touch; gateway without voice (the board has a mic but no speaker); own partition table without a model partition; T-Circle limits | Screen, touch, passkey setup, Connector, BOOT press and holds; HTTP/UDP regressions, discovery and tunnels; display recovered after correcting an earlier wrong-board flash |
+| `sdkconfig.waveshare-amoled-1-43c` | esp32s3 | 8 MB / 8 MB | CO5300 466x466 AMOLED (mounted turned 180 degrees), CST820 touch, ES8311 speaker codec and ES7210 mics on stereo I2S at 24 kHz (mic resampled to 16 kHz), NS4150B amplifier for an external speaker; tap or short BOOT press calls; StickS3 partition layout; T-Circle limits | Boot, screen, touch and audio codec setup from the serial log; see the [validation notes](../docs/validation.md) for what is still open |
 | `sdkconfig.esp32-devkit` | esp32 | 4 MB / none | GPIO2 status LED, Just Works pairing, HTTP/UDP, discovery with a 12 KiB result cap; no TCP tunnels | Setup, discovery, 8 KiB text and 1 MiB chunks three times each over local WSS; BOOT holds; replug; current HTTP/UDP regressions over local WS and staging WSS reconnect |
 
 The [validation notes](../docs/validation.md) summarize the current results and outstanding tests.
@@ -31,6 +33,9 @@ not erase saved settings. Download mode, per board:
 - **T-Circle-S3 and Waveshare AMOLED** (native USB): esptool enters download mode by itself. If it
   cannot connect, hold BOOT while plugging in USB, then flash. If the Waveshare stays silent with a
   blank screen after flashing on macOS, unplug and replug USB without touching BOOT.
+- **Waveshare AMOLED 1.43C** (native USB): esptool enters download mode by itself. The board has
+  BOOT and PWR keys but no RESET: if esptool cannot connect, hold BOOT and press PWR, release both,
+  then flash.
 - **StickS3** (native USB): download mode is automatic, no key needed. Opening the serial port resets
   the board. A long press on the separate power button also enters download mode.
 - **ESP32 DevKit** (USB-UART bridge, often a CH340 or CP210x): install the bridge's driver if no port
@@ -78,7 +83,8 @@ build directory. Never edit or commit a source-root `sdkconfig`.
 
 Dependencies are locked per board: `firmware/dependencies.lock` (T-Circle),
 `dependencies.lock.esp32` (DevKit), `dependencies.lock.waveshare-amoled-1-32` (adds the CO5300
-driver) and `dependencies.lock.m5stack-sticks3` (adds esp_codec_dev). `tools/board.sh` tells CMake the
+driver), `dependencies.lock.m5stack-sticks3` (adds esp_codec_dev) and
+`dependencies.lock.waveshare-amoled-1-43c` (adds both). `tools/board.sh` tells CMake the
 board before Kconfig runs, which selects the lock file and components. Build boards one at a time:
 `firmware/managed_components/` is shared, and the component manager may remove and restore ESP-SR
 when you switch boards. The DevKit never downloads or links ESP-SR. Do not run
