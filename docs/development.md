@@ -27,6 +27,9 @@ sh firmware/tools/resample_test/run.sh
 sh firmware/tools/mic_path_test/run.sh
 sh firmware/tools/device_config_test/run.sh
 sh firmware/tools/call_ui_test/run.sh
+sh firmware/tools/wifi_switch_test/run.sh
+sh firmware/tools/wifi_scan_test/run.sh
+sh firmware/tools/speaker_volume_test/run.sh
 # The DevKit's smaller limits:
 sh firmware/tools/lan_http_test/run.sh --devkit
 sh firmware/tools/lan_udp_test/run.sh --devkit
@@ -40,6 +43,11 @@ They do not replace board tests for Wi-Fi, Bluetooth or audio.
 - `firmware/tools/ble_provision.py`: set up a board over Bluetooth from a computer, as the app does
   (`scan`, `info`, `wifi-scan`, `provision`). Its `--server` and `--connect-url` default to the
   production backend; pass both to use another one. Secrets come from environment variables.
+- `firmware/tools/serial_wifi.py`: switch a Waveshare 1.43C to another Wi-Fi network over USB, keeping
+  its Comma setup (`join NETWORK`, password on stdin; `status`). On macOS the password can come straight
+  from the keychain: `security find-generic-password -D "AirPort network password" -a NETWORK -w |
+  python firmware/tools/serial_wifi.py --port /dev/cu.usbmodem101 join NETWORK`. `volume` shows the
+  speaker level and `volume 1`-`volume 10` sets it, also during a call. Close any serial monitor first.
 - `firmware/tools/fake_connector.py`: a local Connector server for testing a board without the
   backend. Build with `-DCOMMA_CONNECT_URL_OVERRIDE=ws://<your-computer>:8765/v1/connect` in a
   separate build directory (see [devices/README.md](../devices/README.md)).
@@ -58,7 +66,7 @@ They do not replace board tests for Wi-Fi, Bluetooth or audio.
 | --- | --- |
 | `firmware/main/` | Shared gateway: Connector, LAN methods, Wi-Fi, Bluetooth setup, keys, Kconfig |
 | `firmware/voice/` | Shared voice call: voice session, playback, noise suppression and VAD |
-| `firmware/ui/` | Shared screen cards, fonts and logo for each screen size, and the panel transfer |
+| `firmware/ui/` | Shared screen cards, fonts and logo for each screen size, the panel transfer, and the on-screen settings (`settings.c`, `ui_view.c`) |
 | `firmware/boards/<board>/` | Pins and drivers for one board |
 | `firmware/boards/common/` | Drivers for parts that several boards use (CST816-family touch) |
 | `firmware/components/` | Vendored GC9D01 LCD driver (Espressif, Apache-2.0) |

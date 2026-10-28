@@ -1,0 +1,41 @@
+# Waveshare ESP32-S3-Touch-AMOLED-1.43C: ESP32-S3-PICO-1-N8R8, 8 MB flash, 8 MB octal PSRAM.
+# CO5300 466x466 QSPI AMOLED, CST820 touch, ES8311 codec (speaker) and ES7210 ADC (two mics),
+# NS4150B amplifier on GPIO46 with an MX1.25 speaker header, BOOT on GPIO0.
+# Voice and display. Flash and PSRAM modes as on the Waveshare AMOLED 1.32 (same module).
+CONFIG_COMMA_BOARD_WAVESHARE_AMOLED_1_43C=y
+CONFIG_COMMA_HAS_VOICE=y
+CONFIG_COMMA_HAS_DISPLAY=y
+CONFIG_IDF_TARGET="esp32s3"
+
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# App 0x10000-0x700000, ESP-SR model 0x700000-0x800000.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.waveshare-amoled-1-43c.csv"
+
+# Touch is not the only way to call: a short BOOT press also starts and ends a call.
+CONFIG_COMMA_BOOT_PRESS_CALLS=y
+
+# As on the T-Circle (8 MB PSRAM): TLS records and NimBLE pools in PSRAM, so the Connector can start
+# while BLE is up.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# Mic cleanup (voice_clean.c): the ESP-SR AFE's VAD, with nsnet2 noise suppression as an option,
+# models in the "model" partition.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_NSN_NSNET2=y
+CONFIG_SR_VADN_VADNET1_MEDIUM=y
+# Lets voice_clean.lf put nsnet3's unused 19 KB .bss in PSRAM.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# CPU load per core in the call stats (idle tasks' run time).
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

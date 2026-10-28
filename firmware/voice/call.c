@@ -12,6 +12,16 @@
 #include "provisioning.h"
 #include "voice_clean.h"
 #include "wifi.h"
+#if CONFIG_COMMA_SETTINGS_UI
+#include "settings.h"
+#include "wifi_switch.h"
+#if CONFIG_COMMA_SERIAL_WIFI
+#include "serial_console.h"
+#endif
+#define SETTINGS_OPEN() settings_active()
+#else
+#define SETTINGS_OPEN() false
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,7 +156,7 @@ static void call_screen_update(call_screen_t *cs, int64_t now, bool live)
     } else if (now >= cs->over_until) {
         cs->shown = false;
         cs->over_until = 0;
-        if (!provisioning_active()) {
+        if (!provisioning_active() && !SETTINGS_OPEN()) {
             display_show_logo();
         }
     }
@@ -189,6 +199,9 @@ void call_run_ui(const char *help)
 {
     ESP_LOGI(TAG, "%s", help);
     app_controls_init(board_input_boot_held());
+#if CONFIG_COMMA_SERIAL_WIFI
+    serial_console_start();
+#endif
     int64_t notice_until = 0;
     bool prov_was_active = provisioning_active();
     call_screen_t call_screen = {0};
@@ -204,7 +217,8 @@ void call_run_ui(const char *help)
         const board_input_event_t gesture = board_input_poll();
         bool call_key = gesture == BOARD_INPUT_TAP;
 #if CONFIG_COMMA_BOOT_PRESS_CALLS
-        call_key = boot_pressed(&boot_press, now, board_input_boot_held()) || call_key;
+        const bool boot_key = boot_pressed(&boot_press, now, board_input_boot_held());
+        call_key = boot_key || call_key;
 #endif
         const comma_voice_state_t state = comma_voice_state();
         // A call that is over but still closing its socket (hang-up tone playing) is not "in call":
@@ -227,9 +241,38 @@ void call_run_ui(const char *help)
         }
         prov_was_active = prov;
 
+#if CONFIG_COMMA_SETTINGS_UI
+        // The on-screen settings. A long press on the idle screen opens them; while they are open they
+        // take the touch input and the short BOOT press (Back), so nothing dials, including the tap
+        // or press that closes them. A call or pairing mode closes them.
+        wifi_switch_poll();
+#if CONFIG_COMMA_SERIAL_WIFI
+        serial_console_poll();
+#endif
+        const bool settings_were_open = settings_active();
+        if (settings_were_open && (in_call || ending || prov)) {
+            settings_close();
+        } else if (settings_were_open) {
+#if CONFIG_COMMA_BOOT_PRESS_CALLS
+            settings_poll(now, gesture, boot_key, boot_tracking);
+#else
+            settings_poll(now, gesture, false, boot_tracking);
+#endif
+        } else if (gesture == BOARD_INPUT_LONG_PRESS && !in_call && !ending && !prov && !boot_tracking &&
+                   dial_pending_until == 0 && wifi_pending_until == 0 && device_config_provisioned()) {
+            call_screen_reset(&call_screen);
+            notice_until = 0;
+            settings_open(now);
+            settings_poll(now, BOARD_INPUT_NONE, false, false);
+        }
+        if (settings_were_open || settings_active()) {
+            call_key = false;
+        }
+#endif
+
         if (notice_until && now > notice_until) {
             notice_until = 0;
-            if (!prov && !boot_tracking && !in_call) {
+            if (!prov && !boot_tracking && !in_call && !SETTINGS_OPEN()) {
                 display_show_logo();
             }
         }
@@ -288,6 +331,11 @@ void call_run_ui(const char *help)
             }
         } else if (!device_config_provisioned()) {
             ESP_LOGW(TAG, "not provisioned");
+#if CONFIG_COMMA_SETTINGS_UI
+        } else if (wifi_is_off()) {
+            display_show_card("Wi-Fi is off", NULL, "Hold the screen to open Settings");
+            notice_until = now + NOTICE_US;
+#endif
         } else if (!wifi_is_up()) {
             // Keep polling input while Wi-Fi reconnects: pairing/reset holds and cancellation
             // must work even when the stored access point is unavailable.
@@ -308,7 +356,8 @@ void call_run_ui(const char *help)
         }
 
         display_keep_awake(in_call || ending || prov || boot_tracking || notice_until != 0 ||
-                           call_screen.shown || dial_pending_until != 0 || wifi_pending_until != 0);
+                           call_screen.shown || dial_pending_until != 0 || wifi_pending_until != 0 ||
+                           SETTINGS_OPEN());
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

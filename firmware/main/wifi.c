@@ -13,8 +13,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "wifi_scan_retry.h"
 
 #define WIFI_UP_BIT BIT0
+#define SCAN_DONE_BIT BIT1
+// A scan of all channels takes about 2-3 s; this bounds a scan that never reports done.
+#define SCAN_TIMEOUT_MS 10000
+// A connect attempt to a network that is not found gives up after about 2.5 s.
+#define SETTLE_TIMEOUT_MS 4000
 // A provisioning trial gives up after this many failed attempts.
 #define TRIAL_ATTEMPTS 3
 
@@ -37,9 +43,24 @@ static atomic_int s_result = WIFI_RESULT_IDLE;
 // unreachable network would otherwise be retried forever.
 static atomic_bool s_hold;
 static atomic_bool s_scanning;
+static atomic_bool s_off;  // wifi_turn_off() until the next wifi_connect()
+// A connect attempt is in flight: from esp_wifi_connect() until the driver reports it connected or
+// disconnected. The driver refuses or aborts a scan meanwhile.
+static atomic_bool s_connecting;
+static atomic_bool s_scan_failed;  // the last scan done event reported a failure
 static int s_attempts;
 static int s_auth_failures;
 static int s_not_found;
+
+static esp_err_t start_connect(void)
+{
+    s_connecting = true;
+    const esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        s_connecting = false;
+    }
+    return err;
+}
 
 static bool reason_is_auth(int reason)
 {
@@ -76,7 +97,7 @@ static void on_trial_disconnect(int reason)
         ESP_LOGW(TAG, "trial failed after %d attempts, reason %d", s_attempts, reason);
         return;
     }
-    esp_wifi_connect();
+    start_connect();
 }
 
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -86,6 +107,7 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
         const wifi_event_sta_disconnected_t *event = data;
         const int reason = event ? event->reason : -1;
         s_up = false;
+        s_connecting = false;
         xEventGroupClearBits(s_events, WIFI_UP_BIT);
         const connect_mode_t mode = s_mode;
         if (mode == MODE_KEEP) {
@@ -98,15 +120,24 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
             }
             ESP_LOGW(TAG, "disconnected, reason %d, reconnecting", reason);
             vTaskDelay(pdMS_TO_TICKS(500));
-            esp_wifi_connect();
+            // A scan, a hold or a new connection may have started during the delay.
+            if (s_hold || s_scanning || s_off || s_mode != MODE_KEEP || s_up) {
+                return;
+            }
+            start_connect();
         } else if (mode == MODE_TRIAL) {
             ESP_LOGW(TAG, "disconnected, reason %d", reason);
             on_trial_disconnect(reason);
         }
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
+        const wifi_event_sta_scan_done_t *event = data;
+        s_scan_failed = event && event->status != 0;
+        xEventGroupSetBits(s_events, SCAN_DONE_BIT);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
         // Logged for every join: a network can have more than one BSSID, and a stuck link may follow
         // a move between them.
         const wifi_event_sta_connected_t *event = data;
+        s_connecting = false;
         if (event) {
             ESP_LOGI(TAG, "associated bssid=%02x:%02x:%02x:%02x:%02x:%02x ch=%u", event->bssid[0], event->bssid[1],
                      event->bssid[2], event->bssid[3], event->bssid[4], event->bssid[5], event->channel);
@@ -168,7 +199,7 @@ void wifi_hold_reconnect(bool hold)
         esp_wifi_disconnect();  // cancel an attempt in flight
     } else {
         ESP_LOGI(TAG, "reconnects resumed");
-        esp_wifi_connect();
+        start_connect();
     }
 }
 
@@ -203,6 +234,7 @@ esp_err_t wifi_connect(const char *ssid, const char *password, bool keep_retryin
         return ESP_ERR_INVALID_SIZE;
     }
 
+    s_off = false;
     // Drop any current link first. Its disconnect event lands while the mode is NONE.
     if (s_mode != MODE_NONE || s_up) {
         wifi_disconnect();
@@ -223,7 +255,7 @@ esp_err_t wifi_connect(const char *ssid, const char *password, bool keep_retryin
     s_not_found = 0;
     s_result = WIFI_RESULT_CONNECTING;
     s_mode = keep_retrying ? MODE_KEEP : MODE_TRIAL;
-    err = esp_wifi_connect();
+    err = start_connect();
     if (err != ESP_OK) {
         s_mode = MODE_NONE;
         s_result = WIFI_RESULT_FAILED;
@@ -243,6 +275,51 @@ static int by_rssi(const void *a, const void *b)
     return ((const wifi_ap_t *)b)->rssi - ((const wifi_ap_t *)a)->rssi;
 }
 
+static void scan_settle(void *ctx)
+{
+    (void)ctx;
+    esp_wifi_disconnect();  // cancels an attempt in flight; its disconnect event clears s_connecting
+    for (int waited = 0; s_connecting && waited < SETTLE_TIMEOUT_MS; waited += 50) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (s_connecting) {
+        ESP_LOGW(TAG, "connect attempt still in flight; scanning anyway");
+        s_connecting = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+}
+
+static esp_err_t scan_run(void *ctx)
+{
+    (void)ctx;
+    const wifi_scan_config_t scan_cfg = {.show_hidden = false};
+    xEventGroupClearBits(s_events, SCAN_DONE_BIT);
+    s_scan_failed = false;
+    const esp_err_t err = esp_wifi_scan_start(&scan_cfg, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scan refused: %s", esp_err_to_name(err));
+        return err;
+    }
+    const EventBits_t bits =
+        xEventGroupWaitBits(s_events, SCAN_DONE_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(SCAN_TIMEOUT_MS));
+    if (!(bits & SCAN_DONE_BIT)) {
+        esp_wifi_scan_stop();
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_scan_failed) {
+        ESP_LOGW(TAG, "scan aborted");
+    }
+    return ESP_OK;
+}
+
+static bool scan_aborted(void *ctx)
+{
+    (void)ctx;
+    return s_scan_failed;
+}
+
+static esp_err_t read_results(wifi_ap_t *out, size_t max, size_t *count);
+
 esp_err_t wifi_scan(wifi_ap_t *out, size_t max, size_t *count)
 {
     *count = 0;
@@ -256,25 +333,25 @@ esp_err_t wifi_scan(wifi_ap_t *out, size_t max, size_t *count)
     }
     const bool reconnecting = s_mode == MODE_KEEP && !s_up;
     s_scanning = true;
-    if (reconnecting) {
-        esp_wifi_disconnect();
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    const wifi_scan_config_t scan_cfg = {.show_hidden = false};
-    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
-    if (err == ESP_ERR_WIFI_STATE && !s_up) {
-        ESP_LOGW(TAG, "scan refused while connecting; cancelling and retrying");
-        esp_wifi_disconnect();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        err = esp_wifi_scan_start(&scan_cfg, true);
+    const wifi_scan_ops_t ops = {.settle = scan_settle, .run = scan_run, .aborted = scan_aborted};
+    esp_err_t err = wifi_scan_with_retry(&ops, reconnecting || s_connecting);
+    if (err == ESP_OK) {
+        // Before any reconnect: a connect attempt scans too, and that clears these results.
+        err = read_results(out, max, count);
+    } else {
+        ESP_LOGW(TAG, "scan failed: %s", esp_err_to_name(err));
+        esp_wifi_clear_ap_list();
     }
     s_scanning = false;
     if (reconnecting && !s_hold && s_mode == MODE_KEEP && !s_up) {
-        esp_wifi_connect();
+        start_connect();
     }
-    if (err != ESP_OK) {
-        return err;
-    }
+    return err;
+}
+
+static esp_err_t read_results(wifi_ap_t *out, size_t max, size_t *count)
+{
+    esp_err_t err;
     uint16_t n = 0;
     esp_wifi_scan_get_ap_num(&n);
     if (n > 64) {
@@ -335,6 +412,33 @@ void wifi_set_power_save(bool on)
 bool wifi_is_up(void)
 {
     return s_up;
+}
+
+bool wifi_link_info(char *ssid, size_t ssid_len, int8_t *rssi)
+{
+    wifi_ap_record_t ap;
+    if (!s_up || esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        return false;
+    }
+    if (ssid && ssid_len) {
+        strlcpy(ssid, (const char *)ap.ssid, ssid_len);
+    }
+    if (rssi) {
+        *rssi = ap.rssi;
+    }
+    return true;
+}
+
+void wifi_turn_off(void)
+{
+    wifi_disconnect();
+    s_off = true;
+    ESP_LOGI(TAG, "turned off");
+}
+
+bool wifi_is_off(void)
+{
+    return s_off;
 }
 
 unsigned wifi_ip_generation(void)

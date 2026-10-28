@@ -4,6 +4,7 @@
 #include "board_input.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -16,6 +17,11 @@
 
 #define TAP_MAX_US (280 * 1000)
 #define BOOT_DEBOUNCE_US (20 * 1000)
+// With points: held this long without moving more than PRESS_SLOP_PX is a long press.
+#define LONG_PRESS_US (1000 * 1000)
+#define PRESS_SLOP_PX 24
+// With points: a release this far from where the finger went down, mostly vertically, is a swipe.
+#define SWIPE_MIN_PX 40
 
 static const char *TAG = "touch";
 
@@ -30,6 +36,11 @@ static int64_t s_boot_change_us = 0;
 
 static bool s_tap_armed = false;
 static int64_t s_down_us = 0;
+
+// With points only.
+static int s_x, s_y, s_down_x, s_down_y;
+static bool s_long_armed = false;
+static bool s_moved = false;
 
 static esp_err_t touch_read_register(uint8_t reg, uint8_t *value)
 {
@@ -47,6 +58,25 @@ static bool read_screen(bool *down)
 {
     if (!s_touch_ready) {
         *down = false;
+        return true;
+    }
+    if (s_config.points) {
+        // Finger count, then X and Y (high nibble, low byte), in one read.
+        const uint8_t reg = CST816_REG_FINGER_COUNT;
+        uint8_t data[5] = {0};
+        if (i2c_master_transmit_receive(s_touch, &reg, 1, data, sizeof(data), 20) != ESP_OK) {
+            *down = false;
+            return s_config.failed_read_is_release;
+        }
+        *down = (data[0] & 0x0f) > 0;
+        if (*down) {
+            int x = ((data[1] & 0x0f) << 8) | data[2];
+            int y = ((data[3] & 0x0f) << 8) | data[4];
+            if (s_config.mirror_x) x = s_config.width - x;
+            if (s_config.mirror_y) y = s_config.height - y;
+            s_x = x < 0 ? 0 : x >= s_config.width ? s_config.width - 1 : x;
+            s_y = y < 0 ? 0 : y >= s_config.height ? s_config.height - 1 : y;
+        }
         return true;
     }
     uint8_t fingers = 0;
@@ -145,11 +175,38 @@ board_input_event_t board_input_poll(void)
     if (pressed) {
         s_down_us = now;
         s_tap_armed = true;
+        s_long_armed = s_config.points;
+        s_moved = false;
+        s_down_x = s_x;
+        s_down_y = s_y;
+    } else if (screen && s_config.points) {
+        if (abs(s_x - s_down_x) > PRESS_SLOP_PX || abs(s_y - s_down_y) > PRESS_SLOP_PX) {
+            s_moved = true;
+            s_long_armed = false;
+        }
+        if (s_long_armed && now - s_down_us >= LONG_PRESS_US) {
+            // Reported while still held; the release that follows is nothing.
+            s_long_armed = false;
+            s_tap_armed = false;
+            return BOARD_INPUT_LONG_PRESS;
+        }
     }
     if (released && s_tap_armed) {
         s_tap_armed = false;
-        if (now - s_down_us <= TAP_MAX_US) {
+        const int64_t held = now - s_down_us;
+        if (s_config.points && s_moved) {
+            // A drag, however quick, is not a tap: it would land on whatever is under the finger.
+            const int dx = s_x - s_down_x, dy = s_y - s_down_y;
+            if (abs(dy) >= SWIPE_MIN_PX && abs(dy) > abs(dx)) {
+                return dy < 0 ? BOARD_INPUT_SWIPE_UP : BOARD_INPUT_SWIPE_DOWN;
+            }
+            return BOARD_INPUT_NONE;
+        }
+        if (held <= TAP_MAX_US) {
             return BOARD_INPUT_TAP;
+        }
+        if (s_config.points && !s_moved && held < LONG_PRESS_US) {
+            return BOARD_INPUT_PRESS;
         }
     }
     return BOARD_INPUT_NONE;
@@ -158,4 +215,14 @@ board_input_event_t board_input_poll(void)
 bool board_input_boot_held(void)
 {
     return s_boot_held;
+}
+
+bool board_input_point(int *x, int *y)
+{
+    if (!s_config.points) {
+        return false;
+    }
+    *x = s_x;
+    *y = s_y;
+    return true;
 }

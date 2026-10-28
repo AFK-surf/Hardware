@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// StickS3 mic path: one slot out of the codec's stereo I2S frames, then 24 -> 16 kHz.
+// Mic path for boards whose codec shares one stereo I2S port with the speaker at 24 kHz (StickS3,
+// Waveshare AMOLED 1.43C): one slot out of the stereo frames, then 24 -> 16 kHz.
 // Pure C, so tools/mic_path_test can check it on a host.
 //
-// The I2S port runs in stereo slot mode: every frame is two samples, left then right, and the one
-// mic is on one slot. Taking that slot gives exactly one sample per frame, so the mic rate is the
+// The I2S port runs in stereo slot mode: every frame is two samples, left then right, and the mic
+// used is on one slot. Taking that slot gives exactly one sample per frame, so the mic rate is the
 // I2S rate. (Reading the ES8311 in mono slot mode once gave ~1.9x real time.)
 
 #include <stdint.h>

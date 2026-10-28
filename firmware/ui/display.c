@@ -18,6 +18,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ui_card.h"
+#if CONFIG_COMMA_SETTINGS_UI
+#include "esp_heap_caps.h"
+#include "ui_view.h"
+#endif
 
 #define DISPLAY_SLEEP_US (15LL * 1000000)
 #define POLL_MS 20
@@ -79,6 +83,13 @@ static atomic_bool s_wake_req;
 static atomic_bool s_keep_awake;
 static _Atomic int64_t s_activity_us;
 static atomic_bool s_asleep;
+#if CONFIG_COMMA_SETTINGS_UI
+// A view replaces the card while s_view_on. Two copies in PSRAM: the one asked for, and the one the
+// display task draws from.
+static ui_view_t *s_view, *s_view_drawn;
+static bool s_view_on;
+static bool s_drawing_view;
+#endif
 
 static void set_content(bool card_on, const char *label, const char *big, const char *body)
 {
@@ -89,6 +100,12 @@ static void set_content(bool card_on, const char *label, const char *big, const 
         strlcpy(card.body, body ? body : "", sizeof(card.body));
     }
     taskENTER_CRITICAL(&s_mux);
+#if CONFIG_COMMA_SETTINGS_UI
+    if (s_view_on) {
+        s_view_on = false;
+        s_dirty = true;
+    }
+#endif
     // Same content as on screen: no redraw, but it still counts as activity.
     if (card_on != s_card_on || memcmp(&card, &s_card, sizeof(card)) != 0) {
         s_card_on = card_on;
@@ -108,6 +125,32 @@ void display_show_logo(void)
 {
     set_content(false, NULL, NULL, NULL);
 }
+
+#if CONFIG_COMMA_SETTINGS_UI
+void display_show_view(const ui_view_t *view)
+{
+    if (!s_view) {
+        ui_view_t *a = heap_caps_calloc(1, sizeof(*a), COMMA_BUFFER_CAPS);
+        ui_view_t *b = heap_caps_calloc(1, sizeof(*b), COMMA_BUFFER_CAPS);
+        if (!a || !b) {
+            heap_caps_free(a);
+            heap_caps_free(b);
+            ESP_LOGE(TAG, "no memory for a view");
+            return;
+        }
+        s_view_drawn = b;
+        s_view = a;
+    }
+    taskENTER_CRITICAL(&s_mux);
+    if (!s_view_on || memcmp(view, s_view, sizeof(*view)) != 0) {
+        *s_view = *view;
+        s_view_on = true;
+        s_dirty = true;
+    }
+    taskEXIT_CRITICAL(&s_mux);
+    display_wake();
+}
+#endif
 
 void display_wake(void)
 {
@@ -138,6 +181,11 @@ static bool draw(bool card_on, const ui_card_t *card)
         ESP_LOGE(TAG, "framebuffer still busy, frame skipped");
         return false;
     }
+#if CONFIG_COMMA_SETTINGS_UI
+    if (s_drawing_view) {
+        ui_view_render(s_view_drawn, fb, s_lut);
+    } else
+#endif
     if (card_on) {
         ui_card_render(card, fb, s_lut);
     } else {
@@ -183,6 +231,12 @@ void display_run(void)
             taskENTER_CRITICAL(&s_mux);
             card = s_card;
             card_on = s_card_on;
+#if CONFIG_COMMA_SETTINGS_UI
+            s_drawing_view = s_view_on;
+            if (s_view_on) {
+                *s_view_drawn = *s_view;
+            }
+#endif
             s_dirty = false;
             taskEXIT_CRITICAL(&s_mux);
             if (!s_asleep) {

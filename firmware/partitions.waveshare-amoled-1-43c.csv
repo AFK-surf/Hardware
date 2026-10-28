@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,  Size
+# Waveshare AMOLED 1.43C (8 MB flash): the StickS3's layout, the app taking the room up to the model.
+nvs,      data, nvs,     0x9000,  0x6000
+phy_init, data, phy,     0xf000,  0x1000
+factory,  app,  factory, 0x10000, 0x6f0000
+# ESP-SR models for voice_clean (nsnet2 + vadnet1, ~0.6 MB), mapped from flash by esp_srmodel_init("model").
+model,    data, spiffs,  0x700000, 1M

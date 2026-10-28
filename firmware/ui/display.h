@@ -24,3 +24,8 @@ void display_wake(void);
 void display_keep_awake(bool on);
 
 bool display_asleep(void);
+
+// Draw a view (ui_view.h) instead of a card, until the next card or logo: the on-screen settings
+// (CONFIG_COMMA_SETTINGS_UI only). It is copied; asking for what is already shown doesn't redraw.
+struct ui_view;
+void display_show_view(const struct ui_view *view);
