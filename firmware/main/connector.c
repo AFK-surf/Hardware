@@ -1303,3 +1303,8 @@ fail:
     s_client_mutex = NULL;
     s_frame.buf = NULL;
 }
+
+bool connector_online(void)
+{
+    return s_up;
+}

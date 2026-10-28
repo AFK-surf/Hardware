@@ -20,7 +20,16 @@ void display_show_logo(void);
 // A tap or BOOT press: wake the screen and restart the idle timer.
 void display_wake(void);
 
+// Wake the screen and draw what it shows again, though it has not changed: the screen mirror's
+// first frame (CONFIG_COMMA_SCREEN_MIRROR).
+void display_redraw(void);
+
 // While set, the screen stays on (a call, pairing mode with its passkey, a notice).
 void display_keep_awake(bool on);
 
 bool display_asleep(void);
+
+// Draw a view (ui_view.h) instead of a card, until the next card or logo: the on-screen settings
+// (CONFIG_COMMA_SETTINGS_UI only). It is copied; asking for what is already shown doesn't redraw.
+struct ui_view;
+void display_show_view(const struct ui_view *view);

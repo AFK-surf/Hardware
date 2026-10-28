@@ -28,3 +28,11 @@ int board_audio_read_mono(int16_t *mono_buf, int samples);
 
 // Play mono PCM16. The amplifier is enabled on the first write.
 esp_err_t board_audio_play_pcm16_mono(const int16_t *pcm, int samples);
+
+// Speaker volume, a level from speaker_volume.h. Only boards with a volume setting implement these
+// (the Waveshare 1.43C); only code built for them calls them.
+int board_audio_volume(void);
+// Applies the level at once, also during a call, and stores it for the next start.
+esp_err_t board_audio_set_volume(int level);
+// A short beep at the current level, to hear it. Refused while a call has the speaker.
+esp_err_t board_audio_preview_volume(void);

@@ -52,6 +52,14 @@ void wifi_set_power_save(bool on);
 
 bool wifi_is_up(void);
 
+// The access point of the link while up: its SSID and signal. False when down.
+bool wifi_link_info(char *ssid, size_t ssid_len, int8_t *rssi);
+
+// Turned off on purpose (the on-screen settings): the link is dropped and nothing reconnects until
+// the next wifi_connect(), which turns it on again. Not stored: a restart joins the stored network.
+void wifi_turn_off(void);
+bool wifi_is_off(void);
+
 // Counts IP_EVENT_STA_GOT_IP: changes each time the link comes (back) up.
 unsigned wifi_ip_generation(void);
 

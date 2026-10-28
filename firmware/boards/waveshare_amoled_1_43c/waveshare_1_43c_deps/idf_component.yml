@@ -1,0 +1,12 @@
+# Waveshare ESP32-S3-Touch-AMOLED-1.43C only. Exact versions, the ones the 1.32 and the StickS3
+# already lock; both support ESP-IDF 6.0.
+# Public, so main (which requires this component) gets their headers.
+dependencies:
+  # CO5300 AMOLED over QSPI (panel.c).
+  espressif/esp_lcd_co5300:
+    version: "2.1.0"
+    require: public
+  # ES8311 (speaker) and ES7210 (mics) registers (board_audio.c).
+  espressif/esp_codec_dev:
+    version: "1.6.2"
+    require: public

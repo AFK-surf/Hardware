@@ -24,3 +24,5 @@ typedef struct {
 extern const ui_font_t ui_font_small;
 // Inter weight 600: 36 px on the 160 px screen, scaled with it.
 extern const ui_font_t ui_font_large;
+// Inter weight 500: 29 px, for the settings on the 466 px screen (ui/466/ui_font_menu.c).
+extern const ui_font_t ui_font_menu;

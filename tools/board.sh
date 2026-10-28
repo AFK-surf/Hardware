@@ -11,6 +11,7 @@ case "$BOARD" in
   esp32-devkit) TARGET=esp32 ;;
   waveshare-amoled-1-32) TARGET=esp32s3 ;;
   m5stack-sticks3) TARGET=esp32s3 ;;
+  waveshare-amoled-1-43c) TARGET=esp32s3 ;;
   *) echo "Unknown board: $BOARD" >&2; exit 2 ;;
 esac
 case "$ACTION" in

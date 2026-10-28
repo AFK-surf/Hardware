@@ -10,6 +10,12 @@
 typedef enum {
     BOARD_INPUT_NONE = 0,
     BOARD_INPUT_TAP,  // a short tap on the screen, reported when the finger lifts
+    // Only from a touch board that reports where the finger is (board_input_point):
+    // A finger that moved is never a tap on such a board, only a swipe or nothing.
+    BOARD_INPUT_PRESS,       // a slower tap: lifted after 280 ms but before a long press, not moved
+    BOARD_INPUT_LONG_PRESS,  // held still for 1 s; reported once, while the finger is still down
+    BOARD_INPUT_SWIPE_UP,    // moved mostly up, at least 40 px, then lifted (the finger moved up)
+    BOARD_INPUT_SWIPE_DOWN,
 } board_input_event_t;
 
 // Set up the touch controller and the BOOT key. Safe to call if the touch chip is absent.
@@ -20,3 +26,12 @@ board_input_event_t board_input_poll(void);
 
 // BOOT, debounced, as of the last poll.
 bool board_input_boot_held(void);
+
+// Where the finger was at its last sample on the screen, in screen pixels, for the event just
+// reported. False on a board that does not report positions.
+bool board_input_point(int *x, int *y);
+
+// Report event at (x, y) on the next poll as if a finger had made it: clicks in the screen mirror
+// (CONFIG_COMMA_SCREEN_MIRROR). Safe from any task. Ignored on a board that does not report
+// positions.
+void board_input_inject(board_input_event_t event, int x, int y);

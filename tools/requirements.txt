@@ -1,3 +1,4 @@
 # Optional host tools; firmware dependencies are managed by ESP-IDF.
 bleak==3.0.2
 websockets==17.2
+pyserial==3.5

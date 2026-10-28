@@ -20,6 +20,7 @@ its own network, and only after you allow device operations in the app.
 | [LilyGO T-Circle-S3](https://lilygo.cc/products/t-circle-s3) | `t-circle-s3` | ✓ | 160 px round |
 | [M5Stack StickS3](https://shop.m5stack.com/products/m5stack-sticks3-esp32s3-mini-iot-dev-kit) | `m5stack-sticks3` | ✓ | 135 × 240 |
 | [Waveshare ESP32-S3-Touch-AMOLED-1.32](https://www.waveshare.com/esp32-s3-touch-amoled-1.32.htm) | `waveshare-amoled-1-32` | | 466 px round AMOLED |
+| [Waveshare ESP32-S3-Touch-AMOLED-1.43C](https://www.waveshare.com/esp32-s3-touch-amoled-1.43c.htm) | `waveshare-amoled-1-43c` | ✓ | 466 px round AMOLED |
 | [ESP32 DevKit](https://www.espressif.com/en/products/devkits/esp32-devkitc) (classic ESP32, 4 MB) | `esp32-devkit` | | Status LED |
 
 Every board forwards HTTP, UDP and LAN discovery; all but the DevKit also open TCP tunnels. The
@@ -53,12 +54,28 @@ development tools only.
 
 ## Keys
 
-| | T-Circle-S3 | StickS3 | Waveshare | DevKit |
-| --- | --- | --- | --- | --- |
-| Call / hang up | Tap screen | KEY1 | — | — |
-| Wake the screen | Tap (also calls) | KEY2, short | Tap or BOOT | — |
-| Pairing mode (hold 3–10 s) | BOOT | KEY2 | BOOT | BOOT |
-| Factory reset (hold > 10 s) | BOOT | KEY2 | BOOT | BOOT |
+| | T-Circle-S3 | StickS3 | Waveshare 1.32 | Waveshare 1.43C | DevKit |
+| --- | --- | --- | --- | --- | --- |
+| Call / hang up | Tap screen | KEY1 | — | Tap screen or BOOT, short | — |
+| Wake the screen | Tap (also calls) | KEY2, short | Tap or BOOT | Tap or BOOT (also call) | — |
+| Pairing mode (hold 3–10 s) | BOOT | KEY2 | BOOT | BOOT | BOOT |
+| Factory reset (hold > 10 s) | BOOT | KEY2 | BOOT | BOOT | BOOT |
+| Settings on the screen | — | — | — | Hold the idle screen 1 s | — |
+
+The 1.43C has no speaker on board: plug one into its MX1.25 speaker connector for calls.
+
+The 1.43C's on-screen settings show the Wi-Fi network, its signal and whether Comma is online. They
+scan for networks and switch to another one with a password typed on the screen, keeping the Comma
+setup (no new pairing); a network that does not connect within 45 s is given up and the previous one
+rejoined. They also turn Wi-Fi off until it is turned on again or the board restarts, and start
+pairing mode, the only time Bluetooth runs. The Volume page sets the speaker level from 1 to 10 in
+3 dB steps, with a beep at each step; it is stored and kept across restarts. Up to 8 the codec does
+the work without clipping; 9 and 10 add +3 and +6 dB in front of the speaker limiter, louder but with
+the loudest peaks compressed. BOOT, short, goes back a page. The same Wi-Fi switch and the volume
+run from a computer over USB with `firmware/tools/serial_wifi.py` (see
+[Development](docs/development.md)).
+`firmware/tools/screen_mirror.py` shows the 1.43C's screen in a browser on the computer it is plugged
+into and turns mouse clicks into taps, long presses and swipes.
 
 ## Documentation
 
