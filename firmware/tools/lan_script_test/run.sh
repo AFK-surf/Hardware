@@ -13,7 +13,7 @@ mkdir -p "$OUT"
 cc -O2 -D_GNU_SOURCE -I"$Q" -o "$OUT/stdlib_gen" "$C/lan_script_stdlib.c" "$Q/mquickjs_build.c"
 "$OUT/stdlib_gen" -a > "$OUT/mquickjs_atom.h"
 "$OUT/stdlib_gen" > "$OUT/lan_script_stdlib.h"
-cc -std=gnu11 -g -O1 -D_GNU_SOURCE -fno-math-errno -fsanitize=address,undefined -fno-sanitize=null,shift-base -Wall -Wno-unused-parameter \
+cc -std=gnu11 -g -O1 -D_GNU_SOURCE -fno-math-errno -fsanitize=address,undefined -fno-sanitize=shift-base -include stddef.h -Wall -Wno-unused-parameter \
     -I"$OUT" -I"$Q" -I"$C/include" -I"$SSL/include" \
     test.c "$C/lan_script.c" crypto_openssl.c "$Q/mquickjs.c" "$Q/cutils.c" "$Q/dtoa.c" "$Q/libm.c" \
     -L"$SSL/lib" -lcrypto -lm -o "$OUT/test"

@@ -31,7 +31,13 @@ typedef struct {
     // The script's own deadline: the request's, or sooner by timeout_ms. Each LAN call ends by it too.
     lan_request_t bounded;
     unsigned calls;
+    int64_t yielded_us;
 } script_ctx_t;
+
+// A script that only computes never blocks: the runtime asks `cancelled` every few thousand
+// instructions, and it gives the CPU away a tick this often, so the idle task (and its watchdog)
+// and lower tasks still run.
+#define YIELD_EVERY_US (50 * 1000)
 
 static int timeout_ms(const cJSON *params)
 {
@@ -106,6 +112,11 @@ static void sleep_ms(void *arg, uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms ? ms 
 static const char *cancelled(void *arg)
 {
     script_ctx_t *c = arg;
+    const int64_t now = esp_timer_get_time();
+    if (now - c->yielded_us >= YIELD_EVERY_US) {
+        vTaskDelay(1);
+        c->yielded_us = esp_timer_get_time();
+    }
     return c->request && c->request->cancelled ? c->request->cancelled(c->request->ctx) : NULL;
 }
 
@@ -124,7 +135,7 @@ char *lan_script_run_request(const char *id, const cJSON *params, const lan_requ
     if (args && !cJSON_IsNull(args) && !args_text) return NULL;
 
     const int64_t start_us = esp_timer_get_time();
-    script_ctx_t c = {.request = request};
+    script_ctx_t c = {.request = request, .yielded_us = start_us};
     c.bounded.deadline_us = lan_request_deadline(request, start_us + (int64_t)timeout_ms(params) * 1000);
     c.bounded.cancelled = request ? request->cancelled : NULL;
     c.bounded.ctx = request ? request->ctx : NULL;
