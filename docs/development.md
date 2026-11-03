@@ -19,6 +19,7 @@ cJSON component), activate ESP-IDF, then:
 ```sh
 sh firmware/tools/codec_test/run.sh
 sh firmware/tools/lan_script_test/run.sh   # with OpenSSL 3 for the host's crypto
+sh firmware/tools/lan_tcp_test/run.sh
 sh firmware/tools/lan_discover_test/run.sh
 sh firmware/tools/lan_http_test/run.sh
 sh firmware/tools/lan_udp_test/run.sh

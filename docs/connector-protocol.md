@@ -277,7 +277,7 @@ A JavaScript function run on the board, for device protocols that take more than
 (Gree, miIO). The script and its API: [lan-script.md](lan-script.md). Advertised as `"lan_script"` in
 `capabilities.lan_gateway.methods`, with its limits:
 ```json
-"capabilities":{…,"lan_gateway":{…,"script":{"api":1,"max_source_bytes":32768,"max_result_bytes":32768,"max_timeout_ms":30000,"heap_bytes":262144}}}
+"capabilities":{…,"lan_gateway":{…,"script":{"api":2,"max_source_bytes":32768,"max_result_bytes":32768,"max_timeout_ms":30000,"heap_bytes":262144,"max_request_bytes":73728}}}
 ```
 
 **Request:**

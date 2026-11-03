@@ -24,6 +24,7 @@ Bytes are standard base64 strings everywhere, as in the Connector's methods.
 | `args` | The request's `args`, parsed (`{}` when there are none) |
 | `lan.http(params)` | `http_request` with these params (text mode only); returns its result. Throws its error |
 | `lan.udp(params)` | `udp_request`; returns `{responses: [{from, payload_b64}], timed_out}` |
+| `lan.tcp(params)` | One TCP exchange: `{host, port, send_b64?, close_write?, timeout_ms?, idle_ms?, max_bytes?}` → `{data_b64, closed, truncated, timed_out}`. Connects, sends, shuts the write side when `close_write`, then reads until the host closes, `max_bytes` (at most the text HTTP cap) arrive, `idle_ms` (default 2000) pass without data or `timeout_ms` (default 10000, at most 30000) run out. For IPP, raw printing on 9100 and other TCP protocols |
 | `lan.discover(params)` | `lan_discover` (on gateways that have it) |
 | `bytes.fromText(s)`, `bytes.toText(b)` | UTF-8; invalid bytes read as U+FFFD |
 | `bytes.fromHex(h)`, `bytes.toHex(b)` | Lower-case hex out |
@@ -44,11 +45,12 @@ The gateway advertises them in `capabilities.lan_gateway.script`:
 
 | Field | Meaning | T-Circle | DevKit | Computer |
 | --- | --- | ---: | ---: | ---: |
-| `api` | This API's version; a change to what a script sees raises it | 1 | 1 | 1 |
+| `api` | This API's version; a change to what a script sees raises it (2: `lan.tcp`) | 2 | 2 | 2 |
 | `max_source_bytes` | Longest source | 32768 | 8192 | 65536 |
 | `max_result_bytes` | Longest JSON of the result | 32768 | 4096 | 65536 |
 | `max_timeout_ms` | Longest `timeout_ms` | 30000 | 30000 | 30000 |
 | `heap_bytes` | The script's whole memory | 262144 | 40960 | 1048576 |
+| `max_request_bytes` | Longest `lan_script` request frame, source and args together | 73728 | 16384 | 1048576 |
 
 A script stops when its time runs out, when it runs out of memory, or when the user turns off device
 operations. All `console.log` lines together keep at most 4 KiB; later ones are dropped and set

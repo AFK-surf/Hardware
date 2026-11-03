@@ -11,7 +11,7 @@
 //   result {result, logs, logs_truncated?} or {error, logs, logs_truncated?}
 // Runs source as the body of `function (args)` in Micro QuickJS (components/lan_script). The script
 // reaches the network only through this gateway's own http_request, udp_request and lan_discover,
-// with their destinations and limits, and stops at timeout_ms, the request's deadline, or when access
+// with their destinations and limits, and tcp_request (lan_tcp.h), and stops at timeout_ms, the request's deadline, or when access
 // is turned off. A script that throws is still a `response` (with `error`): only bad params, a
 // refused request or no memory for the runtime are `error` frames.
 #define LAN_SCRIPT_TIMEOUT_DEFAULT_MS 10000

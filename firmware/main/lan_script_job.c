@@ -7,6 +7,7 @@
 #include "json_buf.h"
 #include "lan_http.h"
 #include "lan_script.h"
+#include "lan_tcp.h"
 #include "lan_udp.h"
 #include "memory_caps.h"
 #if CONFIG_COMMA_LAN_DISCOVER
@@ -72,6 +73,8 @@ static bool call(void *arg, const char *method, const char *params_text, size_t 
                     : lan_http_run_request("script", params, NULL, &c->bounded);
     } else if (strcmp(method, "udp_request") == 0) {
         frame = lan_udp_run_request("script", params, &c->bounded);
+    } else if (strcmp(method, "tcp_request") == 0) {
+        frame = lan_tcp_run_request("script", params, &c->bounded);
 #if CONFIG_COMMA_LAN_DISCOVER
     } else if (strcmp(method, "lan_discover") == 0) {
         frame = lan_discover_run_request("script", params, &c->bounded);
