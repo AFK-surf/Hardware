@@ -31,6 +31,9 @@ typedef struct {
     const lan_request_t *request;
     // The script's own deadline: the request's, or sooner by timeout_ms. Each LAN call ends by it too.
     lan_request_t bounded;
+    // The request's file, when it has one (lan.tcp send_file).
+    lan_tcp_file_t file;
+    bool has_file;
     unsigned calls;
     int64_t yielded_us;
 } script_ctx_t;
@@ -74,7 +77,7 @@ static bool call(void *arg, const char *method, const char *params_text, size_t 
     } else if (strcmp(method, "udp_request") == 0) {
         frame = lan_udp_run_request("script", params, &c->bounded);
     } else if (strcmp(method, "tcp_request") == 0) {
-        frame = lan_tcp_run_request("script", params, &c->bounded);
+        frame = lan_tcp_run_request("script", params, &c->bounded, c->has_file ? &c->file : NULL);
 #if CONFIG_COMMA_LAN_DISCOVER
     } else if (strcmp(method, "lan_discover") == 0) {
         frame = lan_discover_run_request("script", params, &c->bounded);
@@ -123,7 +126,7 @@ static const char *cancelled(void *arg)
     return c->request && c->request->cancelled ? c->request->cancelled(c->request->ctx) : NULL;
 }
 
-char *lan_script_run_request(const char *id, const cJSON *params, const lan_request_t *request)
+char *lan_script_run_request(const char *id, const cJSON *params, const lan_request_t *request, unsigned session)
 {
     const cJSON *source = cJSON_IsObject(params) ? cJSON_GetObjectItemCaseSensitive(params, "source") : NULL;
     if (!cJSON_IsString(source) || !source->valuestring[0]) return json_error_frame(id, "'source' is required");
@@ -138,7 +141,8 @@ char *lan_script_run_request(const char *id, const cJSON *params, const lan_requ
     if (args && !cJSON_IsNull(args) && !args_text) return NULL;
 
     const int64_t start_us = esp_timer_get_time();
-    script_ctx_t c = {.request = request, .yielded_us = start_us};
+    script_ctx_t c = {.request = request, .yielded_us = start_us, .file = {.id = id, .session = session}};
+    c.has_file = cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(params, "file"));
     c.bounded.deadline_us = lan_request_deadline(request, start_us + (int64_t)timeout_ms(params) * 1000);
     c.bounded.cancelled = request ? request->cancelled : NULL;
     c.bounded.ctx = request ? request->ctx : NULL;

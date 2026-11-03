@@ -277,7 +277,7 @@ A JavaScript function run on the board, for device protocols that take more than
 (Gree, miIO). The script and its API: [lan-script.md](lan-script.md). Advertised as `"lan_script"` in
 `capabilities.lan_gateway.methods`, with its limits:
 ```json
-"capabilities":{…,"lan_gateway":{…,"script":{"api":2,"max_source_bytes":32768,"max_result_bytes":32768,"max_timeout_ms":30000,"heap_bytes":262144,"max_request_bytes":73728}}}
+"capabilities":{…,"lan_gateway":{…,"script":{"api":3,"max_source_bytes":32768,"max_result_bytes":32768,"max_timeout_ms":30000,"heap_bytes":262144,"max_request_bytes":73728,"file_stream":{"window":32768,"frame_bytes":16384}}}}
 ```
 
 **Request:**
@@ -292,6 +292,14 @@ A JavaScript function run on the board, for device protocols that take more than
 throws, times out or runs out of memory still answers a `response`. An `error` frame means the request
 itself failed: no `source`, a source too long, the read-only refusal, no memory for the script's heap,
 or the LAN queue full.
+
+**The request's file:** a request with `"file": {"bytes": n}` carries a file the script sends with
+`lan.tcp` `send_file` (boards advertising `script.file_stream {window, frame_bytes}`). When the
+script gets there, the board asks for it with `{"id":<request id>,"type":"stream","stream":{"channel":"file_ack","seq":0}}`.
+The server sends `{"channel":"file","data":<base64>}` frames of at most `frame_bytes`, never more
+than `window` bytes beyond the last `file_ack`, and `{"channel":"file","eof":true}` after the last
+byte. The board writes each frame to the device and answers `file_ack` with the bytes written so
+far. A frame that would overrun the window ends the script's `lan.tcp` with an error.
 
 **Gates:** access (read-only → `error`, no network; turned read-only mid-run → the script stops with
 `error`); the script's LAN calls have the gates and limits of their methods. It runs on the LAN worker,

@@ -45,6 +45,11 @@ script with args, such as Cue's gree-ac/gree.js against a Gree unit on your netw
     python3 tools/fake_connector.py --allow-ops --script tools/lan_script_test/selftest.js --script-args '{"n":1}'
     python3 tools/fake_connector.py --script gree.js --script-args '{"host":"192.168.1.31","status":["Pow"]}'
 
+A file the script sends (lan.tcp send_file), streamed in file frames as the backend does:
+
+    python3 tools/fake_connector.py --script tools/lan_script_test/send_file.js --script-file job.pdf \\
+        --script-args '{"host":"<a host on the LAN>","port":9101}'
+
 Call test (one call): the camera tunnel stays open; start a call on the board within 120 s. The board
 must end the tunnel with "busy: voice call active", refuse redials during the call, and accept one
 once the call is over:
@@ -385,6 +390,7 @@ class Session:
         self.metadata = None
         self.metadata_event = asyncio.Event()
         self.pending = {}
+        self.file_streams = {}
         self.tunnels = {}
         self.last_device_heartbeat = None
         self.failures = 0
@@ -412,6 +418,8 @@ class Session:
                 self.on_chunk(frame, len(data))
             elif kind == "stream" and (frame.get("stream") or {}).get("channel") in ("tcp", "tcp_ack"):
                 await self.on_tunnel_frame(frame)
+            elif kind == "stream" and (frame.get("stream") or {}).get("channel") == "file_ack":
+                await self.on_file_ack(frame)
             elif kind in ("response", "error"):
                 p = self.pending.get(frame.get("id"))
                 if not p:
@@ -866,11 +874,43 @@ class Session:
         log(f"{'FAIL' if problems else 'PASS'} discovery" + (f": {problems}" if problems else ""))
         self.failures += bool(problems)
 
-    async def script(self, path, script_args):
+    async def on_file_ack(self, frame):
+        # As Salix's LanFileRelay: keep at most the advertised window beyond the last file_ack.
+        f = self.file_streams.get(frame.get("id"))
+        if not f:
+            return
+        f["acked"] = max(f["acked"], int(frame["stream"].get("seq", 0)))
+        while not f["eof"] and f["sent"] - f["acked"] < f["window"]:
+            if f["sent"] == len(f["data"]):
+                await self.ws.send_json({"id": frame["id"], "type": "stream", "stream": {"channel": "file", "eof": True}})
+                f["eof"] = True
+                break
+            n = min(f["frame"], f["window"] - (f["sent"] - f["acked"]), len(f["data"]) - f["sent"])
+            chunk = f["data"][f["sent"]:f["sent"] + n]
+            await self.ws.send_json({"id": frame["id"], "type": "stream",
+                                     "stream": {"channel": "file", "data": base64.b64encode(chunk).decode()}})
+            f["sent"] += n
+
+    async def script(self, path, script_args, file_path=None):
         with open(path) as f:
             source = f.read()
         log(f"→ lan_script {path} ({len(source)} B)")
-        p = await self.request("lan_script", {"source": source, "args": script_args, "timeout_ms": 30000}, 40)
+        params = {"source": source, "args": script_args, "timeout_ms": 30000}
+        req_id = "req_fake_" + secrets.token_hex(6)
+        if file_path:
+            limits = (self.metadata or {}).get("capabilities", {}).get("lan_gateway", {}).get("script", {}).get("file_stream")
+            if not limits:
+                log("SKIP script file: board does not advertise script.file_stream")
+                return
+            with open(file_path, "rb") as f:
+                data = f.read()
+            params["file"] = {"bytes": len(data)}
+            script_args["file_bytes"] = len(data)
+            self.file_streams[req_id] = {"data": data, "window": limits["window"], "frame": limits["frame_bytes"],
+                                         "sent": 0, "acked": 0, "eof": False}
+            log(f"  with file {file_path} ({len(data)} B)")
+        p = await self.request("lan_script", params, 40, req_id=req_id)
+        self.file_streams.pop(req_id, None)
         final = p.final or {}
         outcome = final.get("result") or {}
         log(f"  {round(time.monotonic() - p.sent_at, 2)} s: {json.dumps(outcome or final)[:2000]}")
@@ -926,7 +966,7 @@ class Session:
                 if "lan_script" not in methods:
                     log("SKIP scripts: board does not advertise lan_script")
                     break
-                await self.script(source, script_args)
+                await self.script(source, dict(script_args), args.script_file)
             if args.text_limit and args.serve and http_enabled:
                 await self.text_limit_request(base + "limit.txt")
             for url, expected, label in (targets if chunks_enabled else []):
@@ -1020,6 +1060,8 @@ async def main():
                     help="run this LAN script each round (repeatable)")
     ap.add_argument("--script-args", action="append", default=[], metavar="JSON",
                     help="args of the --script at the same position (default {})")
+    ap.add_argument("--script-file", metavar="FILE",
+                    help="stream this file to each --script (script.file_stream, lan.tcp send_file)")
     ap.add_argument("--tls-cert", help="PEM certificate for local WSS tests")
     ap.add_argument("--tls-key", help="PEM key for local WSS tests")
     args = ap.parse_args()

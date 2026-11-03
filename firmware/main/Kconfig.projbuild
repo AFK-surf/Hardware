@@ -158,6 +158,17 @@ config COMMA_LAN_SCRIPT_MAX_RESULT
     int "Maximum LAN script result JSON"
     range 1024 65536
     default 32768
+config COMMA_LAN_SCRIPT_FILE_WINDOW
+    int "LAN script file window (0: no file streaming)"
+    range 0 262144
+    default 32768
+    help
+        A script's file (lan.tcp send_file) arrives in frames; this many bytes may be in flight,
+        buffered in PSRAM where the board has it.
+config COMMA_LAN_SCRIPT_FILE_FRAME
+    int "LAN script file frame"
+    range 1024 32768
+    default 16384
 config COMMA_LAN_TUNNELS
     int "Concurrent TCP tunnels"
     range 0 2

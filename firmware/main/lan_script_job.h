@@ -27,4 +27,5 @@
 int lan_script_timeout_seconds(const cJSON *params);
 // Blocks for up to the script's timeout. Returns the whole reply frame for `id`, NUL-terminated; the
 // caller frees it. NULL only when out of memory.
-char *lan_script_run_request(const char *id, const cJSON *params, const lan_request_t *request);
+// session is the socket the request came in on: a script's file (params "file") comes over it.
+char *lan_script_run_request(const char *id, const cJSON *params, const lan_request_t *request, unsigned session);

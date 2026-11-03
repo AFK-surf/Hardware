@@ -24,7 +24,7 @@ Bytes are standard base64 strings everywhere, as in the Connector's methods.
 | `args` | The request's `args`, parsed (`{}` when there are none) |
 | `lan.http(params)` | `http_request` with these params (text mode only); returns its result. Throws its error |
 | `lan.udp(params)` | `udp_request`; returns `{responses: [{from, payload_b64}], timed_out}` |
-| `lan.tcp(params)` | One TCP exchange: `{host, port, send_b64?, close_write?, timeout_ms?, idle_ms?, max_bytes?}` → `{data_b64, closed, truncated, timed_out}`. Connects, sends, shuts the write side when `close_write`, then reads until the host closes, `max_bytes` (at most the text HTTP cap) arrive, `idle_ms` (default 2000) pass without data or `timeout_ms` (default 10000, at most 30000) run out. For IPP, raw printing on 9100 and other TCP protocols |
+| `lan.tcp(params)` | One TCP exchange: `{host, port, send_b64?, send_file?, close_write?, timeout_ms?, idle_ms?, max_bytes?}` → `{data_b64, closed, truncated, timed_out}`. Connects, sends `send_b64` and then, with `send_file: true`, the request's file (below), shuts the write side when `close_write`, then reads until the host closes, `max_bytes` (at most the text HTTP cap) arrive, `idle_ms` (default 2000) pass without data or `timeout_ms` (default 10000, at most 30000) run out. For IPP, raw printing on 9100 and other TCP protocols |
 | `lan.discover(params)` | `lan_discover` (on gateways that have it) |
 | `bytes.fromText(s)`, `bytes.toText(b)` | UTF-8; invalid bytes read as U+FFFD |
 | `bytes.fromHex(h)`, `bytes.toHex(b)` | Lower-case hex out |
@@ -39,13 +39,21 @@ Bytes are standard base64 strings everywhere, as in the Connector's methods.
 A LAN call goes to the same destinations and has the same limits as the method itself. Each call
 counts against the script's time.
 
+## The request's file
+
+A file too large for `args` (a print job, up to 4 MiB) comes with the request instead
+(`device.lan_script` `stream_file`): `args.file_bytes` is its size, and `lan.tcp` with
+`send_file: true` sends it after `send_b64`. The gateway pulls it from the backend while it writes
+it to the device, so it never holds more than the window. Gateways that can do this advertise
+`script.file_stream` (`window`, `frame_bytes`); the DevKit does not.
+
 ## Limits
 
 The gateway advertises them in `capabilities.lan_gateway.script`:
 
 | Field | Meaning | T-Circle | DevKit | Computer |
 | --- | --- | ---: | ---: | ---: |
-| `api` | This API's version; a change to what a script sees raises it (2: `lan.tcp`) | 2 | 2 | 2 |
+| `api` | This API's version; a change to what a script sees raises it (2: `lan.tcp`; 3: `send_file`) | 3 | 3 | 3 |
 | `max_source_bytes` | Longest source | 32768 | 8192 | 65536 |
 | `max_result_bytes` | Longest JSON of the result | 32768 | 4096 | 65536 |
 | `max_timeout_ms` | Longest `timeout_ms` | 30000 | 30000 | 30000 |

@@ -13,7 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LAN_SCRIPT_API 2
+#define LAN_SCRIPT_API 3
 
 typedef struct {
     // Runs one LAN method of this gateway ("http_request", "udp_request", "tcp_request" or "lan_discover") with params

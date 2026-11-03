@@ -12,6 +12,12 @@
 #include "lan_script.h"
 #include "lan_script_job.h"
 #endif
+#if CONFIG_COMMA_LAN_SCRIPT && CONFIG_COMMA_LAN_SCRIPT_FILE_WINDOW > 0
+#include "lan_file.h"
+#define LAN_FILE_STREAM 1
+#else
+#define LAN_FILE_STREAM 0
+#endif
 #include "lan_tunnel.h"
 #include "lan_udp.h"
 #include "memory_caps.h"
@@ -417,7 +423,11 @@ static void send_metadata(void)
 #endif
 #if CONFIG_COMMA_LAN_SCRIPT
                      ",\"script\":{\"api\":%d,\"max_source_bytes\":%d,\"max_result_bytes\":%d,"
-                     "\"max_timeout_ms\":%d,\"heap_bytes\":%d,\"max_request_bytes\":%d}"
+                     "\"max_timeout_ms\":%d,\"heap_bytes\":%d,\"max_request_bytes\":%d"
+#if LAN_FILE_STREAM
+                     ",\"file_stream\":{\"window\":%d,\"frame_bytes\":%d}"
+#endif
+                     "}"
 #endif
                      "},"
                      "\"component_versions\":{\"" CONFIG_COMMA_CLIENT_SOURCE "\":\"" COMMA_FIRMWARE_VERSION "\"}},"
@@ -433,6 +443,9 @@ static void send_metadata(void)
 #if CONFIG_COMMA_LAN_SCRIPT
                      LAN_SCRIPT_API, LAN_SCRIPT_MAX_SOURCE, LAN_SCRIPT_MAX_RESULT, LAN_SCRIPT_TIMEOUT_MAX_MS,
                      LAN_SCRIPT_HEAP_BYTES, RX_MAX,
+#if LAN_FILE_STREAM
+                     LAN_FILE_WINDOW, LAN_FILE_FRAME,
+#endif
 #endif
                      hostname, collected_at);
     cJSON_free(hostname);
@@ -805,7 +818,7 @@ static void lan_worker(void *arg)
             frame = lan_udp_run_request(job.id, job.params, &request);
 #if CONFIG_COMMA_LAN_SCRIPT
         } else if (job.method == LAN_SCRIPT) {
-            frame = lan_script_run_request(job.id, job.params, &request);
+            frame = lan_script_run_request(job.id, job.params, &request, job.session);
 #endif
         } else {
             frame = run_http_request(&job, &request);
@@ -887,7 +900,11 @@ static void handle_text(const char *json, int64_t received_us)
         }
     } else if (strcmp(kind, "stream") == 0) {
         const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
-        if (!cJSON_IsString(id) || !lan_tunnel_frame(id->valuestring, root, s_session)) {
+        bool taken = false;
+#if LAN_FILE_STREAM
+        taken = cJSON_IsString(id) && lan_file_frame(id->valuestring, root, s_session);
+#endif
+        if (!taken && (!cJSON_IsString(id) || !lan_tunnel_frame(id->valuestring, root, s_session))) {
             ESP_LOGI(TAG, "ignored stream frame");
         }
     } else if (strcmp(kind, "connected") == 0) {
@@ -1297,6 +1314,9 @@ void connector_start(void)
     s_events = xQueueCreate(16, sizeof(event_t));
     s_lan_jobs = xQueueCreate(LAN_QUEUE_LEN, sizeof(lan_job_t));
     s_client_mutex = xSemaphoreCreateMutex();
+#if LAN_FILE_STREAM
+    lan_file_init(send_on_session);
+#endif
     s_frame.buf = heap_caps_malloc(RX_MAX + 1, COMMA_BUFFER_CAPS);
     if (!s_events || !s_lan_jobs || !s_client_mutex || !s_frame.buf) {
         ESP_LOGE(TAG, "out of memory, Connector retries in 5 s");
