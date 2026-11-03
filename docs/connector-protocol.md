@@ -271,6 +271,32 @@ Or an `error` frame: `connect to 192.168.1.33:8800 refused: nothing is listening
 
 **Gates:** access (read-only → `error`, no network; turned read-only mid-tunnel → `eof` with the refusal), LAN destinations only (same rule as `http_request`), at most 2 tunnels. **Refused during a voice call** (`busy: voice call active`), and a call that starts ends every open tunnel with `eof` + that error. A tunnel with no data either way for 300 s (5 min) ends. A Connector socket that closes ends its tunnels silently.
 
+### `lan_script`
+
+A JavaScript function run on the board, for device protocols that take more than one request
+(Gree, miIO). The script and its API: [lan-script.md](lan-script.md). Advertised as `"lan_script"` in
+`capabilities.lan_gateway.methods`, with its limits:
+```json
+"capabilities":{…,"lan_gateway":{…,"script":{"api":1,"max_source_bytes":32768,"max_result_bytes":32768,"max_timeout_ms":30000,"heap_bytes":262144}}}
+```
+
+**Request:**
+```json
+{"id":"req_…","type":"request","method":"lan_script","params":{"source":"return lan.udp(args);","args":{"host":"192.168.1.31","port":7000,"payload_b64":"…"},"timeout_ms":10000}}
+```
+- `source` (required): at most `max_source_bytes`. `args`: any JSON value, `{}` when missing.
+  `timeout_ms`: 1000 to 30000, default 10000; it also bounds the job's time in the LAN queue.
+
+**Answer:** a `response` whose `result` is the script's outcome, `{"result": …, "logs": […]}` or
+`{"error": "…", "logs": […]}`, with `"logs_truncated": true` when lines were dropped. A script that
+throws, times out or runs out of memory still answers a `response`. An `error` frame means the request
+itself failed: no `source`, a source too long, the read-only refusal, no memory for the script's heap,
+or the LAN queue full.
+
+**Gates:** access (read-only → `error`, no network; turned read-only mid-run → the script stops with
+`error`); the script's LAN calls have the gates and limits of their methods. It runs on the LAN worker,
+one job at a time with the other LAN methods.
+
 ### `device_access`
 Params `{"allow_operations": bool}`. Anything else → `error` `allow_operations must be a boolean`.
 1. Save the new access state to NVS (`true` → `""`, `false` → `local_file_read`).
@@ -322,6 +348,7 @@ the 6/6 caps have not yet been retested in that state.
 | Chunk mode during a voice call | Refused: `error` `busy: voice call active`, before any network use. A call that starts mid-transfer ends it with the same `error`. Retry after the call (on the board, a transfer alongside a call froze its Wi-Fi) |
 | Chunk mode, no progress | A frame that can't be written for 10 s ends the transfer with an `error` frame |
 | Server wait on `lan_tcp_dial` | 20 s for the answer |
+| Server wait on `lan_script` | `timeout_ms` + 5 s |
 | T-Circle `lan_tcp_dial` | 2 tunnels; `window` 128 KiB, `max_frame` 8 KiB toward the server; accepts 32 KiB frames from it; dial ≤ 15 s; 300 s idle; LAN socket receive window cut to 16 KiB |
 
 ## 7. Reconnect

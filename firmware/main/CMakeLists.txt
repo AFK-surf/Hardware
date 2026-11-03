@@ -31,9 +31,12 @@ endif()
 if(CONFIG_COMMA_LAN_TUNNELS GREATER 0)
     list(APPEND srcs "lan_tunnel.c")
 endif()
+if(CONFIG_COMMA_LAN_SCRIPT)
+    list(APPEND srcs "lan_script_job.c")
+endif()
 set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
-         tcp_transport http_parser lwip)
+         tcp_transport http_parser lwip lan_script)
 # Requirements are collected before Kconfig is available, so they follow the target and the board
 # name from tools/board.sh. The T-Circle and the StickS3 have voice and display; the Waveshare AMOLED
 # display only (no speaker); the classic ESP32 target neither.

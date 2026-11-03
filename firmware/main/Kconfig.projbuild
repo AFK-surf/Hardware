@@ -138,6 +138,26 @@ config COMMA_LAN_UDP_MAX_ANSWER
     int "Maximum UDP answer"
     range 512 4096
     default 4096
+config COMMA_LAN_SCRIPT
+    bool "LAN scripts (lan_script)"
+    default y
+    help
+        Runs JavaScript sent by the backend on Micro QuickJS, with this gateway's own HTTP, UDP and
+        discovery methods (docs/lan-script.md).
+config COMMA_LAN_SCRIPT_HEAP_BYTES
+    int "LAN script heap"
+    range 16384 1048576
+    default 262144
+    help
+        The script's whole memory, allocated for each run (PSRAM where the board has it).
+config COMMA_LAN_SCRIPT_MAX_SOURCE
+    int "Maximum LAN script source"
+    range 1024 65536
+    default 32768
+config COMMA_LAN_SCRIPT_MAX_RESULT
+    int "Maximum LAN script result JSON"
+    range 1024 65536
+    default 32768
 config COMMA_LAN_TUNNELS
     int "Concurrent TCP tunnels"
     range 0 2

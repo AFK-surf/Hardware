@@ -11,7 +11,8 @@ network while you are away. Boards with a mic and a speaker are also a voice ter
 tap again to hang up.
 
 The board knows no device protocols. It forwards HTTP, UDP and TCP from the backend to addresses on
-its own network, and only after you allow device operations in the app.
+its own network, and runs the backend's [LAN scripts](docs/lan-script.md) for protocols that take
+several requests, only after you allow device operations in the app.
 
 ## Boards
 
@@ -63,7 +64,7 @@ development tools only.
 ## Documentation
 
 - [Security](docs/security.md) — pairing, stored credentials, what the gateway may reach
-- [Connector protocol](docs/connector-protocol.md) and [Bluetooth setup](docs/ble-provisioning.md)
+- [Connector protocol](docs/connector-protocol.md), [LAN scripts](docs/lan-script.md) and [Bluetooth setup](docs/ble-provisioning.md)
 - [Development](docs/development.md) — host tests, tools, repository layout, adding a board
 
 ## License

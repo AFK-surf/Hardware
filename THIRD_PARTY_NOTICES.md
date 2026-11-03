@@ -11,6 +11,7 @@ third-party material below. Each keeps its own license.
 | StickS3 audio, panel and power chip setup | `firmware/boards/m5stack_sticks3/board_audio.c`, `panel.c`, `pmic.c` | Meta muse-gadget-sdk, `board_m5stack_sticks3.c`, `muse_audio.c` | Apache-2.0, © Meta Platforms, Inc. and affiliates. The original header is kept |
 | Memory settings for boards without PSRAM, StickS3 PSRAM modes | `devices/sdkconfig.esp32-devkit`, `devices/sdkconfig.m5stack-sticks3` | Meta muse-gadget-sdk sdkconfig overlays | Apache-2.0, © Meta Platforms, Inc. and affiliates |
 | GC9D01 LCD driver (vendored, version 2.0.0; `esp_lcd_gc9d01.c` modified for ESP-IDF 6, as its header says) | `firmware/components/esp_lcd_gc9d01/` | Espressif esp-iot-solution | Apache-2.0, © Espressif Systems (Shanghai) Co., Ltd. (`license.txt` in that folder) |
+| Micro QuickJS JavaScript engine (vendored, bellard/mquickjs 6d4d7eb); `lan_script_stdlib.c` is its `mqjs_stdlib.c` with other globals | `firmware/components/lan_script/mquickjs/`, `firmware/components/lan_script/lan_script_stdlib.c` | https://github.com/bellard/mquickjs | MIT, © 2017-2025 Fabrice Bellard and Charlie Gordon (`LICENSE` in that folder) |
 | CO5300 init command table and column offset | `firmware/boards/waveshare_amoled_1_32/panel.c` | Waveshare BSP `esp32_s3_touch_amoled_1_32` | Apache-2.0, © Waveshare |
 
 ## Hardware facts
