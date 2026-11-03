@@ -39,6 +39,12 @@ Plus an RTSP OPTIONS to a camera on your network (expects `RTSP/1.0 200 OK`):
 
     python3 tools/fake_connector.py --tunnel --rtsp 192.168.1.33:554
 
+LAN scripts (lan_script, docs/lan-script.md): the runtime's selftest (must return "ok"), then a
+script with args, such as Cue's gree-ac/gree.js against a Gree unit on your network:
+
+    python3 tools/fake_connector.py --allow-ops --script tools/lan_script_test/selftest.js --script-args '{"n":1}'
+    python3 tools/fake_connector.py --script gree.js --script-args '{"host":"192.168.1.31","status":["Pow"]}'
+
 Call test (one call): the camera tunnel stays open; start a call on the board within 120 s. The board
 must end the tunnel with "busy: voice call active", refuse redials during the call, and accept one
 once the call is over:
@@ -860,6 +866,20 @@ class Session:
         log(f"{'FAIL' if problems else 'PASS'} discovery" + (f": {problems}" if problems else ""))
         self.failures += bool(problems)
 
+    async def script(self, path, script_args):
+        with open(path) as f:
+            source = f.read()
+        log(f"→ lan_script {path} ({len(source)} B)")
+        p = await self.request("lan_script", {"source": source, "args": script_args, "timeout_ms": 30000}, 40)
+        final = p.final or {}
+        outcome = final.get("result") or {}
+        log(f"  {round(time.monotonic() - p.sent_at, 2)} s: {json.dumps(outcome or final)[:2000]}")
+        failed = final.get("type") != "response" or "error" in outcome or p.problems
+        if path.endswith("selftest.js") and outcome.get("result") != "ok":
+            failed = True
+        log(f"{'FAIL' if failed else 'PASS'} script {path}")
+        self.failures += bool(failed)
+
     async def plan(self):
         args = self.args
         try:
@@ -902,6 +922,11 @@ class Session:
                     await self.discover(gateway)
                 else:
                     log("SKIP discovery: board does not advertise lan_discover")
+            for source, script_args in args.scripts:
+                if "lan_script" not in methods:
+                    log("SKIP scripts: board does not advertise lan_script")
+                    break
+                await self.script(source, script_args)
             if args.text_limit and args.serve and http_enabled:
                 await self.text_limit_request(base + "limit.txt")
             for url, expected, label in (targets if chunks_enabled else []):
@@ -991,11 +1016,19 @@ async def main():
                     help="discover with Gree/miIO hellos, or probes from a JSON array; honors metadata limits")
     ap.add_argument("--discover-timeout", type=int, default=3000, metavar="MS", help="discovery window (1000..8000)")
     ap.add_argument("--text-limit", action="store_true", help="test text at advertised limit (--make-files/--serve)")
+    ap.add_argument("--script", action="append", default=[], metavar="JS_FILE",
+                    help="run this LAN script each round (repeatable)")
+    ap.add_argument("--script-args", action="append", default=[], metavar="JSON",
+                    help="args of the --script at the same position (default {})")
     ap.add_argument("--tls-cert", help="PEM certificate for local WSS tests")
     ap.add_argument("--tls-key", help="PEM key for local WSS tests")
     args = ap.parse_args()
     if not 1000 <= args.discover_timeout <= 8000:
         ap.error("--discover-timeout must be 1000..8000")
+    if len(args.script_args) > len(args.script):
+        ap.error("--script-args needs a --script before it")
+    args.scripts = [(path, json.loads(args.script_args[i]) if i < len(args.script_args) else {})
+                    for i, path in enumerate(args.script)]
     args.probe_definitions = None
     if args.discover_probes:
         args.discover = True

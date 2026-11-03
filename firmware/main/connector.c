@@ -8,6 +8,10 @@
 #include "json_buf.h"
 #include "lan_discover.h"
 #include "lan_http.h"
+#if CONFIG_COMMA_LAN_SCRIPT
+#include "lan_script.h"
+#include "lan_script_job.h"
+#endif
 #include "lan_tunnel.h"
 #include "lan_udp.h"
 #include "memory_caps.h"
@@ -59,7 +63,7 @@
 // Below the voice tasks (websocket 5, sender 6, uplink 5): the Connector only ever waits.
 #define CONNECTOR_TASK_PRIO 2
 #define CONNECTOR_WS_PRIO 3
-// LAN requests (http_request, udp_request, lan_discover) run one at a time on their own task so the Connector
+// LAN requests (http_request, udp_request, lan_discover, lan_script) run one at a time on their own task so the Connector
 // task keeps answering heartbeats. A few more wait in line; past that the device answers "busy".
 #define LAN_WORKER_PRIO 2
 #define LAN_WORKER_STACK 8192
@@ -118,6 +122,7 @@ typedef enum {
     LAN_HTTP_REQUEST,
     LAN_UDP_REQUEST,
     LAN_DISCOVER,
+    LAN_SCRIPT,
 } lan_method_t;
 
 typedef struct {
@@ -386,7 +391,7 @@ static void send_metadata(void)
         return;
     }
     // Connector task only, so static keeps it off the task stack.
-    static char json[1280]; // includes probe limits and a maximally JSON-escaped device name
+    static char json[1408]; // includes probe and script limits and a maximally JSON-escaped device name
     int n = snprintf(json, sizeof(json),
                      "{\"type\":\"metadata\","
                      "\"capabilities\":{\"scope\":\"%s\",\"device_access\":true,\"execution_boundary\":\"lan-gateway\","
@@ -400,12 +405,19 @@ static void send_metadata(void)
 #if CONFIG_COMMA_LAN_TUNNELS > 0
                      ",\"lan_tcp_dial\""
 #endif
+#if CONFIG_COMMA_LAN_SCRIPT
+                     ",\"lan_script\""
+#endif
                      "],\"max_bytes\":%d,"
                      "\"max_timeout_seconds\":%d,"
                      "\"response_chunks\":{\"max_total_bytes\":%d,\"chunk_bytes\":%d}"
 #if CONFIG_COMMA_LAN_DISCOVER && CONFIG_COMMA_LAN_DISCOVER_PROBES > 0
                      ",\"discover_probes\":{\"max_probes\":%d,\"max_payload_bytes\":%d,"
                      "\"max_answer_bytes\":%d,\"max_total_answer_bytes\":%d}"
+#endif
+#if CONFIG_COMMA_LAN_SCRIPT
+                     ",\"script\":{\"api\":%d,\"max_source_bytes\":%d,\"max_result_bytes\":%d,"
+                     "\"max_timeout_ms\":%d,\"heap_bytes\":%d}"
 #endif
                      "},"
                      "\"component_versions\":{\"" CONFIG_COMMA_CLIENT_SOURCE "\":\"" COMMA_FIRMWARE_VERSION "\"}},"
@@ -417,6 +429,10 @@ static void send_metadata(void)
 #if CONFIG_COMMA_LAN_DISCOVER && CONFIG_COMMA_LAN_DISCOVER_PROBES > 0
                      CONFIG_COMMA_LAN_DISCOVER_PROBES, CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD,
                      CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER, CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET,
+#endif
+#if CONFIG_COMMA_LAN_SCRIPT
+                     LAN_SCRIPT_API, LAN_SCRIPT_MAX_SOURCE, LAN_SCRIPT_MAX_RESULT, LAN_SCRIPT_TIMEOUT_MAX_MS,
+                     LAN_SCRIPT_HEAP_BYTES,
 #endif
                      hostname, collected_at);
     cJSON_free(hostname);
@@ -484,13 +500,17 @@ static void handle_device_access(const char *id, const cJSON *params)
 
 static const char *lan_method_name(lan_method_t method)
 {
-    return method == LAN_DISCOVER ? "lan_discover" : method == LAN_UDP_REQUEST ? "udp_request" : "http_request";
+    return method == LAN_DISCOVER      ? "lan_discover"
+           : method == LAN_UDP_REQUEST ? "udp_request"
+           : method == LAN_SCRIPT      ? "lan_script"
+                                       : "http_request";
 }
 
 static const char *read_only_refusal(lan_method_t method)
 {
     return method == LAN_DISCOVER      ? READ_ONLY_REFUSAL("lan_discover")
            : method == LAN_UDP_REQUEST ? READ_ONLY_REFUSAL("udp_request")
+           : method == LAN_SCRIPT      ? READ_ONLY_REFUSAL("lan_script")
                                        : READ_ONLY_REFUSAL("http_request");
 }
 
@@ -518,7 +538,11 @@ static void handle_lan_request(const char *id, lan_method_t method, cJSON *root,
     lan_job_t job = {.session = s_session, .generation = s_credentials_generation, .method = method};
     strlcpy(job.id, id, sizeof(job.id));
     job.params = cJSON_DetachItemFromObjectCaseSensitive(root, "params");
-    const int seconds = method == LAN_HTTP_REQUEST ? lan_http_timeout_seconds(job.params) : 30;
+    const int seconds = method == LAN_HTTP_REQUEST ? lan_http_timeout_seconds(job.params)
+#if CONFIG_COMMA_LAN_SCRIPT
+                        : method == LAN_SCRIPT ? lan_script_timeout_seconds(job.params)
+#endif
+                                               : 30;
     job.deadline_us = received_us + (int64_t)seconds * 1000000;
     if (xQueueSend(s_lan_jobs, &job, 0) != pdTRUE) {
         comma_heap_log("lan_result_ready");
@@ -779,6 +803,10 @@ static void lan_worker(void *arg)
 #endif
         } else if (job.method == LAN_UDP_REQUEST) {
             frame = lan_udp_run_request(job.id, job.params, &request);
+#if CONFIG_COMMA_LAN_SCRIPT
+        } else if (job.method == LAN_SCRIPT) {
+            frame = lan_script_run_request(job.id, job.params, &request);
+#endif
         } else {
             frame = run_http_request(&job, &request);
         }
@@ -809,6 +837,10 @@ static void handle_request(const char *id, const char *method, cJSON *root, int6
 #if CONFIG_COMMA_LAN_DISCOVER
     } else if (strcmp(method, "lan_discover") == 0) {
         handle_lan_request(id, LAN_DISCOVER, root, received_us);
+#endif
+#if CONFIG_COMMA_LAN_SCRIPT
+    } else if (strcmp(method, "lan_script") == 0) {
+        handle_lan_request(id, LAN_SCRIPT, root, received_us);
 #endif
 #if CONFIG_COMMA_LAN_TUNNELS > 0
     } else if (strcmp(method, "lan_tcp_dial") == 0) {

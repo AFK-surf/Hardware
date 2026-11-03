@@ -90,3 +90,10 @@ CONFIG_COMMA_LAN_DISCOVER_PROBES=4
 CONFIG_COMMA_LAN_DISCOVER_PROBE_PAYLOAD=256
 CONFIG_COMMA_LAN_DISCOVER_PROBE_ANSWER=1024
 CONFIG_COMMA_LAN_DISCOVER_PROBE_BUDGET=4096
+
+# LAN scripts: not yet measured on this board. The heap is internal RAM, taken for each run and
+# given back after it; a run that cannot get it answers an error frame. The selftest needs about
+# 28 KiB on a 64-bit host, less here.
+CONFIG_COMMA_LAN_SCRIPT_HEAP_BYTES=40960
+CONFIG_COMMA_LAN_SCRIPT_MAX_SOURCE=8192
+CONFIG_COMMA_LAN_SCRIPT_MAX_RESULT=4096
