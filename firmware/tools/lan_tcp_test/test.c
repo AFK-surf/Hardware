@@ -91,7 +91,7 @@ static cJSON *run(const char *params_json, peer_mode_t mode, bool listen_on)
         g_listener = -1;
     }
     cJSON *params = cJSON_Parse(params_json);
-    char *frame = lan_tcp_run_request("t", params, NULL);
+    char *frame = lan_tcp_run_request("t", params, NULL, NULL);
     cJSON_Delete(params);
     if (listen_on) pthread_join(t, NULL);
     if (g_listener >= 0) close(g_listener);

@@ -6,6 +6,9 @@
 #include "b64.h"
 #include "json_buf.h"
 #include "lan_dest.h"
+#if CONFIG_COMMA_LAN_SCRIPT_FILE_WINDOW > 0
+#include "lan_file.h"
+#endif
 #include "memory_caps.h"
 
 #include <errno.h>
@@ -55,7 +58,30 @@ static int wait_fd(int s, bool write, int64_t deadline_us, const lan_request_t *
     return r < 0 ? -1 : r > 0 ? 1 : 2;  // 2: this slice passed, look again
 }
 
-char *lan_tcp_run_request(const char *id, const cJSON *params, const lan_request_t *request)
+// The whole of buf to s, waiting while the socket is full. False with err set when it cannot.
+static bool send_all(int s, const uint8_t *buf, size_t len, int64_t deadline_us, const lan_request_t *request,
+                     const char *dest, char *err, size_t err_size)
+{
+    const char *why;
+    for (size_t sent = 0; sent < len;) {
+        const int r = wait_fd(s, true, deadline_us, request, &why);
+        if (r == 0 || r < 0) {
+            snprintf(err, err_size, "%s", why ? why : r == 0 ? "sending timed out" : "sending failed");
+            return false;
+        }
+        if (r != 1) continue;
+        const int n = send(s, buf + sent, len - sent, 0);
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            snprintf(err, err_size, "sending to %s failed (errno %d)", dest, errno);
+            return false;
+        }
+        if (n > 0) sent += (size_t)n;
+    }
+    return true;
+}
+
+char *lan_tcp_run_request(const char *id, const cJSON *params, const lan_request_t *request,
+                          const lan_tcp_file_t *file)
 {
     const char *why = lan_request_check(request);
     if (why) return json_error_frame(id, why);
@@ -74,6 +100,12 @@ char *lan_tcp_run_request(const char *id, const cJSON *params, const lan_request
         !int_param(params, "max_bytes", LAN_TCP_MAX_BYTES, 0, LAN_TCP_MAX_BYTES, &max_bytes))
         return json_error_frame(id, "'timeout_ms', 'idle_ms' and 'max_bytes' must be whole numbers");
     const cJSON *close_write = cJSON_GetObjectItemCaseSensitive(params, "close_write");
+    const bool send_file = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(params, "send_file"));
+#if CONFIG_COMMA_LAN_SCRIPT_FILE_WINDOW > 0
+    if (send_file && !file) return json_error_frame(id, "send_file needs the request's file (device.lan_script stream_file)");
+#else
+    if (send_file) return json_error_frame(id, "this board cannot stream a file to a script");
+#endif
     const cJSON *send_b64 = cJSON_GetObjectItemCaseSensitive(params, "send_b64");
     if (send_b64 && !cJSON_IsNull(send_b64) && !cJSON_IsString(send_b64))
         return json_error_frame(id, "'send_b64' must be standard base64");
@@ -102,6 +134,7 @@ char *lan_tcp_run_request(const char *id, const cJSON *params, const lan_request
     char dest[24];
     snprintf(dest, sizeof(dest), "%u.%u.%u.%u:%d", b[0], b[1], b[2], b[3], port->valueint);
 
+    size_t file_bytes = 0;
     const int64_t start_us = esp_timer_get_time();
     const int64_t deadline_us = lan_request_deadline(request, start_us + (int64_t)timeout_ms * 1000);
     size_t got = 0;
@@ -140,20 +173,28 @@ char *lan_tcp_run_request(const char *id, const cJSON *params, const lan_request
                  dest);
         goto done;
     }
-    for (size_t sent = 0; sent < (size_t)out_len;) {
-        const int r = wait_fd(s, true, deadline_us, request, &why);
-        if (r == 0 || r < 0) {
-            snprintf(err, sizeof(err), "%s", why ? why : r == 0 ? "sending timed out" : "sending failed");
+    if (!send_all(s, out, (size_t)out_len, deadline_us, request, dest, err, sizeof(err))) goto done;
+#if CONFIG_COMMA_LAN_SCRIPT_FILE_WINDOW > 0
+    if (send_file) {
+        if (!lan_file_open(file->id, file->session)) {
+            snprintf(err, sizeof(err), "no memory to receive the file");
             goto done;
         }
-        if (r != 1) continue;
-        const int n = send(s, out + sent, (size_t)out_len - sent, 0);
-        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            snprintf(err, sizeof(err), "sending to %s failed (errno %d)", dest, errno);
-            goto done;
+        size_t written = 0;
+        for (;;) {
+            const long n = lan_file_read(in, max_bytes > 0 ? (size_t)max_bytes : 1, request, err, sizeof(err));
+            if (n == 0) break;
+            if (n < 0 || !send_all(s, in, (size_t)n, deadline_us, request, dest, err, sizeof(err))) {
+                lan_file_close();
+                goto done;
+            }
+            written += (size_t)n;
+            lan_file_ack(written);
         }
-        if (n > 0) sent += (size_t)n;
+        lan_file_close();
+        file_bytes = written;
     }
+#endif
     if (cJSON_IsTrue(close_write)) shutdown(s, SHUT_WR);
     int64_t last_us = esp_timer_get_time();
     while (got < (size_t)max_bytes) {
@@ -192,7 +233,8 @@ char *lan_tcp_run_request(const char *id, const cJSON *params, const lan_request
 done:
     close(s);
     free(out);
-    ESP_LOGI(TAG, "%s %s: sent %ld B, got %u B%s%s%s, %lld ms", id, dest, out_len, (unsigned)got,
+    ESP_LOGI(TAG, "%s %s: sent %ld B + %u B of file, got %u B%s%s%s, %lld ms", id, dest, out_len,
+             (unsigned)file_bytes, (unsigned)got,
              closed ? ", closed" : "", truncated ? ", truncated" : "", timed_out ? ", timed out" : "",
              (long long)((esp_timer_get_time() - start_us) / 1000));
     if (err[0]) {

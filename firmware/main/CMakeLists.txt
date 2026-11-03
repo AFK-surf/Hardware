@@ -33,6 +33,9 @@ if(CONFIG_COMMA_LAN_TUNNELS GREATER 0)
 endif()
 if(CONFIG_COMMA_LAN_SCRIPT)
     list(APPEND srcs "lan_script_job.c" "lan_tcp.c")
+    if(CONFIG_COMMA_LAN_SCRIPT_FILE_WINDOW GREATER 0)
+        list(APPEND srcs "lan_file.c")
+    endif()
 endif()
 set(reqs esp_driver_gpio esp_timer heap freertos esp_wifi esp_event esp_netif
          nvs_flash bt esp_app_format esp_websocket_client esp-tls mbedtls cjson
