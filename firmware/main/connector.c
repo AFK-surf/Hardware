@@ -417,7 +417,7 @@ static void send_metadata(void)
 #endif
 #if CONFIG_COMMA_LAN_SCRIPT
                      ",\"script\":{\"api\":%d,\"max_source_bytes\":%d,\"max_result_bytes\":%d,"
-                     "\"max_timeout_ms\":%d,\"heap_bytes\":%d}"
+                     "\"max_timeout_ms\":%d,\"heap_bytes\":%d,\"max_request_bytes\":%d}"
 #endif
                      "},"
                      "\"component_versions\":{\"" CONFIG_COMMA_CLIENT_SOURCE "\":\"" COMMA_FIRMWARE_VERSION "\"}},"
@@ -432,7 +432,7 @@ static void send_metadata(void)
 #endif
 #if CONFIG_COMMA_LAN_SCRIPT
                      LAN_SCRIPT_API, LAN_SCRIPT_MAX_SOURCE, LAN_SCRIPT_MAX_RESULT, LAN_SCRIPT_TIMEOUT_MAX_MS,
-                     LAN_SCRIPT_HEAP_BYTES,
+                     LAN_SCRIPT_HEAP_BYTES, RX_MAX,
 #endif
                      hostname, collected_at);
     cJSON_free(hostname);

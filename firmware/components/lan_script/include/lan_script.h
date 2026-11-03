@@ -13,10 +13,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LAN_SCRIPT_API 1
+#define LAN_SCRIPT_API 2
 
 typedef struct {
-    // Runs one LAN method of this gateway ("http_request", "udp_request" or "lan_discover") with params
+    // Runs one LAN method of this gateway ("http_request", "udp_request", "tcp_request" or "lan_discover") with params
     // as JSON text, as the Connector would. True: *out is the result as JSON text. False: *out is the
     // error message. *out is malloc'd and freed by the caller; NULL when out of memory.
     bool (*call)(void *ctx, const char *method, const char *params, size_t params_len, char **out);
